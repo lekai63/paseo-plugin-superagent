@@ -1,0 +1,313 @@
+import assert from "node:assert/strict";
+import { setImmediate } from "node:timers/promises";
+import test from "node:test";
+import { SuperagentEngine } from "../server/engine.ts";
+import { FeishuSource } from "../server/feishu.ts";
+import { emptyState } from "../shared/model.ts";
+import { SETTINGS_DEFAULTS } from "../shared/settings.ts";
+
+const oldTime = "2020-01-01T00:00:00.000Z";
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+async function until(predicate) {
+  for (let i = 0; i < 50; i++) {
+    if (predicate()) return;
+    await setImmediate();
+  }
+  assert.fail("expected lifecycle transition did not occur");
+}
+
+function fixture(t, status = "running", subscribed = true) {
+  const state = emptyState();
+  Object.assign(state.kv, {
+    routerAgentId: "router", routerProvider: "codex/test", workerProvider: "codex/test",
+  });
+  state.threads.push({
+    id: "thread", key: "manual:test", title: "test", state: "active", summary: null,
+    createdAt: oldTime, updatedAt: oldTime,
+  });
+  const hasWorker = !["pending", "launching"].includes(status);
+  state.tickets.push({
+    id: "ticket", threadId: "thread", title: "test", mandate: "do the work", status,
+    workerAgentId: hasWorker ? "worker" : null, workspaceId: hasWorker ? "workspace" : null,
+    startedAt: oldTime, attempts: status === "pending" ? 0 : 1, subscribed,
+    report: null, lastError: null, createdAt: oldTime, updatedAt: oldTime,
+  });
+  const calls = { sends: [], watches: [], archives: [], workspaceArchives: [], creates: 0, evals: [] };
+  const controls = {
+    send: async () => {},
+    createAgent: async () => ({ id: "new-worker" }),
+    timeline: async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: "work completed" } }] }),
+    verdict: { decision: "reply", reply: "done" },
+  };
+  const finishes = [];
+  const handles = new Map();
+  const ref = (id) => {
+    if (!handles.has(id)) handles.set(id, {
+      id,
+      refresh: async () => ({ agent: { status: id === "router" ? "idle" : "running", archivedAt: null } }),
+      send: async (text, options) => {
+        calls.sends.push({ id, text, options });
+        await controls.send(text, options);
+      },
+      run: async () => ({ lastMessage: JSON.stringify(controls.verdict) }),
+      waitForFinish: () => {
+        calls.watches.push(id);
+        const finish = deferred();
+        finishes.push(finish);
+        return finish.promise;
+      },
+      timeline: { refetch: () => controls.timeline() },
+      archive: async () => { calls.archives.push(id); },
+    });
+    return handles.get(id);
+  };
+  const paseo = {
+    agents: { ref },
+    workspaces: {
+      create: async () => {
+        calls.creates++;
+        return {
+          id: "new-workspace",
+          agents: { create: () => controls.createAgent() },
+          archive: async () => { calls.workspaceArchives.push("new-workspace"); },
+        };
+      },
+      ref: (id) => ({ archive: async () => { calls.workspaceArchives.push(id); } }),
+    },
+  };
+  const store = {
+    ready: Promise.resolve(), get: () => state,
+    update: async (mutate) => { mutate(state); return state; }, flush: async () => {},
+  };
+  const values = {
+    ...SETTINGS_DEFAULTS, workingDir: "/mock/repo", routerProvider: "codex/test", workerProvider: "codex/test",
+  };
+  const engine = new SuperagentEngine(store, {
+    subscribe: () => {}, read: async () => ({ status: "ready", values }),
+  });
+  engine.paseo = paseo;
+  engine.primed = true;
+  engine.scheduleEval = (id) => { calls.evals.push(id); };
+  t.after(() => engine.stop());
+  return { engine, state, calls, controls, finishes, ref, ticket: state.tickets[0] };
+}
+
+function pendingTrigger(state) {
+  state.triggers.push({
+    id: "trigger", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
+    text: "stop", status: "pending", context: false, receivedAt: oldTime,
+  });
+}
+
+test("a waiting worker resumes tracking and produces a report for its follow-up", async (t) => {
+  const f = fixture(t, "waiting");
+  const origin = { channel: "dingtalk", chatId: "chat", senderId: "user", replyRef: "latest-webhook" };
+  const result = await f.engine.dispatch({ threadId: "thread", task: "follow-up", origin });
+  assert.equal(result.directDelivered, true);
+  assert.equal(f.ticket.status, "running");
+  assert.ok(Date.parse(f.ticket.startedAt) > Date.parse(oldTime));
+  assert.deepEqual(f.calls.watches, ["worker"]);
+  f.finishes[0].resolve({ status: "idle" });
+  await until(() => f.state.triggers.some((trigger) => trigger.kind === "report"));
+  assert.equal(f.ticket.status, "waiting");
+  assert.equal(f.ticket.report, "work completed");
+  assert.deepEqual(f.state.triggers.find((trigger) => trigger.kind === "report").origin, origin);
+});
+
+test("steering an already running worker keeps its deadline and existing watcher", async (t) => {
+  const f = fixture(t);
+  f.engine.watchTicket("ticket");
+  const result = await f.engine.dispatch({ threadId: "thread", task: "more context" });
+  assert.equal(result.directDelivered, true);
+  assert.equal(f.ticket.startedAt, oldTime);
+  assert.deepEqual(f.calls.watches, ["worker"]);
+  assert.equal(f.calls.sends[0].options.activeTurnBehavior, "steer");
+});
+
+test("a failed direct send returns false and the Router evaluates the original message", async (t) => {
+  const f = fixture(t, "waiting");
+  f.controls.send = async () => { throw new Error("offline"); };
+  const result = await f.engine.dispatch({ threadId: "thread", task: "preserve this message" });
+  assert.equal(result.directDelivered, false);
+  assert.equal(f.state.triggers[0].status, "pending");
+  assert.match(f.state.triggers[0].note, /offline/);
+  assert.equal(f.ticket.status, "waiting");
+  assert.deepEqual(f.calls.evals, ["thread"]);
+  await f.engine.runEval("thread");
+  assert.equal(f.state.triggers[0].status, "evaluated");
+  assert.equal(f.state.triggers[0].text, "preserve this message");
+  assert.equal(f.state.decisions[0].outcome, "reply");
+});
+
+test("a subscribed ticket without a worker falls back to Router evaluation", async (t) => {
+  const f = fixture(t, "waiting");
+  f.ticket.workerAgentId = null;
+  const result = await f.engine.dispatch({ threadId: "thread", task: "follow-up" });
+  assert.equal(result.directDelivered, false);
+  assert.equal(f.state.triggers[0].status, "pending");
+  assert.deepEqual(f.calls.evals, ["thread"]);
+});
+
+test("canceling during launch retires the late worker and workspace", async (t) => {
+  const f = fixture(t, "pending");
+  const created = deferred();
+  f.controls.createAgent = () => created.promise;
+  const launching = f.engine.startTicket("ticket");
+  await until(() => f.calls.creates === 1);
+  await f.engine.cancelTicket("ticket");
+  created.resolve({ id: "late-worker" });
+  await launching;
+  assert.equal(f.ticket.status, "canceled");
+  assert.deepEqual(f.calls.archives, ["late-worker"]);
+  assert.deepEqual(f.calls.workspaceArchives, ["new-workspace"]);
+  assert.deepEqual(f.calls.watches, []);
+});
+
+test("a canceled launch that fails does not retry or enqueue a failure report", async (t) => {
+  const f = fixture(t, "pending");
+  const created = deferred();
+  f.controls.createAgent = () => created.promise;
+  const launching = f.engine.startTicket("ticket");
+  await until(() => f.calls.creates === 1);
+  await f.engine.cancelTicket("ticket");
+  created.reject(new Error("creation failed"));
+  await launching;
+  assert.equal(f.ticket.status, "canceled");
+  assert.equal(f.calls.creates, 1);
+  assert.deepEqual(f.state.triggers, []);
+  assert.deepEqual(f.calls.workspaceArchives, ["new-workspace"]);
+});
+
+test("canceling during provider discovery prevents worker creation", async (t) => {
+  const f = fixture(t, "pending");
+  const provider = deferred();
+  f.engine.resolveProvider = () => provider.promise;
+  const launching = f.engine.startTicket("ticket");
+  await setImmediate();
+  await f.engine.cancelTicket("ticket");
+  provider.resolve("codex/test");
+  await launching;
+  assert.equal(f.ticket.status, "canceled");
+  assert.equal(f.calls.creates, 0);
+});
+
+for (const closer of ["closeThread", "Router stop"]) {
+  test(`${closer} during launch retires the late worker and workspace`, async (t) => {
+    const f = fixture(t, "pending", false);
+    const created = deferred();
+    f.controls.createAgent = () => created.promise;
+    const launching = f.engine.startTicket("ticket");
+    await until(() => f.calls.creates === 1);
+    if (closer === "closeThread") {
+      await f.engine.closeThread("thread");
+    } else {
+      pendingTrigger(f.state);
+      f.controls.verdict = { decision: "stop" };
+      await f.engine.runEval("thread");
+    }
+    created.resolve({ id: "late-worker" });
+    await launching;
+    assert.equal(f.ticket.status, "canceled");
+    assert.equal(f.state.threads[0].state, "closed");
+    assert.deepEqual(f.calls.archives, ["late-worker"]);
+    assert.deepEqual(f.calls.workspaceArchives, ["new-workspace"]);
+    assert.deepEqual(f.calls.watches, []);
+  });
+}
+
+test("closing a thread retires unsubscribed workers", async (t) => {
+  const f = fixture(t, "running", false);
+  await f.engine.closeThread("thread");
+  assert.equal(f.ticket.status, "canceled");
+  assert.equal(f.state.threads[0].state, "closed");
+  assert.deepEqual(f.calls.archives, ["worker"]);
+  assert.deepEqual(f.calls.workspaceArchives, ["workspace"]);
+});
+
+test("Router stop retires every active worker, including unsubscribed and launching tickets", async (t) => {
+  const f = fixture(t, "running", false);
+  f.state.tickets.push({ ...f.ticket, id: "launching", status: "launching", workerAgentId: "starting-worker", workspaceId: "starting-workspace" });
+  f.state.tickets.push({ ...f.ticket, id: "completed", status: "completed", workerAgentId: "finished-worker" });
+  pendingTrigger(f.state);
+  f.controls.verdict = { decision: "stop" };
+  await f.engine.runEval("thread");
+  assert.deepEqual(f.calls.archives.sort(), ["starting-worker", "worker"]);
+  assert.deepEqual(f.calls.workspaceArchives.sort(), ["starting-workspace", "workspace"]);
+  assert.deepEqual(f.state.tickets.map((ticket) => ticket.status), ["canceled", "canceled", "completed"]);
+});
+
+test("recovery launches a persisted pending ticket once despite overlapping reconciliation", async (t) => {
+  const f = fixture(t, "pending");
+  await Promise.all([f.engine.recover(), f.engine.reconcile(), f.engine.reconcile()]);
+  await until(() => f.ticket.status === "running");
+  assert.equal(f.calls.creates, 1);
+  assert.equal(f.ticket.attempts, 1);
+  assert.equal(f.ticket.workerAgentId, "new-worker");
+  assert.deepEqual(f.calls.watches, ["new-worker"]);
+});
+
+test("recovery does not launch pending work belonging to a closed thread", async (t) => {
+  const f = fixture(t, "pending");
+  f.state.threads[0].state = "closed";
+  await f.engine.recover();
+  await setImmediate();
+  assert.equal(f.calls.creates, 0);
+});
+
+test("closing a thread during Router evaluation discards the late dispatch verdict", async (t) => {
+  const f = fixture(t, "completed");
+  pendingTrigger(f.state);
+  const verdict = deferred();
+  const entered = deferred();
+  f.ref("router").run = () => { entered.resolve(); return verdict.promise; };
+  const evaluating = f.engine.runEval("thread");
+  await entered.promise;
+  await f.engine.closeThread("thread");
+  verdict.resolve({ lastMessage: JSON.stringify({ decision: "dispatch", title: "late", mandate: "do work" }) });
+  await evaluating;
+  assert.equal(f.state.tickets.length, 1);
+  assert.equal(f.calls.creates, 0);
+  assert.equal(f.state.decisions.length, 0);
+});
+
+test("cancellation during report collection remains canceled", async (t) => {
+  const f = fixture(t);
+  const report = deferred();
+  const entered = deferred();
+  f.controls.timeline = () => { entered.resolve(); return report.promise; };
+  const settling = f.engine.settleTicketRun("ticket", null);
+  await entered.promise;
+  await f.engine.cancelTicket("ticket");
+  report.resolve({ entries: [] });
+  await settling;
+  assert.equal(f.ticket.status, "canceled");
+  assert.deepEqual(f.state.triggers, []);
+});
+
+test("Feishu stop closes its connection and is idempotent", async () => {
+  const source = new FeishuSource({ appId: "mock", appSecret: "mock", allowUsers: [], allowChats: [] });
+  const closes = [];
+  source.wsClient = { close: (options) => closes.push(options) };
+  source.client = {};
+  await source.stop();
+  await source.stop();
+  assert.deepEqual(closes, [{ force: true }]);
+  assert.equal(source.wsClient, null);
+  assert.equal(source.client, null);
+  assert.equal(source.stopped, true);
+});
+
+test("Feishu stop clears references even when closing throws", async () => {
+  const source = new FeishuSource({ appId: "mock", appSecret: "mock", allowUsers: [], allowChats: [] });
+  source.wsClient = { close: () => { throw new Error("close failed"); } };
+  source.client = {};
+  await assert.rejects(source.stop(), /close failed/);
+  assert.equal(source.wsClient, null);
+  assert.equal(source.client, null);
+});

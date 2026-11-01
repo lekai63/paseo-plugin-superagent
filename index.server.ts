@@ -1,0 +1,246 @@
+import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
+import { SuperagentStore } from "./server/store";
+import { SuperagentEngine } from "./server/engine";
+import {
+  createCancelTicketHandler,
+  createCloseThreadHandler,
+  createDispatchHandler,
+  createForceEvalHandler,
+  createRetryTicketHandler,
+  createStateHandler,
+  createUnsubscribeHandler,
+} from "./server/handlers";
+import { createSessionOpenTransform, resolveMcpProviders } from "./server/agent-mcp";
+import { startDispatchMcpServer, type SuperagentMcpEndpoint } from "./server/mcp-server";
+import { ImManager } from "./server/im";
+import { FeishuSource } from "./server/feishu";
+import { QqSource } from "./server/qq";
+import { DingtalkSource } from "./server/dingtalk";
+import { WecomSource } from "./server/wecom";
+import {
+  superagentCancelTicketRpc,
+  superagentCloseThreadRpc,
+  superagentDispatchRpc,
+  superagentForceEvalRpc,
+  superagentRetryTicketRpc,
+  superagentStateRpc,
+  superagentUnsubscribeRpc,
+} from "./shared/rpc";
+import {
+  parseAllowlist,
+  superagentSettings,
+  type SuperagentSettingsValues,
+} from "./shared/settings";
+
+export default function contribute(server: PluginServerContext) {
+  const store = new SuperagentStore();
+  const settings = server.registerSettings(superagentSettings);
+  const engine = new SuperagentEngine(store, settings);
+
+  // SDK 只把 paseo 交给 handler 和 hook:每个入口都 prime 引擎,
+  // 无头 daemon 重启后第一个 hook/RPC 就会把看门狗拉起来。
+  const withPrime =
+    <Input, Output>(
+      handler: (input: Input, context: PluginHandlerContext) => Output | Promise<Output>,
+    ) =>
+    (input: Input, context: PluginHandlerContext): Output | Promise<Output> => {
+      engine.prime(context.paseo);
+      return handler(input, context);
+    };
+
+  server.handle(superagentDispatchRpc, withPrime(createDispatchHandler(engine)));
+  server.handle(superagentStateRpc, withPrime(createStateHandler(engine)));
+  server.handle(superagentForceEvalRpc, withPrime(createForceEvalHandler(engine)));
+  server.handle(superagentCancelTicketRpc, withPrime(createCancelTicketHandler(engine)));
+  server.handle(superagentRetryTicketRpc, withPrime(createRetryTicketHandler(engine)));
+  server.handle(superagentCloseThreadRpc, withPrime(createCloseThreadHandler(engine)));
+  server.handle(superagentUnsubscribeRpc, withPrime(createUnsubscribeHandler(engine)));
+
+  // agent 委派入口:插件自持的本地 MCP endpoint(superagent_dispatch 工具),
+  // 经 session_open 注入给所有普通 agent。通道独立于宿主 "Paseo tools" 开关。
+  let dispatchEndpoint: SuperagentMcpEndpoint | null = null;
+  startDispatchMcpServer(engine)
+    .then((endpoint) => {
+      dispatchEndpoint = endpoint;
+    })
+    .catch((error) => {
+      console.error("[superagent] dispatch mcp server failed to start", error);
+    });
+
+  // agent 委派 MCP 注入:settings.agentToolEnabled 且目标不是编排自身的 agent。
+  const agentToolTransform = createSessionOpenTransform(
+    () => dispatchEndpoint,
+    () => current.agentToolEnabled,
+    () => resolveMcpProviders(current.agentToolProviders),
+  );
+
+  // IM 触发源(飞书/QQ):引擎 prime 后启动;答复经 ImManager 发回原聊天。
+  const im = new ImManager();
+  engine.setReplySink(im);
+  engine.onFirstPrime = () => {
+    void syncImSources();
+  };
+  im.setHandler((message) => {
+    void engine
+      .dispatch({
+        title: message.title,
+        task: message.text,
+        sender: message.sender,
+        origin: message.origin,
+        threadKey: message.threadKey,
+      })
+      .catch((error) => {
+        console.error("[superagent] IM trigger dispatch failed", error);
+      });
+  });
+
+  function imSignature(values: SuperagentSettingsValues): string {
+    return JSON.stringify({
+      f: [values.feishuEnabled, values.feishuAppId, values.feishuAppSecret, values.feishuAllowUsers, values.feishuAllowChats],
+      q: [values.qqEnabled, values.qqEndpoint, values.qqToken, values.qqAllowUsers, values.qqAllowGroups],
+      d: [values.dingtalkEnabled, values.dingtalkClientId, values.dingtalkClientSecret, values.dingtalkAllowUsers, values.dingtalkAllowChats],
+      w: [values.wecomEnabled, values.wecomBotId, values.wecomSecret, values.wecomAllowUsers, values.wecomAllowChats],
+    });
+  }
+
+  async function syncImSources(): Promise<void> {
+    const values = current;
+    const wanted = new Map<string, Promise<void>>();
+    if (values.feishuEnabled) {
+      const users = parseAllowlist(values.feishuAllowUsers);
+      const chats = parseAllowlist(values.feishuAllowChats);
+      if (!values.feishuAppId || !values.feishuAppSecret) {
+        console.warn("[superagent] feishu source enabled but appId/appSecret missing; not starting");
+      } else if (users.length === 0 && chats.length === 0) {
+        console.warn("[superagent] feishu source enabled but allowlists are empty; not starting (unsafe)");
+      } else {
+        wanted.set(
+          "feishu",
+          im.register(
+            new FeishuSource({
+              appId: values.feishuAppId,
+              appSecret: values.feishuAppSecret,
+              allowUsers: users,
+              allowChats: chats,
+            }),
+          ),
+        );
+      }
+    }
+    if (values.qqEnabled) {
+      const users = parseAllowlist(values.qqAllowUsers);
+      const groups = parseAllowlist(values.qqAllowGroups);
+      if (!values.qqEndpoint) {
+        console.warn("[superagent] qq source enabled but endpoint missing; not starting");
+      } else if (users.length === 0 && groups.length === 0) {
+        console.warn("[superagent] qq source enabled but allowlists are empty; not starting (unsafe)");
+      } else {
+        wanted.set(
+          "qq",
+          im.register(
+            new QqSource({
+              endpoint: values.qqEndpoint,
+              token: values.qqToken,
+              allowUsers: users,
+              allowGroups: groups,
+            }),
+          ),
+        );
+      }
+    }
+    if (values.dingtalkEnabled) {
+      const users = parseAllowlist(values.dingtalkAllowUsers);
+      const chats = parseAllowlist(values.dingtalkAllowChats);
+      if (!values.dingtalkClientId || !values.dingtalkClientSecret) {
+        console.warn("[superagent] dingtalk source enabled but clientId/clientSecret missing; not starting");
+      } else if (users.length === 0 && chats.length === 0) {
+        console.warn("[superagent] dingtalk source enabled but allowlists are empty; not starting (unsafe)");
+      } else {
+        wanted.set(
+          "dingtalk",
+          im.register(
+            new DingtalkSource({
+              clientId: values.dingtalkClientId,
+              clientSecret: values.dingtalkClientSecret,
+              allowUsers: users,
+              allowChats: chats,
+            }),
+          ),
+        );
+      }
+    }
+    if (values.wecomEnabled) {
+      const users = parseAllowlist(values.wecomAllowUsers);
+      const chats = parseAllowlist(values.wecomAllowChats);
+      if (!values.wecomBotId || !values.wecomSecret) {
+        console.warn("[superagent] wecom source enabled but botId/secret missing; not starting");
+      } else if (users.length === 0 && chats.length === 0) {
+        console.warn("[superagent] wecom source enabled but allowlists are empty; not starting (unsafe)");
+      } else {
+        wanted.set(
+          "wecom",
+          im.register(
+            new WecomSource({
+              botId: values.wecomBotId,
+              secret: values.wecomSecret,
+              allowUsers: users,
+              allowChats: chats,
+            }),
+          ),
+        );
+      }
+    }
+    for (const channel of ["feishu", "qq", "dingtalk", "wecom"] as const) {
+      if (!wanted.has(channel)) await im.stopChannel(channel);
+    }
+    for (const start of wanted.values()) {
+      await start.catch((error) => {
+        console.error("[superagent] IM source failed to start", error);
+      });
+    }
+  }
+
+  // 设置订阅:默认值起步,读取与保存都刷新快照;IM 配置变化热重载 source。
+  let current: SuperagentSettingsValues = superagentSettings.schema.parse({});
+  let lastImSignature = imSignature(current);
+  void settings.read().then((state) => {
+    if (state.status !== "ready") return;
+    current = state.values;
+    const signature = imSignature(current);
+    if (signature !== lastImSignature && engine.isPrimed) {
+      lastImSignature = signature;
+      void syncImSources();
+    }
+  });
+  settings.subscribe((state) => {
+    if (state.status !== "ready") return;
+    current = state.values;
+    const signature = imSignature(current);
+    if (signature === lastImSignature) return;
+    lastImSignature = signature;
+    // 引擎未 prime 前不启动 source(onFirstPrime 兜底首次启动)。
+    if (engine.isPrimed) void syncImSources();
+  });
+
+  // hook 同时用于 prime 与注入:无头重启后首个 session_open 就把引擎拉起来。
+  const removeSessionOpen = server.before("agent.session_open", ({ request }, context) => {
+    engine.prime(context.paseo);
+    return agentToolTransform(request);
+  });
+
+  // hook 仅用于 prime(无头重启后到首个 RPC 之间保持引擎活着)。
+  const hookRemovers = (["agent.created", "agent.turn_ended", "workspace.created"] as const).map(
+    (event) =>
+      server.on(event, (_payload, context) => {
+        engine.prime(context.paseo);
+      }),
+  );
+
+  return () => {
+    for (const remove of hookRemovers) remove();
+    removeSessionOpen();
+    void dispatchEndpoint?.stop();
+    void im.stopAll();
+    void engine.stop();
+  };
+}

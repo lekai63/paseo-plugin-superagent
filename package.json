@@ -1,0 +1,43 @@
+{
+  "name": "paseo-plugin-superagent",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Router/Worker super-agent orchestration for Paseo: persistent router agent, ticket workers, thread subscriptions, watchdog",
+  "type": "module",
+  "files": [
+    "paseo-plugin.json",
+    "README.md",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/"
+  ],
+  "scripts": {
+    "test": "node --import ./tests/register-typescript.mjs --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.14.0",
+    "@tanstack/react-query": "^5.90.2",
+    "@types/node": "^26.5.0",
+    "@types/react": "~19.2.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.76.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@openclaw-china/dingtalk": "^2026.4.24",
+    "@openclaw-china/qqbot": "^2026.4.24",
+    "@openclaw-china/shared": "^2026.4.24",
+    "@openclaw-china/wechat-mp": "^2026.4.24",
+    "@openclaw-china/wecom": "^2026.4.24",
+    "@openclaw-china/wecom-app": "^2026.4.24",
+    "@openclaw-china/wecom-kf": "^2026.4.24",
+    "@wecom/aibot-node-sdk": "^1.0.7",
+    "dingtalk-stream": "^2.1.6-beta.1",
+    "zod": "^4.4.3"
+  }
+}
