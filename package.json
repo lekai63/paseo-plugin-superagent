@@ -27,6 +27,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@getpaseo/client": "0.14.0",
     "@larksuiteoapi/node-sdk": "^1.76.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@openclaw-china/dingtalk": "^2026.4.24",
