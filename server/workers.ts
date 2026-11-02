@@ -31,12 +31,43 @@ const WORKER_SYSTEM_PROMPT = [
 ].join("\n");
 
 /**
- * shared 隔离下每个 Ticket 的专属子目录:`<workingDir>/tasks/<YYYYMMDD>-<标题>-<id 尾号>`。
+ * shared 隔离下每个 Ticket 的兜底子目录:`<workingDir>/tasks/<YYYYMMDD>-<标题>-<id 尾号>`(本地日期)。
  * 由插件确定(Router 派发时还不知道 Ticket id),在 Worker 首条 prompt 里明确告知。
+ * 工作目录自带 AGENTS.md/CLAUDE.md 时,以其归档规则为准,本目录仅在规则未覆盖时使用。
  */
 export function taskDirectory(workingDir: string, ticket: Pick<Ticket, "id" | "title" | "createdAt">): string {
-  const date = (ticket.createdAt || new Date().toISOString()).slice(0, 10).replaceAll("-", "");
+  const created = new Date(ticket.createdAt || Date.now());
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const date = `${created.getFullYear()}${pad(created.getMonth() + 1)}${pad(created.getDate())}`;
   return join(workingDir, "tasks", `${date}-${slugify(ticket.title, 24)}-${ticket.id.slice(-6)}`);
+}
+
+/** shared 隔离的执行环境说明:目录自带项目说明时优先遵循其归档规则,否则用 Ticket 专属目录。 */
+function sharedEnvironment(
+  ticket: Pick<Ticket, "id" | "title" | "createdAt">,
+  workingDir: string,
+  instructionFiles: string[],
+): string {
+  const taskDir = taskDirectory(workingDir, ticket);
+  const lines = [
+    `[Execution environment] You are working in the shared directory ${workingDir}; other workers use it concurrently.`,
+  ];
+  if (instructionFiles.length > 0) {
+    const files = instructionFiles.map((name) => join(workingDir, name)).join(", ");
+    lines.push(
+      `This directory has its own project instructions: ${files}. Read them if they are not already in your context.`,
+      "Their rules on where outputs go take priority: file everything you create, download or generate the way they prescribe, and make any index or registry updates they require.",
+      `Only if they do not say where this ticket's outputs belong, use ${taskDir} (create it if it does not exist).`,
+      "Do not modify unrelated existing files.",
+    );
+  } else {
+    lines.push(
+      `Your task directory is ${taskDir} — create it if it does not exist and put every file you create, download or generate for this ticket inside it.`,
+      "You may read anything you need elsewhere, but only modify files outside your task directory when the mandate explicitly names them.",
+    );
+  }
+  lines.push("In your final report, state where you put the outputs.");
+  return lines.join("\n");
 }
 
 /** Worker 首条 prompt:角色与汇报要求 + 执行环境说明 + 任务书。 */
@@ -44,6 +75,7 @@ export function composeWorkerPrompt(
   ticket: Pick<Ticket, "id" | "title" | "mandate" | "createdAt">,
   workingDir: string,
   isolation: "worktree" | "shared",
+  instructionFiles: string[] = [],
 ): string {
   const environment =
     isolation === "worktree"
@@ -52,12 +84,7 @@ export function composeWorkerPrompt(
           `Your current working directory IS that copy. Absolute paths into ${workingDir} in the mandate refer to the same file INSIDE your working directory.`,
           `Do not edit the original checkout at ${workingDir}.`,
         ].join("\n")
-      : [
-          `[Execution environment] You are working in the shared directory ${workingDir}; other workers use it concurrently.`,
-          `Your task directory is ${taskDirectory(workingDir, ticket)} — create it if it does not exist and put every file you create, download or generate for this ticket inside it.`,
-          "You may read anything you need elsewhere, but only modify files outside your task directory when the mandate explicitly names them.",
-          "Mention the task directory in your final report.",
-        ].join("\n");
+      : sharedEnvironment(ticket, workingDir, instructionFiles);
   const role = `[Worker instructions]\n${WORKER_ROLE.join("\n")}`;
   return `${role}\n\n${environment}\n\n# Ticket: ${ticket.title}\n\n${ticket.mandate}`;
 }
@@ -74,6 +101,7 @@ export async function launchWorker(
   state: SuperagentState,
   ticket: Ticket,
   routerAgentId: string | null,
+  instructionFiles: string[] = [],
 ): Promise<WorkerLaunch> {
   const provider = state.kv.workerProvider;
   if (!provider) throw new Error("worker provider is not configured");
@@ -113,7 +141,7 @@ export async function launchWorker(
         systemPrompt: WORKER_SYSTEM_PROMPT,
       },
       title: ticket.title,
-      prompt: composeWorkerPrompt(ticket, settings.workingDir, settings.workerIsolation),
+      prompt: composeWorkerPrompt(ticket, settings.workingDir, settings.workerIsolation, instructionFiles),
       labels: { [TICKET_LABEL]: ticket.id },
       ...(routerAgentId ? { parent: routerAgentId } : {}),
     });

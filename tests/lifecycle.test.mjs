@@ -56,6 +56,7 @@ function fixture(t, status = "running", subscribed = true) {
     timeline: async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: "work completed" } }] }),
     verdict: { decision: "reply", reply: "done" },
     isGit: true,
+    instructionFiles: [],
   };
   const finishes = [];
   const handles = new Map();
@@ -122,7 +123,11 @@ function fixture(t, status = "running", subscribed = true) {
     subscribe: () => {}, read: async () => ({ status: "ready", values }),
   });
   engine.paseo = paseo;
-  engine.workingDirProbe = { isDirectory: async () => true, isGitWorkTree: async () => controls.isGit };
+  engine.workingDirProbe = {
+    isDirectory: async () => true,
+    isFile: async (path) => controls.instructionFiles.some((name) => path === `/mock/repo/${name}`),
+    isGitWorkTree: async () => controls.isGit,
+  };
   engine.primed = true;
   engine.scheduleEval = (id) => { calls.evals.push(id); };
   t.after(() => engine.stop());
@@ -435,4 +440,26 @@ test("a usable base directory reports no problem to the Router or the snapshot",
   await f.engine.runEval("thread");
   assert.doesNotMatch(f.calls.prompts.at(-1), /PROBLEM:/);
   assert.equal(f.engine.snapshot().workingDirIssue, null);
+});
+
+test("shared workers and the Router are pointed at the base directory's AGENTS.md filing rules", async (t) => {
+  const f = fixture(t, "pending");
+  f.values.workerIsolation = "shared";
+  f.controls.instructionFiles = ["AGENTS.md"];
+  await f.engine.startTicket("ticket");
+  const prompt = f.calls.workerCreates[0].prompt;
+  assert.match(prompt, /own project instructions: \/mock\/repo\/AGENTS\.md/);
+  assert.match(prompt, /Their rules on where outputs go take priority/);
+
+  pendingTrigger(f.state);
+  f.state.tickets[0].status = "completed";
+  await f.engine.runEval("thread");
+  assert.match(f.calls.prompts.at(-1), /The base directory has its own project instructions \(AGENTS\.md\)/);
+});
+
+test("worktree workers are not told about base-directory instruction files", async (t) => {
+  const f = fixture(t, "pending");
+  f.controls.instructionFiles = ["AGENTS.md"];
+  await f.engine.startTicket("ticket");
+  assert.doesNotMatch(f.calls.workerCreates[0].prompt, /project instructions/);
 });

@@ -16,7 +16,7 @@ import { SETTINGS_DEFAULTS, superagentSettings, type SuperagentSettingsValues } 
 import { composeEvalPrompt, ensureRouter, newDecision, parseVerdict, readLastAssistantMessage } from "./router";
 import { harvestReport, launchWorker, retireWorker } from "./workers";
 import { resolveProviderSelection } from "./providers";
-import { inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
+import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 
 /**
  * Superagent 引擎:整个编排层的驱动核心。
@@ -397,6 +397,7 @@ export class SuperagentEngine {
         workingDir: this.settingsValues.workingDir,
         isolation: this.settingsValues.workerIsolation,
         issue: workerIssue,
+        instructionFiles: await this.sharedInstructionFiles(),
       },
     });
     const result = await router.handle.run(prompt, { timeoutMs: ROUTER_EVAL_TIMEOUT_MS });
@@ -601,6 +602,7 @@ export class SuperagentEngine {
         state,
         current,
         state.kv.routerAgentId ?? null,
+        await this.sharedInstructionFiles(),
       );
       let accepted = false;
       await this.store.update((next) => {
@@ -1001,6 +1003,12 @@ export class SuperagentEngine {
   }
 
   // ------------------------------------------------------------- helpers
+
+  /** shared 隔离时工作目录自带的项目说明文件;worktree 隔离时仓库内的说明随 worktree 一起检出,无需提示。 */
+  private async sharedInstructionFiles(): Promise<string[]> {
+    if (this.settingsValues.workerIsolation !== "shared") return [];
+    return findInstructionFiles(this.settingsValues.workingDir, this.workingDirProbe).catch(() => []);
+  }
 
   private workingDirKey(): string {
     return `${this.settingsValues.workingDir}\u0000${this.settingsValues.workerIsolation}`;

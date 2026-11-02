@@ -52,6 +52,8 @@ export interface RouterWorkerEnvironment {
   isolation: "worktree" | "shared";
   /** 基础目录当前不可用的原因(来自 inspectWorkingDir);可用时为 null。 */
   issue: string | null;
+  /** 基础目录根下的项目说明文件(AGENTS.md/CLAUDE.md),shared 隔离时其归档规则优先。 */
+  instructionFiles?: string[];
 }
 
 export interface RouterPromptContext {
@@ -63,14 +65,26 @@ export interface RouterPromptContext {
 }
 
 /** Router 必须知道 Worker 在哪个目录、以何种方式运行,否则只能从触发文本里猜路径。 */
-function workerEnvironmentLines({ workingDir, isolation, issue }: RouterWorkerEnvironment): string[] {
+function workerEnvironmentLines({
+  workingDir,
+  isolation,
+  issue,
+  instructionFiles = [],
+}: RouterWorkerEnvironment): string[] {
   const lines = ["## Worker environment", `base directory: ${workingDir || "(not configured)"}`];
   lines.push(
     isolation === "worktree"
       ? "isolation: worktree — each ticket gets its own git worktree branch of the base directory"
       : "isolation: shared — workers work directly inside the base directory, which they share",
   );
-  if (isolation === "shared") {
+  if (isolation === "shared" && instructionFiles.length > 0) {
+    lines.push(
+      `The base directory has its own project instructions (${instructionFiles.join(", ")}) that define where`,
+      "outputs go; workers are told to follow them, including any index updates they require, and to fall",
+      "back to a per-ticket directory <base directory>/tasks/<date>-<title>-<id> only when those rules do not",
+      "cover the output. Do not prescribe output locations in the mandate unless the human asks for one.",
+    );
+  } else if (isolation === "shared") {
     lines.push(
       "Each ticket automatically gets its own task directory <base directory>/tasks/<date>-<title>-<id>,",
       "and the worker is told its exact path. Write the mandate around \"your task directory\": all new",

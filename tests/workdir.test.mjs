@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { inspectWorkingDir } from "../server/workdir.ts";
+import { findInstructionFiles, inspectWorkingDir } from "../server/workdir.ts";
 
 const probe = (isDirectory, isGitWorkTree) => ({
   isDirectory: async () => isDirectory,
@@ -35,4 +35,13 @@ test("the default probe checks the real filesystem and git", async (t) => {
   assert.equal(await inspectWorkingDir(plain, "shared"), null);
   const repo = fileURLToPath(new URL("..", import.meta.url));
   assert.equal(await inspectWorkingDir(repo, "worktree"), null);
+});
+
+test("instruction files are found at the base directory root", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "superagent-instructions-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  assert.deepEqual(await findInstructionFiles(dir), []);
+  await writeFile(join(dir, "AGENTS.md"), "# rules\n");
+  assert.deepEqual(await findInstructionFiles(dir), ["AGENTS.md"]);
+  assert.deepEqual(await findInstructionFiles(""), []);
 });

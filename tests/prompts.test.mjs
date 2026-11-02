@@ -49,9 +49,33 @@ test("the Worker's first prompt carries its role and report instructions", () =>
 
 test("shared isolation gives each ticket its own task directory", () => {
   const ticket = { id: "tkt_abc123xyz789", title: "整理 Report", mandate: "m", createdAt: "2026-11-02T04:00:00.000Z" };
-  assert.equal(taskDirectory("/srv/tmp", ticket), "/srv/tmp/tasks/20261102-整理-report-xyz789");
+  const created = new Date(ticket.createdAt);
+  const pad = (value) => String(value).padStart(2, "0");
+  const localDate = `${created.getFullYear()}${pad(created.getMonth() + 1)}${pad(created.getDate())}`;
+  const dir = `/srv/tmp/tasks/${localDate}-整理-report-xyz789`;
+  assert.equal(taskDirectory("/srv/tmp", ticket), dir);
   const shared = composeWorkerPrompt(ticket, "/srv/tmp", "shared");
-  assert.match(shared, /Your task directory is \/srv\/tmp\/tasks\/20261102-整理-report-xyz789 — create it/);
+  assert.ok(shared.includes(`Your task directory is ${dir} — create it`));
+  assert.match(shared, /state where you put the outputs/);
   assert.match(shared, /only modify files outside your task directory when the mandate explicitly names them/);
   assert.doesNotMatch(composeWorkerPrompt(ticket, "/srv/tmp", "worktree"), /task directory/);
+});
+
+test("shared workers follow the base directory's own filing rules before the task directory", () => {
+  const ticket = { id: "tkt_abc123xyz789", title: "Report", mandate: "m", createdAt: "2026-11-02T04:00:00.000Z" };
+  const prompt = composeWorkerPrompt(ticket, "/srv/tmp", "shared", ["AGENTS.md"]);
+  assert.match(prompt, /own project instructions: \/srv\/tmp\/AGENTS\.md\. Read them if they are not already in your context/);
+  assert.match(prompt, /make any index or registry updates they require/);
+  assert.match(prompt, /Only if they do not say where this ticket's outputs belong, use \/srv\/tmp\/tasks\//);
+  assert.doesNotMatch(prompt, /only modify files outside your task directory/);
+
+  const state = emptyState();
+  const thread = { id: "t", key: "k", title: "t", state: "active", summary: null, createdAt: "", updatedAt: "" };
+  const trigger = { id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "x", status: "pending", context: false, receivedAt: "" };
+  const router = composeEvalPrompt({
+    thread, batch: [trigger], state,
+    worker: { workingDir: "/srv/tmp", isolation: "shared", issue: null, instructionFiles: ["AGENTS.md", "CLAUDE.md"] },
+  });
+  assert.match(router, /own project instructions \(AGENTS\.md, CLAUDE\.md\) that define where/);
+  assert.doesNotMatch(router, /Write the mandate around "your task directory"/);
 });

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { stat } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 /**
  * Worker 基础目录(settings.workingDir)的可用性检查。
@@ -14,6 +14,7 @@ export type WorkerIsolation = "worktree" | "shared";
 
 export interface WorkingDirProbe {
   isDirectory(path: string): Promise<boolean>;
+  isFile(path: string): Promise<boolean>;
   /** true/false = 是否在 git 工作树内;null = 无法判定(如找不到 git)。 */
   isGitWorkTree(path: string): Promise<boolean | null>;
 }
@@ -22,6 +23,13 @@ export const nodeWorkingDirProbe: WorkingDirProbe = {
   async isDirectory(path) {
     try {
       return (await stat(path)).isDirectory();
+    } catch {
+      return false;
+    }
+  },
+  async isFile(path) {
+    try {
+      return (await stat(path)).isFile();
     } catch {
       return false;
     }
@@ -63,4 +71,20 @@ export async function inspectWorkingDir(
     );
   }
   return null;
+}
+
+/** 工作目录自带的项目说明文件(agent 会自动加载;其中可能规定产出的归档位置)。 */
+export const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md"] as const;
+
+/** 返回 workingDir 根下存在的项目说明文件名(按 INSTRUCTION_FILES 顺序)。 */
+export async function findInstructionFiles(
+  workingDir: string,
+  probe: WorkingDirProbe = nodeWorkingDirProbe,
+): Promise<string[]> {
+  if (!workingDir) return [];
+  const found: string[] = [];
+  for (const name of INSTRUCTION_FILES) {
+    if (await probe.isFile(join(workingDir, name))) found.push(name);
+  }
+  return found;
 }
