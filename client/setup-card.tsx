@@ -14,8 +14,8 @@ import { superagentSettings, type SuperagentSettingsValues } from "../shared/set
 type Ready = Extract<SettingsState<typeof superagentSettings.schema>, { status: "ready" }>;
 
 /** 配置卡:provider/工作目录/隔离方式等。未配置时置顶显示。 */
-export function SetupCard(props: PluginHostProps & { required: boolean }) {
-  const { theme, layout, required } = props;
+export function SetupCard(props: PluginHostProps & { required: boolean; issue: string | null }) {
+  const { theme, layout, required, issue } = props;
   const settings = useSettings(superagentSettings);
   const gap = layout.compact ? 8 : 12;
 
@@ -29,7 +29,17 @@ export function SetupCard(props: PluginHostProps & { required: boolean }) {
     );
   }
 
-  return <SetupForm settings={settings} theme={theme} gap={gap} required={required} />;
+  return <SetupForm settings={settings} theme={theme} gap={gap} required={required} issue={issue} />;
+}
+
+/** 服务端检查出的工作目录问题(如 worktree 隔离但目录不是 git 仓库),派发前就提示。 */
+function IssueNotice({ issue, theme, gap }: { issue: string | null; theme: PluginHostProps["theme"]; gap: number }) {
+  if (!issue) return null;
+  return (
+    <Text style={{ color: theme.colors.statusWarning, fontSize: 13, marginBottom: gap }}>
+      Worker 无法启动:{issue}
+    </Text>
+  );
 }
 
 function SetupForm({
@@ -37,11 +47,13 @@ function SetupForm({
   theme,
   gap,
   required,
+  issue,
 }: {
   settings: Ready;
   theme: PluginHostProps["theme"];
   gap: number;
   required: boolean;
+  issue: string | null;
 }) {
   const [draft, setDraft] = useState<SuperagentSettingsValues>(settings.values);
   const [open, setOpen] = useState(required);
@@ -56,6 +68,7 @@ function SetupForm({
   if (!open) {
     return (
       <SettingsCard>
+        <IssueNotice issue={issue} theme={theme} gap={gap} />
         <SettingsAction
           label={`工作目录 ${settings.values.workingDir || "(未配置)"}`}
           actionLabel="配置"
@@ -67,13 +80,14 @@ function SetupForm({
 
   return (
     <SettingsCard>
+      <IssueNotice issue={issue} theme={theme} gap={gap} />
       {required && (
         <Text style={{ color: theme.colors.statusWarning, fontSize: 13, marginBottom: gap }}>
           完成以下配置后 Superagent 才能工作。provider 留空将自动选用宿主上可用的默认。
         </Text>
       )}
       <SettingsInput
-        label="工作目录(绝对路径,Worker worktree 的基准仓库)"
+        label="工作目录(绝对路径;所有 Worker 的基础目录,worktree 隔离时必须是 git 仓库)"
         initialValue={draft.workingDir}
         onChangeText={(value) => change("workingDir", value)}
         disabled={settings.saving}

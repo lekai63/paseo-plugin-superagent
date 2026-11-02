@@ -49,7 +49,7 @@ export function SuperagentScreen(props: PluginScreenProps) {
 
   return (
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: gap, gap }}>
-      <SetupCard {...props} required={!snapshot?.configured} />
+      <SetupCard {...props} required={!snapshot?.configured} issue={snapshot?.workingDirIssue ?? null} />
 
       {snapshot && stats && (
         <View style={{ flexDirection: "row", gap: 12, alignItems: "center" }}>

@@ -56,7 +56,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 | 设置 | 说明 |
 |---|---|
-| 工作目录 | 绝对路径。Router 的 cwd,也是 Worker worktree 的基准仓库(**必填**) |
+| 工作目录 | 绝对路径。Router 的 cwd,也是所有 Worker 的基础目录(**必填**)。`worktree` 隔离时必须位于 git 仓库内,否则配置卡会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式。所有 Worker 都只在这一个目录(或其 worktree)里工作 |
 | Router provider/model | 留空自动选用宿主可用默认(claude → codex → opencode → 任意)。model id 以 `paseo provider models <provider>` 列出的为准(如 `zcode-acp/builtin:bigmodel-coding-plan\GLM-5.3-Flash`,单个反斜杠);填错时 Router 评估会报出可用 id |
 | Worker provider/model | 同上,建议配最强模型 |
 | Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared` |

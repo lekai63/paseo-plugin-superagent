@@ -65,21 +65,31 @@ export async function launchWorker(
   if (!settings.workingDir) throw new Error("working directory is not configured");
 
   const branchName = `superagent/${slugify(ticket.title, 24)}-${ticket.id.slice(-6)}`;
-  const workspace =
-    settings.workerIsolation === "worktree"
-      ? await paseo.workspaces.create({
-          title: ticket.title,
-          source: {
-            kind: "worktree",
-            cwd: settings.workingDir,
-            action: "branch-off",
-            branchName,
-          },
-        })
-      : await paseo.workspaces.create({
-          title: ticket.title,
-          source: { kind: "directory", path: settings.workingDir },
-        });
+  let workspace: Awaited<ReturnType<PaseoApi["workspaces"]["create"]>>;
+  try {
+    workspace =
+      settings.workerIsolation === "worktree"
+        ? await paseo.workspaces.create({
+            title: ticket.title,
+            source: {
+              kind: "worktree",
+              cwd: settings.workingDir,
+              action: "branch-off",
+              branchName,
+            },
+          })
+        : await paseo.workspaces.create({
+            title: ticket.title,
+            source: { kind: "directory", path: settings.workingDir },
+          });
+  } catch (error) {
+    // daemon 的报错不带路径(如 "Create worktree requires a git repository"),补上基础目录与隔离方式。
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `worker workspace creation failed (base ${settings.workingDir}, isolation ${settings.workerIsolation}): ${message}`,
+      { cause: error },
+    );
+  }
 
   try {
     const agent = await workspace.agents.create({

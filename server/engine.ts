@@ -16,6 +16,7 @@ import { SETTINGS_DEFAULTS, superagentSettings, type SuperagentSettingsValues } 
 import { composeEvalPrompt, ensureRouter, newDecision, parseVerdict, readLastAssistantMessage } from "./router";
 import { harvestReport, launchWorker, retireWorker } from "./workers";
 import { resolveProviderSelection } from "./providers";
+import { inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 
 /**
  * Superagent 引擎:整个编排层的驱动核心。
@@ -68,6 +69,10 @@ export class SuperagentEngine {
   private evalFailures = new Map<string, number>();
   /** 已提示过的 provider 设置纠正(每个设置值只告警一次)。 */
   private providerNotes = new Set<string>();
+  /** Worker 基础目录检查(可替换,便于测试)与缓存结果。 */
+  workingDirProbe: WorkingDirProbe = nodeWorkingDirProbe;
+  private workingDirIssue: string | null = null;
+  private workingDirCheck: { key: string; at: number } | null = null;
   private lastWatchdogAt: string | null = null;
   private lastWatchdogNote: string | null = null;
   private replySink: ReplySink | null = null;
@@ -90,11 +95,31 @@ export class SuperagentEngine {
     settings: PluginSettings<typeof superagentSettings.schema>,
   ) {
     settings.subscribe((state) => {
-      if (state.status === "ready") this.settingsValues = state.values;
+      if (state.status !== "ready") return;
+      this.settingsValues = state.values;
+      void this.refreshWorkingDirIssue();
     });
     void settings.read().then((state) => {
-      if (state.status === "ready") this.settingsValues = state.values;
+      if (state.status !== "ready") return;
+      this.settingsValues = state.values;
+      void this.refreshWorkingDirIssue();
     });
+  }
+
+  /** 重新检查 Worker 基础目录并缓存结果(snapshot 同步读取缓存)。 */
+  async refreshWorkingDirIssue(): Promise<string | null> {
+    const { workingDir, workerIsolation } = this.settingsValues;
+    const key = this.workingDirKey();
+    const issue = await inspectWorkingDir(workingDir, workerIsolation, this.workingDirProbe).catch((error) => {
+      console.error("[superagent] working directory check failed", error);
+      return null;
+    });
+    // 检查期间设置可能已变化:只认与当前设置一致的结果。
+    if (key === this.workingDirKey()) {
+      this.workingDirIssue = issue;
+      this.workingDirCheck = { key, at: Date.now() };
+    }
+    return issue;
   }
 
   /** SDK 只把 paseo 交给 handler/hook;每个入口都会调 prime,首次调用启动引擎。 */
@@ -363,7 +388,17 @@ export class SuperagentEngine {
     }
 
     // 2. 一次 LLM 调用评估整批(Inline & Spill 组装的提示词)。
-    const prompt = composeEvalPrompt({ thread, batch, state });
+    const workerIssue = await this.refreshWorkingDirIssue();
+    const prompt = composeEvalPrompt({
+      thread,
+      batch,
+      state,
+      worker: {
+        workingDir: this.settingsValues.workingDir,
+        isolation: this.settingsValues.workerIsolation,
+        issue: workerIssue,
+      },
+    });
     const result = await router.handle.run(prompt, { timeoutMs: ROUTER_EVAL_TIMEOUT_MS });
     const replyText =
       result.lastMessage?.trim() || (await readLastAssistantMessage(paseo, routerAgentId)) || "";
@@ -557,6 +592,9 @@ export class SuperagentEngine {
     const current = state.tickets.find((t) => t.id === ticketId);
     if (!current || current.status !== "launching" || current.attempts !== attempt || current.startedAt !== now) return;
     try {
+      // 基础目录不可用时带着目录与隔离方式失败,Router 收到的汇报能指明确切原因。
+      const workingDirIssue = await this.refreshWorkingDirIssue();
+      if (workingDirIssue) throw new Error(workingDirIssue);
       const launch = await launchWorker(
         paseo,
         this.settingsValues,
@@ -936,6 +974,7 @@ export class SuperagentEngine {
     return {
       configured: Boolean(settings.workingDir),
       workingDir: settings.workingDir,
+      workingDirIssue: this.cachedWorkingDirIssue(),
       routerAgentId: state.kv.routerAgentId ?? null,
       routerProvider: state.kv.routerProvider || settings.routerProvider || null,
       workerProvider: state.kv.workerProvider || settings.workerProvider || null,
@@ -962,6 +1001,18 @@ export class SuperagentEngine {
   }
 
   // ------------------------------------------------------------- helpers
+
+  private workingDirKey(): string {
+    return `${this.settingsValues.workingDir}\u0000${this.settingsValues.workerIsolation}`;
+  }
+
+  /** snapshot 用的缓存结果;过期(5s)或设置已变时后台刷新,UI 轮询下一次即可拿到。 */
+  private cachedWorkingDirIssue(): string | null {
+    const key = this.workingDirKey();
+    const check = this.workingDirCheck;
+    if (!check || check.key !== key || Date.now() - check.at > 5_000) void this.refreshWorkingDirIssue();
+    return check?.key === key ? this.workingDirIssue : null;
+  }
 
   private requirePaseo(): PaseoApi {
     if (!this.paseo) throw new Error("engine not primed yet");

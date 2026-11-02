@@ -48,13 +48,14 @@ function fixture(t, status = "running", subscribed = true) {
   });
   const calls = {
     sends: [], watches: [], archives: [], workspaceArchives: [], creates: 0, evals: [],
-    routerCreates: [], workerCreates: [],
+    routerCreates: [], workerCreates: [], prompts: [],
   };
   const controls = {
     send: async () => {},
     createAgent: async () => ({ id: "new-worker" }),
     timeline: async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: "work completed" } }] }),
     verdict: { decision: "reply", reply: "done" },
+    isGit: true,
   };
   const finishes = [];
   const handles = new Map();
@@ -66,7 +67,10 @@ function fixture(t, status = "running", subscribed = true) {
         calls.sends.push({ id, text, options });
         await controls.send(text, options);
       },
-      run: async () => ({ lastMessage: JSON.stringify(controls.verdict) }),
+      run: async (prompt) => {
+        calls.prompts.push(prompt);
+        return { lastMessage: JSON.stringify(controls.verdict) };
+      },
       waitForFinish: () => {
         calls.watches.push(id);
         const finish = deferred();
@@ -118,6 +122,7 @@ function fixture(t, status = "running", subscribed = true) {
     subscribe: () => {}, read: async () => ({ status: "ready", values }),
   });
   engine.paseo = paseo;
+  engine.workingDirProbe = { isDirectory: async () => true, isGitWorkTree: async () => controls.isGit };
   engine.primed = true;
   engine.scheduleEval = (id) => { calls.evals.push(id); };
   t.after(() => engine.stop());
@@ -390,4 +395,44 @@ test("an over-escaped worker model id is normalized before launching the worker"
   await f.engine.startTicket("ticket");
   assert.equal(f.ticket.status, "running");
   assert.equal(f.calls.workerCreates[0].config.provider, "zcode-acp/builtin:plan\\GLM");
+});
+
+test("a non-git base directory fails the launch with the directory and isolation named", async (t) => {
+  const f = fixture(t, "pending");
+  f.controls.isGit = false;
+  await f.engine.startTicket("ticket");
+  assert.equal(f.calls.creates, 0);
+  assert.equal(f.ticket.status, "failed");
+  assert.match(f.ticket.lastError, /\/mock\/repo is not a git repository, but workerIsolation=worktree/);
+  const report = f.state.triggers.find((trigger) => trigger.kind === "report");
+  assert.match(report.text, /Launch failed: worker working directory \/mock\/repo is not a git repository/);
+});
+
+test("workspace creation errors name the base directory and isolation", async (t) => {
+  const f = fixture(t, "pending");
+  f.engine.paseo.workspaces.create = async () => { throw new Error("Create worktree requires a git repository"); };
+  await f.engine.startTicket("ticket");
+  assert.match(
+    f.ticket.lastError,
+    /worker workspace creation failed \(base \/mock\/repo, isolation worktree\): Create worktree requires a git repository/,
+  );
+});
+
+test("the Router sees the worker base directory and any problem with it", async (t) => {
+  const f = fixture(t);
+  f.controls.isGit = false;
+  pendingTrigger(f.state);
+  await f.engine.runEval("thread");
+  const prompt = f.calls.prompts.at(-1);
+  assert.match(prompt, /## Worker environment\nbase directory: \/mock\/repo\nisolation: worktree/);
+  assert.match(prompt, /PROBLEM: worker working directory \/mock\/repo is not a git repository/);
+  assert.match(f.engine.snapshot().workingDirIssue, /not a git repository/);
+});
+
+test("a usable base directory reports no problem to the Router or the snapshot", async (t) => {
+  const f = fixture(t);
+  pendingTrigger(f.state);
+  await f.engine.runEval("thread");
+  assert.doesNotMatch(f.calls.prompts.at(-1), /PROBLEM:/);
+  assert.equal(f.engine.snapshot().workingDirIssue, null);
 });

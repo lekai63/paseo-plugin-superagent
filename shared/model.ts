@@ -179,6 +179,8 @@ export function emptyState(): SuperagentState {
 export const SuperagentSnapshotSchema = z.object({
   configured: z.boolean(),
   workingDir: z.string(),
+  /** Worker 基础目录的问题(如 worktree 隔离但不是 git 仓库);可用时为空。 */
+  workingDirIssue: z.string().nullish(),
   routerAgentId: z.string().nullish(),
   routerProvider: z.string().nullish(),
   workerProvider: z.string().nullish(),

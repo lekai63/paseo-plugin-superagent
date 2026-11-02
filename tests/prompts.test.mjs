@@ -16,12 +16,22 @@ test("every Router eval prompt carries the decision-only rules before the thread
     id: "trigger", threadId: "thread", threadKey: "manual:k", kind: "manual", sender: "user",
     text: "research something", status: "pending", context: false, receivedAt: "2020-01-01T00:00:00.000Z",
   };
-  const prompt = composeEvalPrompt({ thread, batch: [trigger], state });
+  const worker = { workingDir: "/repo", isolation: "worktree", issue: null };
+  const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker });
   assert.match(prompt, /^\[Superagent Router instructions/);
   assert.match(prompt, /do NOT call any tools/);
   assert.match(prompt, /dispatch \(the default for real work\)/);
   assert.match(prompt, /If answering would need a lookup, dispatch instead/);
   assert.ok(prompt.indexOf("You are the Router") < prompt.indexOf("# Thread: test"));
+  assert.match(prompt, /## Worker environment\nbase directory: \/repo\nisolation: worktree/);
+  assert.doesNotMatch(prompt, /PROBLEM:/);
+
+  const shared = composeEvalPrompt({
+    thread, batch: [trigger], state,
+    worker: { workingDir: "/dir", isolation: "shared", issue: "worker working directory /dir does not exist" },
+  });
+  assert.match(shared, /isolation: shared — workers work directly inside the base directory/);
+  assert.match(shared, /PROBLEM: worker working directory \/dir does not exist\. Dispatching will fail/);
 });
 
 test("the Worker's first prompt carries its role and report instructions", () => {
