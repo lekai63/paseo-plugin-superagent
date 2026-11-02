@@ -57,12 +57,12 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 | 设置 | 说明 |
 |---|---|
 | 工作目录 | 绝对路径。Router 的 cwd,也是 Worker worktree 的基准仓库(**必填**) |
-| Router provider/model | 留空自动选用宿主可用默认(claude → codex → opencode → 任意) |
+| Router provider/model | 留空自动选用宿主可用默认(claude → codex → opencode → 任意)。model id 以 `paseo provider models <provider>` 列出的为准(如 `zcode-acp/builtin:bigmodel-coding-plan\GLM-5.3-Flash`,单个反斜杠);填错时 Router 评估会报出可用 id |
 | Worker provider/model | 同上,建议配最强模型 |
 | Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared` |
 | Worker 超时 / 重试次数 / 批窗口 | 引擎调参 |
 | 注入委派 MCP | 开启后所有普通 agent 的会话注入 `superagent_dispatch` 工具。走**插件自持的本地 MCP server**(`127.0.0.1` 随机端口 + 随机密钥路径),不受宿主 "Paseo tools"(`mcp.injectIntoAgents`)开关影响 |
-| 注入 provider | 允许注入上述 MCP 的 provider,逗号分隔;留空 = claude/codex/opencode/omp/copilot。不支持 MCP server 的 provider(如 pi、ACP 系)注入会导致会话启动失败,默认排除 |
+| 注入 provider | 允许注入上述 MCP 的 provider,逗号分隔(如 `codex,claude`);留空 = claude,codex,opencode,omp,copilot。不支持 MCP server 的 provider(如 pi、ACP 系)注入会导致会话启动失败,默认排除 |
 
 ## IM 触发源(飞书 / QQ / 钉钉 / 企业微信)
 

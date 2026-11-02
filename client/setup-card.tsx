@@ -114,7 +114,7 @@ function SetupForm({
       />
       {draft.agentToolEnabled && (
         <SettingsInput
-          label="注入的 provider(逗号分隔;留空 = claude/codex/opencode/omp/copilot)"
+          label="注入的 provider(逗号分隔;留空 = claude,codex,opencode,omp,copilot)"
           initialValue={draft.agentToolProviders}
           onChangeText={(value) => change("agentToolProviders", value)}
           disabled={settings.saving}

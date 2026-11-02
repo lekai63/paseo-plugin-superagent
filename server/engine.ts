@@ -15,6 +15,7 @@ import {
 import { SETTINGS_DEFAULTS, superagentSettings, type SuperagentSettingsValues } from "../shared/settings";
 import { composeEvalPrompt, ensureRouter, newDecision, parseVerdict, readLastAssistantMessage } from "./router";
 import { harvestReport, launchWorker, retireWorker } from "./workers";
+import { resolveProviderSelection } from "./providers";
 
 /**
  * Superagent 引擎:整个编排层的驱动核心。
@@ -65,6 +66,8 @@ export class SuperagentEngine {
   private watchedTickets = new Set<string>();
   /** 线程评估连续失败计数(unparsed/异常),≥3 次后看门狗不再自动重排,防失控循环。 */
   private evalFailures = new Map<string, number>();
+  /** 已提示过的 provider 设置纠正(每个设置值只告警一次)。 */
+  private providerNotes = new Set<string>();
   private lastWatchdogAt: string | null = null;
   private lastWatchdogNote: string | null = null;
   private replySink: ReplySink | null = null;
@@ -512,8 +515,21 @@ export class SuperagentEngine {
     const ticket = state.tickets.find((t) => t.id === ticketId);
     if (!ticket || ticket.status !== "pending") return;
 
-    const workerProvider = await this.resolveProvider("worker", state.kv.workerProvider);
-    if (!workerProvider) throw new Error("no available provider for workers");
+    let workerProvider: string;
+    try {
+      workerProvider = await this.resolveProvider("worker", state.kv.workerProvider);
+      if (!workerProvider) throw new Error("no available provider for workers");
+    } catch (error) {
+      // 设置错误时 Ticket 保持 pending(看门狗会重试),但把原因写进 lastError 供 UI 展示。
+      const message = truncate(error instanceof Error ? error.message : String(error), 500);
+      await this.store.update((next) => {
+        const target = next.tickets.find((t) => t.id === ticketId);
+        if (!target || target.status !== "pending" || target.lastError === message) return;
+        target.lastError = message;
+        target.updatedAt = new Date().toISOString();
+      });
+      throw error;
+    }
     if (state.kv.workerProvider !== workerProvider) {
       await this.store.update((next) => {
         next.kv.workerProvider = workerProvider;
@@ -961,7 +977,7 @@ export class SuperagentEngine {
     remembered: string | null | undefined,
   ): Promise<string> {
     const configured = role === "router" ? this.settingsValues.routerProvider : this.settingsValues.workerProvider;
-    if (configured.trim()) return configured.trim();
+    if (configured.trim()) return this.validateConfiguredProvider(role, configured.trim());
     if (remembered) return remembered;
     const paseo = this.requirePaseo();
     try {
@@ -977,5 +993,30 @@ export class SuperagentEngine {
       console.error("[superagent] provider discovery failed", error);
       return "";
     }
+  }
+
+  /**
+   * 显式设置的 provider/model 先对照 provider 快照校验,避免把错误 model 交给 provider
+   * 后只拿到一句 "Internal error";过度转义的反斜杠自动纠正。快照不可用时原样放行。
+   */
+  private async validateConfiguredProvider(role: "router" | "worker", configured: string): Promise<string> {
+    const paseo = this.requirePaseo();
+    let entries;
+    try {
+      await paseo.providers.waitForReady({ timeoutMs: 20_000 }).catch(() => undefined);
+      entries = (await paseo.providers.snapshot()).entries;
+    } catch (error) {
+      console.error("[superagent] provider snapshot unavailable; using configured provider as-is", error);
+      return configured;
+    }
+    const result = resolveProviderSelection(configured, entries);
+    if ("error" in result) {
+      throw new Error(`${role} provider setting "${configured}" is invalid: ${result.error}`);
+    }
+    if (result.note && !this.providerNotes.has(`${role}:${configured}`)) {
+      this.providerNotes.add(`${role}:${configured}`);
+      console.warn(`[superagent] ${role} provider: ${result.note}`);
+    }
+    return result.selection;
   }
 }

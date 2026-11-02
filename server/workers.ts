@@ -90,7 +90,8 @@ export async function launchWorker(
     } catch (cleanupError) {
       console.error("[superagent] failed launch workspace archive failed", cleanupError);
     }
-    throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`worker agent creation failed (provider "${provider}"): ${message}`, { cause: error });
   }
 }
 

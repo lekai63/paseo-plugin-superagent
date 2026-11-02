@@ -8,6 +8,14 @@ import { SETTINGS_DEFAULTS } from "../shared/settings.ts";
 
 const oldTime = "2020-01-01T00:00:00.000Z";
 
+const PROVIDER_ENTRIES = [
+  { provider: "codex", enabled: true, status: "ready", models: [{ id: "test", isDefault: true }] },
+  {
+    provider: "zcode-acp", enabled: true, status: "ready",
+    models: [{ id: "builtin:plan\\GLM-Flash", isDefault: false }, { id: "builtin:plan\\GLM", isDefault: true }],
+  },
+];
+
 function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -38,7 +46,10 @@ function fixture(t, status = "running", subscribed = true) {
     startedAt: oldTime, attempts: status === "pending" ? 0 : 1, subscribed,
     report: null, lastError: null, createdAt: oldTime, updatedAt: oldTime,
   });
-  const calls = { sends: [], watches: [], archives: [], workspaceArchives: [], creates: 0, evals: [] };
+  const calls = {
+    sends: [], watches: [], archives: [], workspaceArchives: [], creates: 0, evals: [],
+    routerCreates: [], workerCreates: [],
+  };
   const controls = {
     send: async () => {},
     createAgent: async () => ({ id: "new-worker" }),
@@ -68,13 +79,28 @@ function fixture(t, status = "running", subscribed = true) {
     return handles.get(id);
   };
   const paseo = {
-    agents: { ref },
+    agents: {
+      ref,
+      create: async (options) => {
+        calls.routerCreates.push(options);
+        return ref("new-router");
+      },
+    },
+    providers: {
+      waitForReady: async () => ({ entries: PROVIDER_ENTRIES }),
+      snapshot: async () => ({ entries: PROVIDER_ENTRIES }),
+    },
     workspaces: {
       create: async () => {
         calls.creates++;
         return {
           id: "new-workspace",
-          agents: { create: () => controls.createAgent() },
+          agents: {
+            create: (options) => {
+              calls.workerCreates.push(options);
+              return controls.createAgent(options);
+            },
+          },
           archive: async () => { calls.workspaceArchives.push("new-workspace"); },
         };
       },
@@ -95,7 +121,7 @@ function fixture(t, status = "running", subscribed = true) {
   engine.primed = true;
   engine.scheduleEval = (id) => { calls.evals.push(id); };
   t.after(() => engine.stop());
-  return { engine, state, calls, controls, finishes, ref, ticket: state.tickets[0] };
+  return { engine, state, calls, controls, finishes, ref, values, ticket: state.tickets[0] };
 }
 
 function pendingTrigger(state) {
@@ -310,4 +336,58 @@ test("Feishu stop clears references even when closing throws", async () => {
   await assert.rejects(source.stop(), /close failed/);
   assert.equal(source.wsClient, null);
   assert.equal(source.client, null);
+});
+
+test("an over-escaped router model id is normalized before creating the Router", async (t) => {
+  const f = fixture(t);
+  f.state.kv.routerAgentId = null;
+  f.values.routerProvider = "zcode-acp/builtin:plan\\\\GLM-Flash";
+  pendingTrigger(f.state);
+  await f.engine.runEval("thread");
+  assert.equal(f.calls.routerCreates.length, 1);
+  assert.equal(f.calls.routerCreates[0].config.provider, "zcode-acp/builtin:plan\\GLM-Flash");
+  assert.equal(f.state.kv.routerAgentId, "new-router");
+  assert.equal(f.state.kv.routerProvider, "zcode-acp/builtin:plan\\GLM-Flash");
+});
+
+test("an unknown router model fails the eval with the available model ids instead of creating an agent", async (t) => {
+  const f = fixture(t);
+  f.state.kv.routerAgentId = null;
+  f.values.routerProvider = "zcode-acp/nope";
+  pendingTrigger(f.state);
+  await assert.rejects(f.engine.runEval("thread"), (error) => {
+    assert.match(error.message, /router provider setting "zcode-acp\/nope" is invalid/);
+    assert.match(error.message, /builtin:plan\\GLM-Flash/);
+    return true;
+  });
+  assert.equal(f.calls.routerCreates.length, 0);
+});
+
+test("Router creation failures name the provider", async (t) => {
+  const f = fixture(t);
+  f.state.kv.routerAgentId = null;
+  f.values.routerProvider = "zcode-acp/builtin:plan\\GLM";
+  pendingTrigger(f.state);
+  f.engine.paseo.agents.create = async () => { throw new Error("Internal error"); };
+  await assert.rejects(
+    f.engine.runEval("thread"),
+    /router agent creation failed \(provider "zcode-acp\/builtin:plan\\GLM", cwd \/mock\/repo\): Internal error/,
+  );
+});
+
+test("an invalid worker model keeps the ticket pending with a readable lastError", async (t) => {
+  const f = fixture(t, "pending");
+  f.values.workerProvider = "zcode-acp/nope";
+  await assert.rejects(f.engine.startTicket("ticket"), /worker provider setting/);
+  assert.equal(f.ticket.status, "pending");
+  assert.match(f.ticket.lastError, /model "nope" is not offered by provider "zcode-acp"/);
+  assert.equal(f.calls.creates, 0);
+});
+
+test("an over-escaped worker model id is normalized before launching the worker", async (t) => {
+  const f = fixture(t, "pending");
+  f.values.workerProvider = "zcode-acp/builtin:plan\\\\GLM";
+  await f.engine.startTicket("ticket");
+  assert.equal(f.ticket.status, "running");
+  assert.equal(f.calls.workerCreates[0].config.provider, "zcode-acp/builtin:plan\\GLM");
 });

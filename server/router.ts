@@ -194,15 +194,24 @@ export async function ensureRouter(
   }
   if (!provider) return { error: "router provider is not configured" };
   if (!workingDir) return { error: "working directory is not configured" };
-  const handle = await paseo.agents.create({
-    config: {
-      provider,
-      systemPrompt: ROUTER_SYSTEM_PROMPT,
-    },
-    cwd: workingDir,
-    title: "Superagent Router",
-    labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE },
-  });
+  let handle: PaseoAgentHandle;
+  try {
+    handle = await paseo.agents.create({
+      config: {
+        provider,
+        systemPrompt: ROUTER_SYSTEM_PROMPT,
+      },
+      cwd: workingDir,
+      title: "Superagent Router",
+      labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE },
+    });
+  } catch (error) {
+    // provider 侧的失败往往只有 "Internal error",补上 provider/目录便于定位。
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`router agent creation failed (provider "${provider}", cwd ${workingDir}): ${message}`, {
+      cause: error,
+    });
+  }
   return { handle, agentId: handle.id };
 }
 
