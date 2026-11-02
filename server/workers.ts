@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { SuperagentSettingsValues } from "../shared/settings";
 import { slugify, truncate, type SuperagentState, type Ticket } from "../shared/model";
@@ -29,9 +30,18 @@ const WORKER_SYSTEM_PROMPT = [
   "file inside YOUR working directory — never edit the original checkout outside it.",
 ].join("\n");
 
+/**
+ * shared 隔离下每个 Ticket 的专属子目录:`<workingDir>/tasks/<YYYYMMDD>-<标题>-<id 尾号>`。
+ * 由插件确定(Router 派发时还不知道 Ticket id),在 Worker 首条 prompt 里明确告知。
+ */
+export function taskDirectory(workingDir: string, ticket: Pick<Ticket, "id" | "title" | "createdAt">): string {
+  const date = (ticket.createdAt || new Date().toISOString()).slice(0, 10).replaceAll("-", "");
+  return join(workingDir, "tasks", `${date}-${slugify(ticket.title, 24)}-${ticket.id.slice(-6)}`);
+}
+
 /** Worker 首条 prompt:角色与汇报要求 + 执行环境说明 + 任务书。 */
 export function composeWorkerPrompt(
-  ticket: Ticket,
+  ticket: Pick<Ticket, "id" | "title" | "mandate" | "createdAt">,
   workingDir: string,
   isolation: "worktree" | "shared",
 ): string {
@@ -42,7 +52,12 @@ export function composeWorkerPrompt(
           `Your current working directory IS that copy. Absolute paths into ${workingDir} in the mandate refer to the same file INSIDE your working directory.`,
           `Do not edit the original checkout at ${workingDir}.`,
         ].join("\n")
-      : `[Execution environment] You are working in the shared checkout at ${workingDir}. Coordinate with any concurrent work there.`;
+      : [
+          `[Execution environment] You are working in the shared directory ${workingDir}; other workers use it concurrently.`,
+          `Your task directory is ${taskDirectory(workingDir, ticket)} — create it if it does not exist and put every file you create, download or generate for this ticket inside it.`,
+          "You may read anything you need elsewhere, but only modify files outside your task directory when the mandate explicitly names them.",
+          "Mention the task directory in your final report.",
+        ].join("\n");
   const role = `[Worker instructions]\n${WORKER_ROLE.join("\n")}`;
   return `${role}\n\n${environment}\n\n# Ticket: ${ticket.title}\n\n${ticket.mandate}`;
 }

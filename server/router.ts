@@ -68,8 +68,16 @@ function workerEnvironmentLines({ workingDir, isolation, issue }: RouterWorkerEn
   lines.push(
     isolation === "worktree"
       ? "isolation: worktree — each ticket gets its own git worktree branch of the base directory"
-      : "isolation: shared — workers work directly inside the base directory",
+      : "isolation: shared — workers work directly inside the base directory, which they share",
   );
+  if (isolation === "shared") {
+    lines.push(
+      "Each ticket automatically gets its own task directory <base directory>/tasks/<date>-<title>-<id>,",
+      "and the worker is told its exact path. Write the mandate around \"your task directory\": all new",
+      "files and outputs go there. Do not invent other output locations in the base directory; only name",
+      "an existing file or folder elsewhere when the human explicitly asks for that location.",
+    );
+  }
   if (issue) lines.push(`PROBLEM: ${issue}. Dispatching will fail until this is fixed.`);
   return lines;
 }

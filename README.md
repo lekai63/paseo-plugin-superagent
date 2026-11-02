@@ -59,7 +59,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 | 工作目录 | 绝对路径。Router 的 cwd,也是所有 Worker 的基础目录(**必填**)。`worktree` 隔离时必须位于 git 仓库内,否则配置卡会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式。所有 Worker 都只在这一个目录(或其 worktree)里工作 |
 | Router provider/model | 留空自动选用宿主可用默认(claude → codex → opencode → 任意)。model id 以 `paseo provider models <provider>` 列出的为准(如 `zcode-acp/builtin:bigmodel-coding-plan\GLM-5.3-Flash`,单个反斜杠);填错时 Router 评估会报出可用 id |
 | Worker provider/model | 同上,建议配最强模型 |
-| Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared` |
+| Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared`(直接在工作目录里干活,不需要 git;每个 Ticket 的产出放进专属子目录 `tasks/<日期>-<标题>-<id 尾号>/`,Router 与 Worker 的提示词都会说明) |
 | Worker 超时 / 重试次数 / 批窗口 | 引擎调参 |
 | 注入委派 MCP | 开启后所有普通 agent 的会话注入 `superagent_dispatch` 工具。走**插件自持的本地 MCP server**(`127.0.0.1` 随机端口 + 随机密钥路径),不受宿主 "Paseo tools"(`mcp.injectIntoAgents`)开关影响 |
 | 注入 provider | 允许注入上述 MCP 的 provider,逗号分隔(如 `codex,claude`);留空 = claude,codex,opencode,omp,copilot。不支持 MCP server 的 provider(如 pi、ACP 系)注入会导致会话启动失败,默认排除 |
