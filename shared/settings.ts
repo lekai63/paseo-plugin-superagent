@@ -1,6 +1,21 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 
+/** 数值设置的取值范围:schema 与设置页的输入校验共用这一份。 */
+export const NUMBER_LIMITS = {
+  evalBatchMs: { min: 0, max: 60000 },
+  workerTimeoutMin: { min: 5, max: 1440 },
+  maxTicketAttempts: { min: 0, max: 5 },
+  triggerMaxChars: { min: 500, max: 64000 },
+  imReplyMaxChars: { min: 100, max: 4000 },
+} as const;
+export type NumberSettingKey = keyof typeof NUMBER_LIMITS;
+
+function boundedInt(key: NumberSettingKey, fallback: number) {
+  const { min, max } = NUMBER_LIMITS[key];
+  return z.number().int().min(min).max(max).default(fallback);
+}
+
 /**
  * Host 级设置。provider 留空时引擎会在首次需要时从 daemon 的 provider 快照里
  * 自动挑一个稳定的默认(优先 claude → codex → opencode → 任意可用),并记入 kv,
@@ -23,13 +38,13 @@ export const superagentSettings = defineSettings({
     /** Worker 隔离方式:worktree 独立工作区,或共享 workingDir 的目录工作区。 */
     workerIsolation: z.enum(["worktree", "shared"]).default("worktree"),
     /** 触发积攒窗口:窗口内同线程触发合并进一次 Router 评估(批处理)。 */
-    evalBatchMs: z.number().int().min(0).max(60000).default(1500),
+    evalBatchMs: boundedInt("evalBatchMs", 1500),
     /** Worker 单轮运行上限,超时看门狗中断并判失败。 */
-    workerTimeoutMin: z.number().int().min(5).max(1440).default(120),
+    workerTimeoutMin: boundedInt("workerTimeoutMin", 120),
     /** Ticket 失败重试上限。 */
-    maxTicketAttempts: z.number().int().min(0).max(5).default(1),
+    maxTicketAttempts: boundedInt("maxTicketAttempts", 1),
     /** 单个触发文本上限,超出即被 fast-path 截断。 */
-    triggerMaxChars: z.number().int().min(500).max(64000).default(8000),
+    triggerMaxChars: boundedInt("triggerMaxChars", 8000),
     /**
      * 是否向所有(非本插件创建的)agent 注入 superagent_dispatch 委派 MCP server。
      * 插件自持通道:不受宿主 "Paseo tools"(mcp.injectIntoAgents)开关影响。
@@ -82,7 +97,7 @@ export const superagentSettings = defineSettings({
     wecomAllowChats: z.string().trim().max(2000).default(""),
 
     /** IM 回复截断上限(字符)。 */
-    imReplyMaxChars: z.number().int().min(100).max(4000).default(600),
+    imReplyMaxChars: boundedInt("imReplyMaxChars", 600),
   }),
   /** v1/v2 → v3:新字段由 schema 默认值补齐;v3 → v4:新增 agentToolProviders 同理。 */
   migrate: (values) => values,

@@ -52,21 +52,21 @@ paseo plugin install /absolute/path/to/paseo-plugin-superagent
 paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 ```
 
-侧栏出现 **Superagent** 入口;首次进入完成配置:
+侧栏出现 **Superagent** 入口。配置在 **Settings → Plugins → Superagent**(主界面未配置时会提示并一键跳转;Command Center 搜「Superagent 设置」也能打开)。所有修改先进草稿,点「保存」统一生效,输入有误会在对应行标红:
 
 | 设置 | 说明 |
 |---|---|
-| 工作目录 | 绝对路径。Router 的 cwd,也是所有 Worker 的基础目录(**必填**)。`worktree` 隔离时必须位于 git 仓库内,否则配置卡会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式。所有 Worker 都只在这一个目录(或其 worktree)里工作 |
+| 工作目录 | 绝对路径。Router 的 cwd,也是所有 Worker 的基础目录(**必填**)。`worktree` 隔离时必须位于 git 仓库内,否则主界面与设置页都会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式。所有 Worker 都只在这一个目录(或其 worktree)里工作 |
 | Router provider/model | 留空自动选用宿主可用默认(claude → codex → opencode → 任意)。model id 以 `paseo provider models <provider>` 列出的为准(如 `zcode-acp/builtin:bigmodel-coding-plan\GLM-5.3-Flash`,单个反斜杠);填错时 Router 评估会报出可用 id |
 | Worker provider/model | 同上,建议配最强模型 |
 | Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared`(直接在工作目录里干活,不需要 git。工作目录根下有 `AGENTS.md`/`CLAUDE.md` 时,Worker 按其中的归档规则放产出并完成要求的登记;没有规则时,每个 Ticket 的产出放进专属子目录 `tasks/<本地日期>-<标题>-<id 尾号>/`。Router 与 Worker 的提示词都会说明) |
-| Worker 超时 / 重试次数 / 批窗口 | 引擎调参 |
+| Worker 超时 / 失败重试次数 / 批处理窗口 / 单条消息上限 | 引擎调参(设置页「执行」分组,超出范围会就地提示) |
 | 注入委派 MCP | 开启后所有普通 agent 的会话注入 `superagent_dispatch` 工具。走**插件自持的本地 MCP server**(`127.0.0.1` 随机端口 + 随机密钥路径),不受宿主 "Paseo tools"(`mcp.injectIntoAgents`)开关影响 |
 | 注入 provider | 允许注入上述 MCP 的 provider,逗号分隔(如 `codex,claude`);留空 = claude,codex,opencode,omp,copilot。不支持 MCP server 的 provider(如 pi、ACP 系)注入会导致会话启动失败,默认排除 |
 
 ## IM 触发源(飞书 / QQ / 钉钉 / 企业微信)
 
-在配置卡打开对应开关并填入凭据与**白名单**(发送者/会话至少一项;全空不启动,防陌生人触发)。保存即热重载,无需重启 daemon。
+在设置页「IM 触发源」打开对应开关并填入凭据与**白名单**(发送者/会话至少一项;全空不启动,防陌生人触发)。保存即热重载,无需重启 daemon。
 
 > 选型说明:调研过 [openclaw-china](https://github.com/BytePioneer-AI/openclaw-china)(MIT,TypeScript)——其 adapter 深度绑定 OpenClaw 宿主 runtime(消息路由/会话存储/流式回复均走宿主),无法脱离 OpenClaw 独立 import。因此本插件采用与其**相同的官方 SDK 矩阵**直接接入:飞书 `@larksuiteoapi/node-sdk`、钉钉 `dingtalk-stream`、企微 `@wecom/aibot-node-sdk`,全部官方 API、长连接、免公网。
 
@@ -76,7 +76,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 2. 添加**机器人**能力;事件与回调 → 选择**使用长连接接收事件**;
 3. 订阅事件 `im.message.receive_v1`;权限开通 `im:message` 与 `im:message:send_as_bot`;
 4. 发布版本并在群里/私聊添加机器人;
-5. 配置卡填:App ID、App Secret、允许的发送者 `open_id`(或会话 `chat_id`)。
+5. 设置页填:App ID、App Secret、允许的发送者 `open_id`(或会话 `chat_id`)。
 
 行为:私聊直接触发;群聊需 **@机器人**。同一聊天 = 同一 Thread(话题按 root 分线程)。答复以引用回复回到原消息。
 
@@ -84,14 +84,14 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 1. [钉钉开发者后台](https://open-dev.dingtalk.com) 创建企业内部应用,记录 AppKey / AppSecret;
 2. 应用能力 → 添加**机器人**,接收消息模式选 **Stream 模式**,发布;
-3. 配置卡填:ClientId、ClientSecret、允许的发送者 `staffId`(或会话 `conversationId`)。
+3. 设置页填:ClientId、ClientSecret、允许的发送者 `staffId`(或会话 `conversationId`)。
 
 行为:单聊直接触发;群聊被 @ 才会收到(钉钉机制)。同一 conversationId = 同一 Thread。回复经消息自带的 sessionWebhook(**有过期时间**,Worker 长任务的晚到回复可能失败,失败会记录日志)。
 
 ### 企业微信(智能机器人官方长连接,免公网)
 
 1. 企业微信管理后台创建**智能机器人**,记录 botId 与 Secret;
-2. 配置卡填:botId、Secret、允许的发送者 `userid`(或群 `chatid`)。
+2. 设置页填:botId、Secret、允许的发送者 `userid`(或群 `chatid`)。
 
 行为:单聊直接触发;群聊需 @机器人。回复为流式帧(单次完成)。**req_id 回复窗口有限**,晚到的 Worker 汇报回复可能被企微拒绝——长任务建议依赖 app 界面/推送查看结果,IM 内主要收 Router 的即时裁决与 ack。
 
@@ -99,7 +99,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 1. 安装 [NapCat](https://napneko.github.io/) 并用 QQ 号登录;
 2. 网络配置开启**正向 WebSocket**(如 `ws://127.0.0.1:3001`),可设 Access Token;
-3. 配置卡填:endpoint、token、允许的 QQ 号 / 群号。
+3. 设置页填:endpoint、token、允许的 QQ 号 / 群号。
 
 行为:私聊直接触发;群里需 @机器人。回复带引用,断线自动重连。(官方 QQ 机器人平台路线见 openclaw-china/qqbot,需开发者资质,暂未内置。)
 
@@ -107,16 +107,16 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 ## 使用
 
-1. **派发**:界面"派发任务"卡片,或任意 agent 会话里 `/superagent 修复登录页的 CORS 问题并补测试`。
-2. **观察**:线程卡片展开看 Router 裁决、Ticket 状态、触发历史;点 Worker id 直接跳转会话;Router 也可从顶栏打开。
-3. **追加**:线程卡片输入框追加消息——有订阅 Worker 时直通,否则回到 Router。
-4. **干预**:取消/重试 Ticket、退订直通、关闭线程(取消活跃 Worker 并归档其工作区)。
+1. **派发**:主界面「新任务」卡片,或任意 agent 会话里 `/superagent 修复登录页的 CORS 问题并补测试`。
+2. **观察**:顶部概览看线程/运行中/待评估/失败数;线程卡片标题旁的徽标说明当前状态(运行中、待评估、评估失败、已完成…),展开后看 Ticket 与按时间排列的「活动」(触发消息与 Router 裁决);「打开 Worker 会话」直接跳转;Router 会话在底部「运行状态」里打开。
+3. **追加**:线程卡片底部的回复框追加消息——提示文字会说明去向:有订阅 Worker 时直通它,否则交给 Router。
+4. **干预**:取消/重试 Ticket、取消直通(运行中)/标记完成(待命)、重新评估、关闭线程(取消活跃 Worker 并归档其工作区)。取消与关闭需要再点一次确认。
 
 ## 设计取舍与限制
 
 - **Router 会话即记忆**:批处理上下文是组装的提示词(线程窗口存根),不是独立的向量库;超长历史会按存根压缩。
 - **评估串行**:单个 Router agent 全局串行评估(避免相互打断);高并发线程会排队。
-- **失败退避**:线程连续 3 次评估失败(unparsed/异常)后看门狗不再自动重排,需在界面点"立即评估"手动重试——防止 Router 持续劣化时烧 token 的失控循环。
+- **失败退避**:线程连续 3 次评估失败(unparsed/异常)后看门狗不再自动重排,线程徽标显示「评估失败」,需在线程卡片点「重新评估」手动重试——防止 Router 持续劣化时烧 token 的失控循环。
 - **权限等待**:Worker 的权限请求走 Paseo 原生权限流(app 内批准);等待期间 Ticket 保持运行,不误判完成。
 - **外部 Trigger 源**:飞书/QQ 已支持;GitHub/Slack 轮询源是下一扩展点(Paseo Hub 触发器亦可作为上游把事件投给 `superagent.dispatch`)。
 - **裁决解析**:Router 必须回 fenced JSON;解析失败记录 `unparsed` 决策并保留触发供重试,不做模型侧重问。
@@ -131,6 +131,6 @@ npm install
 npm run typecheck
 ```
 
-目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用)、`server/`(store/router/workers/engine)、`client/`(screen/setup/dispatch/thread 卡片)。引擎细节见 `server/engine.ts` 头注。
+目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用)、`server/`(store/router/workers/engine)、`client/`(主界面 screen、设置页 settings-screen、新任务 dispatch-card、线程 thread-card,以及 ui.tsx 里的按钮/徽标/提示条等小型原语)。引擎细节见 `server/engine.ts` 头注。
 
 `npm test` 使用 Node.js 24+ 的内置测试运行器与现有 TypeScript 依赖,验证 Worker 续跑、投递失败回退、取消竞态、重启恢复与飞书连接清理;不连接真实 provider 或 IM 服务。
