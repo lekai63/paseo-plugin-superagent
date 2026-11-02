@@ -9,18 +9,27 @@ import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
  * 因此全部 Worker 出现在 Router 会话的 Subagents track 里,可随时人工介入。
  */
 
-const WORKER_SYSTEM_PROMPT = [
+/**
+ * Worker 角色与汇报要求。systemPrompt 之外也放进首条 prompt:ACP 系 provider 不会把
+ * systemPrompt 交给模型,否则 Worker 不知道最终消息就是交给编排层的汇报。
+ */
+const WORKER_ROLE = [
   "You are a Worker agent executing one ticket of a super-agent orchestration layer.",
-  "You execute inside your OWN isolated workspace; your current working directory is the",
-  "authoritative copy of the repository for this ticket. Do the work described in the mandate.",
-  "When the mandate names an absolute path from the base repository, that file means the SAME",
-  "file inside YOUR working directory — never edit the original checkout outside it.",
+  "Do the work described in the mandate.",
   "When the work is done, your final message is the REPORT for the orchestrator:",
   "state what was done, key changes, verification (tests/commands run), and remaining risks.",
   "Keep the report under 300 words. If you are blocked, say precisely what you need.",
+];
+
+const WORKER_SYSTEM_PROMPT = [
+  ...WORKER_ROLE,
+  "You execute inside your OWN isolated workspace; your current working directory is the",
+  "authoritative copy of the repository for this ticket.",
+  "When the mandate names an absolute path from the base repository, that file means the SAME",
+  "file inside YOUR working directory — never edit the original checkout outside it.",
 ].join("\n");
 
-/** Worker 首条 prompt:执行环境说明 + 任务书。 */
+/** Worker 首条 prompt:角色与汇报要求 + 执行环境说明 + 任务书。 */
 export function composeWorkerPrompt(
   ticket: Ticket,
   workingDir: string,
@@ -34,7 +43,8 @@ export function composeWorkerPrompt(
           `Do not edit the original checkout at ${workingDir}.`,
         ].join("\n")
       : `[Execution environment] You are working in the shared checkout at ${workingDir}. Coordinate with any concurrent work there.`;
-  return `${environment}\n\n# Ticket: ${ticket.title}\n\n${ticket.mandate}`;
+  const role = `[Worker instructions]\n${WORKER_ROLE.join("\n")}`;
+  return `${role}\n\n${environment}\n\n# Ticket: ${ticket.title}\n\n${ticket.mandate}`;
 }
 
 export interface WorkerLaunch {

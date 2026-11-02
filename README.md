@@ -36,7 +36,7 @@ Worker 汇报(完成后自动回流)                  │
 
 | 模块 | 实现 |
 |---|---|
-| 双层架构 | Router = 常驻 agent(`superagent.role=router` 标签,provider 可配轻量模型,系统提示词禁止执行);Worker = 每 Ticket 独立 agent + worktree 隔离 + `superagent.ticket` 标签;层级在 app 的 Subagents track 可见 |
+| 双层架构 | Router = 常驻 agent(`superagent.role=router` 标签,provider 可配轻量模型,规则禁止执行与调用工具;规则随每次评估提示词下发,不依赖 provider 是否应用 systemPrompt——ACP 系如 zcode-acp 会丢弃它);Worker = 每 Ticket 独立 agent + worktree 隔离 + `superagent.ticket` 标签;层级在 app 的 Subagents track 可见 |
 | 事件驱动 | Trigger 三源(手动/agent 工具/worker 汇报);fast-path 程序过滤;Thread 归属;批窗口合并评估;订阅直通;Inline & Spill 式上下文(评估提示词只带 8 条线程窗口存根 + 触发全文上限 4000 字) |
 | 面向人的交互 | Paseo app 即信道:推送、attention、权限流;任意 agent 会话内 `/superagent` 或 `superagent_dispatch` 工具委派,Router 答复经 sourceAgentId 回到原会话;Worker 会话可随时人工接管 |
 | 存算/环境分离 | 即 Paseo daemon 本身:daemon 在你的机器,客户端(relay E2EE)在任何地方;执行环境留在原地 |
