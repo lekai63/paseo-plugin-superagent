@@ -14,6 +14,12 @@ export function outcomeLabel(outcome: Decision["outcome"]): string {
   switch (outcome) {
     case "dispatch":
       return "派发";
+    case "steer":
+      return "转向";
+    case "cancel":
+      return "取消";
+    case "retry":
+      return "重试";
     case "reply":
       return "答复";
     case "ignore":
@@ -30,12 +36,15 @@ export function outcomeLabel(outcome: Decision["outcome"]): string {
 export function outcomeTone(outcome: Decision["outcome"]): Tone {
   switch (outcome) {
     case "dispatch":
+    case "steer":
+    case "retry":
     case "reply":
       return "default";
-    case "ignore":
-      return "muted";
+    case "cancel":
     case "stop":
       return "warning";
+    case "ignore":
+      return "muted";
     case "unparsed":
     case "error":
       return "danger";
@@ -98,6 +107,8 @@ export function triggerKindLabel(kind: Trigger["kind"]): string {
       return "Agent 委派";
     case "report":
       return "Worker 汇报";
+    case "engine":
+      return "引擎";
     case "feishu":
       return "飞书";
     case "qq":

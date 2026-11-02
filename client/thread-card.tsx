@@ -265,6 +265,7 @@ function TicketRow({
   const active = ACTIVE_TICKET_STATUSES.includes(ticket.status);
   const meta = [
     ticket.workerAgentId ? `Worker ${ticket.workerAgentId.slice(0, 8)}` : null,
+    ticket.branchName ? `分支 ${ticket.branchName}` : null,
     active && ticket.startedAt ? `${relativeTime(ticket.startedAt)}启动` : `更新于 ${relativeTime(ticket.updatedAt)}`,
     ticket.attempts > 1 ? `第 ${ticket.attempts} 次尝试` : null,
     direct ? "后续消息直通此 Worker" : null,
@@ -353,6 +354,8 @@ function triggerIcon(kind: Trigger["kind"]): string {
       return "Bot";
     case "report":
       return "FileCheck";
+    case "engine":
+      return "Cog";
     default:
       return "MessageCircle";
   }

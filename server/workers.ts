@@ -92,6 +92,24 @@ export function composeWorkerPrompt(
 export interface WorkerLaunch {
   agentId: string;
   workspaceId: string | null;
+  /** worktree 隔离的 Worker 实际分支名(创建后读回);shared 隔离没有分支。 */
+  branchName: string | null;
+}
+
+type WorkspaceHandle = Awaited<ReturnType<PaseoApi["workspaces"]["create"]>>;
+
+/**
+ * 读回工作区的实际分支:分支名冲突时 Paseo 会自动换名(resolveUniqueLocalBranchName),
+ * 直接使用请求名会让 UI 与 Router 指向不存在的分支。descriptor 未带分支时退回请求名。
+ */
+async function resolveActualBranch(workspace: WorkspaceHandle, requested: string): Promise<string> {
+  const read = (descriptor: Awaited<ReturnType<WorkspaceHandle["refresh"]>>): string | null =>
+    descriptor?.gitRuntime?.currentBranch?.trim() || null;
+  try {
+    return read(workspace.current()) ?? read(await workspace.refresh()) ?? requested;
+  } catch {
+    return requested;
+  }
 }
 
 /** 为 Ticket 启动 Worker:先建工作区(worktree/shared),再在其中创建 agent。 */
@@ -107,11 +125,14 @@ export async function launchWorker(
   if (!provider) throw new Error("worker provider is not configured");
   if (!settings.workingDir) throw new Error("working directory is not configured");
 
-  const branchName = `superagent/${slugify(ticket.title, 24)}-${ticket.id.slice(-6)}`;
-  let workspace: Awaited<ReturnType<PaseoApi["workspaces"]["create"]>>;
+  const branchName =
+    settings.workerIsolation === "worktree"
+      ? `superagent/${slugify(ticket.title, 24)}-${ticket.id.slice(-6)}`
+      : null;
+  let workspace: WorkspaceHandle;
   try {
     workspace =
-      settings.workerIsolation === "worktree"
+      settings.workerIsolation === "worktree" && branchName
         ? await paseo.workspaces.create({
             title: ticket.title,
             source: {
@@ -145,7 +166,8 @@ export async function launchWorker(
       labels: { [TICKET_LABEL]: ticket.id },
       ...(routerAgentId ? { parent: routerAgentId } : {}),
     });
-    return { agentId: agent.id, workspaceId: workspace.id };
+    const actualBranch = branchName ? await resolveActualBranch(workspace, branchName) : null;
+    return { agentId: agent.id, workspaceId: workspace.id, branchName: actualBranch };
   } catch (error) {
     // Agent 创建失败时还没有可落盘的 Worker ID,先回收已创建的工作区。
     try {

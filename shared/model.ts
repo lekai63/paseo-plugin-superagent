@@ -13,7 +13,7 @@ import { z } from "zod";
  * 都发生在状态落盘之后,看门狗负责对账恢复。
  */
 
-export const TRIGGER_KINDS = ["manual", "agent", "report", "feishu", "qq", "dingtalk", "wecom"] as const;
+export const TRIGGER_KINDS = ["manual", "agent", "report", "engine", "feishu", "qq", "dingtalk", "wecom"] as const;
 export const TriggerKindSchema = z.enum(TRIGGER_KINDS);
 export type TriggerKind = z.infer<typeof TriggerKindSchema>;
 
@@ -95,6 +95,8 @@ export const TicketSchema = z.object({
   status: z.enum(TICKET_STATUSES),
   workerAgentId: z.string().nullish(),
   workspaceId: z.string().nullish(),
+  /** worktree 隔离的 Worker 分支名(评估提示词与 UI 由此告知人去哪审查);shared 隔离为空。 */
+  branchName: z.string().nullish(),
   /** 当前(或最近一次)Worker 启动时间,看门狗超时判定的基准。 */
   startedAt: z.string().nullish(),
   attempts: z.number().int().nonnegative().default(0),
@@ -107,7 +109,17 @@ export const TicketSchema = z.object({
 });
 export type Ticket = z.infer<typeof TicketSchema>;
 
-export const DECISION_OUTCOMES = ["dispatch", "reply", "ignore", "stop", "unparsed", "error"] as const;
+export const DECISION_OUTCOMES = [
+  "dispatch",
+  "steer",
+  "cancel",
+  "retry",
+  "reply",
+  "ignore",
+  "stop",
+  "unparsed",
+  "error",
+] as const;
 export type DecisionOutcome = (typeof DECISION_OUTCOMES)[number];
 
 export const DecisionSchema = z.object({
@@ -125,29 +137,77 @@ export const DecisionSchema = z.object({
 });
 export type Decision = z.infer<typeof DecisionSchema>;
 
-/** Router 的结构化裁决(JSON 块)在执行前的校验形状。 */
-export const RouterVerdictSchema = z.discriminatedUnion("decision", [
+/** 一次裁决最多包含的动作数:fan-out 上限,防止失控派发。 */
+export const ROUTER_ACTION_LIMIT = 5;
+
+/**
+ * Router 的单个动作。一次裁决是一组动作(可 fan-out 多个 dispatch、票级操控),
+ * 由引擎按序执行;旧版单裁决格式({decision:...})在 parseVerdict 里归一成 actions。
+ */
+export const RouterActionSchema = z.discriminatedUnion("action", [
   z.object({
-    decision: z.literal("dispatch"),
+    action: z.literal("dispatch"),
     title: z.string().min(1).max(120),
     mandate: z.string().min(1),
-    reply: z.string().max(2000).optional(),
     unsubscribe: z.boolean().optional(),
   }),
   z.object({
-    decision: z.literal("reply"),
+    action: z.literal("steer"),
+    ticketId: z.string().min(1),
+    text: z.string().min(1),
+    /** steer(默认)让运行中的轮次吸收指令;interrupt 打断当前轮接管。 */
+    mode: z.enum(["steer", "interrupt"]).optional(),
+  }),
+  z.object({
+    action: z.literal("cancel"),
+    ticketId: z.string().min(1),
+    rationale: z.string().max(500).optional(),
+  }),
+  z.object({
+    action: z.literal("retry"),
+    ticketId: z.string().min(1),
+  }),
+  z.object({
+    action: z.literal("reply"),
     reply: z.string().min(1).max(2000),
   }),
   z.object({
-    decision: z.literal("ignore"),
+    action: z.literal("ignore"),
     rationale: z.string().max(500).optional(),
   }),
   z.object({
-    decision: z.literal("stop"),
+    action: z.literal("stop"),
     rationale: z.string().max(500).optional(),
   }),
 ]);
+export type RouterAction = z.infer<typeof RouterActionSchema>;
+
+/** Router 的结构化裁决(JSON 块)在执行前的校验形状:1-5 个动作,按序执行。 */
+export const RouterVerdictSchema = z.object({
+  actions: z.array(RouterActionSchema).min(1).max(ROUTER_ACTION_LIMIT),
+});
 export type RouterVerdict = z.infer<typeof RouterVerdictSchema>;
+
+/**
+ * 引擎待执行的动作记录:带副作用的裁决动作(steer/cancel/retry/stop)在消费触发时
+ * 先落盘此记录,执行成功后移除;崩溃后由恢复流程按序补执行,失败重试有次数上限。
+ * dispatch 的补执行由 pending 票据 + 看门狗承担,不在此列。
+ */
+export const PendingActionSchema = z.object({
+  id: z.string().min(1),
+  threadId: z.string().min(1),
+  /** 关联的 Decision(审计与失败备注定位)。 */
+  decisionId: z.string().min(1),
+  kind: z.enum(["steer", "cancel", "retry", "stop"]),
+  ticketId: z.string().nullish(),
+  /** steer 的指令文本。 */
+  text: z.string().nullish(),
+  /** steer 的模式;其余动作为空。 */
+  mode: z.enum(["steer", "interrupt"]).nullish(),
+  attempts: z.number().int().nonnegative().default(0),
+  createdAt: z.string(),
+});
+export type PendingAction = z.infer<typeof PendingActionSchema>;
 
 /** 整个持久化文件的形状。 */
 export const SuperagentStateSchema = z.object({
@@ -161,6 +221,8 @@ export const SuperagentStateSchema = z.object({
   triggers: z.array(TriggerSchema),
   tickets: z.array(TicketSchema),
   decisions: z.array(DecisionSchema),
+  /** 旧状态文件没有此字段,解析时补空数组。 */
+  pendingActions: z.array(PendingActionSchema).default([]),
 });
 export type SuperagentState = z.infer<typeof SuperagentStateSchema>;
 
@@ -172,6 +234,7 @@ export function emptyState(): SuperagentState {
     triggers: [],
     tickets: [],
     decisions: [],
+    pendingActions: [],
   };
 }
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { composeEvalPrompt } from "../server/router.ts";
+import { composeEvalPrompt, parseVerdict } from "../server/router.ts";
 import { composeWorkerPrompt, taskDirectory } from "../server/workers.ts";
 import { emptyState } from "../shared/model.ts";
 
@@ -21,7 +21,10 @@ test("every Router eval prompt carries the decision-only rules before the thread
   assert.match(prompt, /^\[Superagent Router instructions/);
   assert.match(prompt, /do NOT call any tools/);
   assert.match(prompt, /dispatch \(the default for real work\)/);
+  assert.match(prompt, /SEVERAL dispatches/);
   assert.match(prompt, /If answering would need a lookup, dispatch instead/);
+  assert.match(prompt, /\{"actions":\[\.\.\.\]\}/);
+  assert.match(prompt, /\{"actions":\[\{"action":"steer","ticketId":"tkt_\.\.\./);
   assert.ok(prompt.indexOf("You are the Router") < prompt.indexOf("# Thread: test"));
   assert.match(prompt, /## Worker environment\nbase directory: \/repo\nisolation: worktree/);
   assert.doesNotMatch(prompt, /PROBLEM:/);
@@ -78,4 +81,80 @@ test("shared workers follow the base directory's own filing rules before the tas
   });
   assert.match(router, /own project instructions \(AGENTS\.md, CLAUDE\.md\) that define where/);
   assert.doesNotMatch(router, /Write the mandate around "your task directory"/);
+});
+
+test("active ticket lines expose the worker branch for steering and review", () => {
+  const state = emptyState();
+  const thread = { id: "t", key: "k", title: "t", state: "active", summary: null, createdAt: "", updatedAt: "" };
+  const trigger = { id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "x", status: "pending", context: false, receivedAt: "" };
+  state.tickets.push({
+    id: "tkt_1", threadId: "t", title: "Fix parser", mandate: "m", status: "running",
+    workerAgentId: "ag", workspaceId: "ws", branchName: "superagent/fix-parser-abc123",
+    startedAt: null, attempts: 1, subscribed: true, report: null, lastError: null,
+    createdAt: "", updatedAt: "",
+  });
+  const prompt = composeEvalPrompt({
+    thread, batch: [trigger], state,
+    worker: { workingDir: "/repo", isolation: "worktree", issue: null },
+  });
+  assert.match(prompt, /- \[tkt_1\] "Fix parser" status=running subscribed=true branch=superagent\/fix-parser-abc123/);
+});
+
+test("recently finished tickets are listed with ids, status and branch as retry targets", () => {
+  const state = emptyState();
+  const thread = { id: "t", key: "k", title: "t", state: "active", summary: null, createdAt: "", updatedAt: "" };
+  const trigger = { id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "retry the failed one", status: "pending", context: false, receivedAt: "" };
+  const finished = (id, title, status, updatedAt, extra = {}) => ({
+    id, threadId: "t", title, mandate: "m", status, workerAgentId: "ag", workspaceId: "ws",
+    branchName: null, startedAt: null, attempts: 1, subscribed: false, report: null,
+    lastError: null, createdAt: "", updatedAt, ...extra,
+  });
+  state.tickets.push(finished("tkt_fail", "Fix parser", "failed", "2026-01-03T00:00:00.000Z", {
+    branchName: "superagent/fix-parser-abc123", lastError: "tests failed",
+  }));
+  state.tickets.push(finished("tkt_done", "Write docs", "completed", "2026-01-02T00:00:00.000Z"));
+  state.tickets.push(finished("tkt_old", "Old job", "canceled", "2026-01-01T00:00:00.000Z"));
+  const prompt = composeEvalPrompt({
+    thread, batch: [trigger], state,
+    worker: { workingDir: "/repo", isolation: "worktree", issue: null },
+  });
+  assert.match(prompt, /## Recently finished tickets \(newest first, up to 5\)/);
+  const failIndex = prompt.indexOf('- [tkt_fail] "Fix parser" status=failed branch=superagent/fix-parser-abc123 error="tests failed"');
+  const doneIndex = prompt.indexOf('- [tkt_done] "Write docs" status=completed');
+  const oldIndex = prompt.indexOf('- [tkt_old] "Old job" status=canceled');
+  assert.ok(failIndex > 0 && doneIndex > failIndex && oldIndex > doneIndex, "newest terminal tickets come first");
+  assert.match(prompt, /Terminal tickets are listed under "Recently finished tickets" below/);
+});
+
+test("parseVerdict accepts the actions format and enforces the 1-5 cap", () => {
+  const ok = parseVerdict(
+    '```json\n{"actions":[{"action":"dispatch","title":"A","mandate":"m"},{"action":"steer","ticketId":"tkt_1","text":"hi","mode":"interrupt"}]}\n```',
+  );
+  assert.equal(ok.verdict.actions.length, 2);
+  assert.equal(ok.verdict.actions[1].mode, "interrupt");
+
+  const empty = parseVerdict('{"actions":[]}');
+  assert.ok("error" in empty, "an empty action list must be rejected");
+  const tooMany = parseVerdict(
+    JSON.stringify({ actions: Array.from({ length: 6 }, () => ({ action: "ignore" })) }),
+  );
+  assert.match(tooMany.error, /verdict schema/);
+  const shapeless = parseVerdict('{"decision2":"reply"}');
+  assert.match(shapeless.error, /verdict schema/);
+});
+
+test("parseVerdict normalizes legacy single-decision verdicts", () => {
+  const reply = parseVerdict('{"decision":"reply","reply":"done"}');
+  assert.deepEqual(reply.verdict.actions, [{ action: "reply", reply: "done" }]);
+
+  const stop = parseVerdict('{"decision":"stop","rationale":"done talking"}');
+  assert.deepEqual(stop.verdict.actions, [{ action: "stop", rationale: "done talking" }]);
+
+  const dispatch = parseVerdict(
+    '```json\n{"decision":"dispatch","title":"T","mandate":"m","reply":"on it","unsubscribe":true}\n```',
+  );
+  assert.deepEqual(dispatch.verdict.actions, [
+    { action: "dispatch", title: "T", mandate: "m", unsubscribe: true },
+    { action: "reply", reply: "on it" },
+  ]);
 });

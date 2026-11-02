@@ -57,6 +57,8 @@ function fixture(t, status = "running", subscribed = true) {
     verdict: { decision: "reply", reply: "done" },
     isGit: true,
     instructionFiles: [],
+    /** worktree 创建后工作区 descriptor 报告的实际分支;null 表示未报告(退回请求名)。 */
+    workspaceBranch: null,
   };
   const finishes = [];
   const handles = new Map();
@@ -98,8 +100,11 @@ function fixture(t, status = "running", subscribed = true) {
     workspaces: {
       create: async () => {
         calls.creates++;
+        const descriptor = { gitRuntime: { currentBranch: controls.workspaceBranch } };
         return {
           id: "new-workspace",
+          current: () => descriptor,
+          refresh: async () => descriptor,
           agents: {
             create: (options) => {
               calls.workerCreates.push(options);
@@ -278,6 +283,203 @@ test("Router stop retires every active worker, including unsubscribed and launch
   assert.deepEqual(f.state.tickets.map((ticket) => ticket.status), ["canceled", "canceled", "completed"]);
 });
 
+test("a fan-out verdict dispatches one worker per independent ask", async (t) => {
+  const f = fixture(t, "completed");
+  pendingTrigger(f.state);
+  f.controls.verdict = {
+    actions: [
+      { action: "dispatch", title: "First", mandate: "do the first thing" },
+      { action: "dispatch", title: "Second", mandate: "do the second thing", unsubscribe: true },
+    ],
+  };
+  await f.engine.runEval("thread");
+  await until(() => f.calls.creates === 2);
+  await until(() => f.state.tickets.filter((ticket) => ticket.status === "running").length === 2);
+  assert.deepEqual(f.state.decisions.map((decision) => decision.outcome), ["dispatch", "dispatch"]);
+  const launched = f.state.tickets.filter((ticket) => ticket.title !== "test");
+  assert.deepEqual(launched.map((ticket) => ticket.subscribed), [true, false]);
+  assert.equal(f.state.triggers[0].status, "evaluated");
+  assert.equal(f.state.threads[0].state, "active");
+});
+
+test("a Router steer action reaches the ticket's worker and revives a waiting one", async (t) => {
+  const f = fixture(t, "waiting");
+  pendingTrigger(f.state);
+  f.controls.verdict = {
+    actions: [{ action: "steer", ticketId: "ticket", text: "focus on the parser first", mode: "interrupt" }],
+  };
+  await f.engine.runEval("thread");
+  assert.equal(f.calls.sends.length, 1);
+  assert.ok(f.calls.sends[0].text.includes("focus on the parser first"));
+  assert.equal(f.calls.sends[0].options.activeTurnBehavior, "interrupt");
+  assert.equal(f.ticket.status, "running");
+  assert.deepEqual(f.state.decisions.map((decision) => decision.outcome), ["steer"]);
+  assert.equal(f.state.decisions[0].ticketId, "ticket");
+  assert.equal(f.state.triggers[0].status, "evaluated");
+  assert.deepEqual(f.calls.watches, ["worker"]);
+});
+
+test("a failed steer stays as a retriable pending action without replaying the batch", async (t) => {
+  const f = fixture(t, "waiting");
+  f.controls.send = async () => { throw new Error("offline"); };
+  pendingTrigger(f.state);
+  f.controls.verdict = { actions: [{ action: "steer", ticketId: "ticket", text: "hello?" }] };
+  await f.engine.runEval("thread");
+  assert.equal(f.state.decisions[0].outcome, "steer");
+  assert.equal(f.state.triggers[0].status, "evaluated");
+  assert.equal(f.state.pendingActions.length, 1);
+  assert.equal(f.state.pendingActions[0].attempts, 1);
+  assert.equal(f.ticket.status, "waiting");
+});
+
+test("a dispatch before a failing steer runs exactly once and the failure reflows to the Router", async (t) => {
+  const f = fixture(t, "running");
+  f.ticket.startedAt = new Date().toISOString();
+  f.controls.send = async () => { throw new Error("offline"); };
+  pendingTrigger(f.state);
+  f.controls.verdict = {
+    actions: [
+      { action: "dispatch", title: "Job", mandate: "do the job" },
+      { action: "steer", ticketId: "ticket", text: "and also this" },
+    ],
+  };
+  await f.engine.runEval("thread");
+  await until(() => f.calls.creates === 1);
+  await until(() => f.state.tickets.filter((ticket) => ticket.title === "Job").length === 1);
+  // 看门狗重试耗尽尝试上限后放弃,失败回流成触发,原批触发保持已消费。
+  await f.engine.reconcile();
+  await until(() => f.state.pendingActions[0]?.attempts === 2);
+  await f.engine.reconcile();
+  await until(() => f.state.pendingActions.length === 0);
+  assert.equal(f.state.tickets.filter((ticket) => ticket.title === "Job").length, 1);
+  const failure = f.state.triggers.find((trigger) => trigger.sender === "engine");
+  assert.equal(failure.kind, "engine");
+  assert.equal(failure.status, "pending");
+  assert.match(failure.text, /Router steer action failed after 3 attempts: offline/);
+  assert.match(failure.text, /Undelivered instruction for ticket: "and also this"/);
+  assert.equal(f.state.triggers[0].status, "evaluated");
+  assert.match(f.state.triggers[0].note, /steer action failed: offline/);
+});
+
+test("recovery re-executes a persisted cancel action after a restart", async (t) => {
+  const f = fixture(t);
+  f.ticket.startedAt = new Date().toISOString();
+  f.state.pendingActions.push({
+    id: "act_restart", threadId: "thread", decisionId: "dec_restart", kind: "cancel",
+    ticketId: "ticket", text: null, mode: null, attempts: 0, createdAt: oldTime,
+  });
+  await f.engine.recover();
+  await until(() => f.state.pendingActions.length === 0);
+  assert.equal(f.ticket.status, "canceled");
+  assert.deepEqual(f.calls.archives, ["worker"]);
+  assert.deepEqual(f.calls.workspaceArchives, ["workspace"]);
+});
+
+test("recovery re-executes a persisted steer action after a restart", async (t) => {
+  const f = fixture(t);
+  f.ticket.startedAt = new Date().toISOString();
+  f.state.pendingActions.push({
+    id: "act_restart", threadId: "thread", decisionId: "dec_restart", kind: "steer",
+    ticketId: "ticket", text: "focus on tests", mode: "interrupt", attempts: 0, createdAt: oldTime,
+  });
+  await f.engine.recover();
+  await until(() => f.state.pendingActions.length === 0);
+  assert.equal(f.calls.sends.length, 1);
+  assert.ok(f.calls.sends[0].text.includes("focus on tests"));
+  assert.equal(f.calls.sends[0].options.activeTurnBehavior, "interrupt");
+});
+
+test("a steer before stop is delivered before the thread closes", async (t) => {
+  const f = fixture(t);
+  pendingTrigger(f.state);
+  f.controls.verdict = {
+    actions: [
+      { action: "steer", ticketId: "ticket", text: "wrap up now", mode: "interrupt" },
+      { action: "stop", rationale: "conversation done" },
+    ],
+  };
+  await f.engine.runEval("thread");
+  assert.equal(f.calls.sends.length, 1);
+  assert.ok(f.calls.sends[0].text.includes("wrap up now"));
+  assert.equal(f.ticket.status, "canceled");
+  assert.equal(f.state.threads[0].state, "closed");
+  assert.deepEqual(f.calls.archives, ["worker"]);
+  assert.deepEqual(f.calls.workspaceArchives, ["workspace"]);
+  assert.equal(f.state.triggers[0].status, "evaluated");
+  assert.equal(f.state.pendingActions.length, 0);
+});
+
+test("follow-ups on a thread with several subscribed tickets go through the Router", async (t) => {
+  const f = fixture(t);
+  f.state.tickets.push({
+    ...f.ticket, id: "ticket2", workerAgentId: "worker2", workspaceId: "workspace2",
+  });
+  const result = await f.engine.dispatch({ threadId: "thread", task: "cancel the second task" });
+  assert.equal(result.directDelivered, false);
+  assert.deepEqual(f.calls.evals, ["thread"]);
+  assert.equal(f.state.triggers[0].status, "pending");
+  assert.deepEqual(f.calls.sends, []);
+});
+
+test("a renamed worktree branch is read back from the created workspace", async (t) => {
+  const f = fixture(t, "pending");
+  f.controls.workspaceBranch = "superagent/test-ticket-2";
+  await f.engine.startTicket("ticket");
+  assert.equal(f.ticket.branchName, "superagent/test-ticket-2");
+});
+
+test("steering a ticket that has no worker yet keeps the steer as a pending action", async (t) => {
+  const f = fixture(t, "launching");
+  pendingTrigger(f.state);
+  f.controls.verdict = { actions: [{ action: "steer", ticketId: "ticket", text: "go" }] };
+  await f.engine.runEval("thread");
+  assert.deepEqual(f.calls.sends, []);
+  assert.equal(f.state.triggers[0].status, "evaluated");
+  assert.equal(f.state.pendingActions.length, 1);
+  assert.equal(f.state.pendingActions[0].attempts, 1);
+});
+
+test("a Router cancel action cancels exactly one ticket and keeps the thread open", async (t) => {
+  const f = fixture(t, "running", false);
+  f.state.tickets.push({
+    ...f.ticket, id: "other", title: "other", workerAgentId: "worker2", workspaceId: "workspace2",
+  });
+  pendingTrigger(f.state);
+  f.controls.verdict = { actions: [{ action: "cancel", ticketId: "other", rationale: "wrong approach" }] };
+  await f.engine.runEval("thread");
+  assert.equal(f.state.threads[0].state, "active");
+  assert.equal(f.ticket.status, "running");
+  assert.equal(f.state.tickets.find((ticket) => ticket.id === "other").status, "canceled");
+  assert.deepEqual(f.calls.archives, ["worker2"]);
+  assert.deepEqual(f.calls.workspaceArchives, ["workspace2"]);
+  assert.equal(f.state.triggers[0].status, "evaluated");
+});
+
+test("a Router retry action relaunches a failed ticket", async (t) => {
+  const f = fixture(t, "failed");
+  pendingTrigger(f.state);
+  f.controls.verdict = { actions: [{ action: "retry", ticketId: "ticket" }] };
+  await f.engine.runEval("thread");
+  await until(() => f.calls.creates === 1);
+  await until(() => f.ticket.status === "running");
+  assert.equal(f.ticket.workerAgentId, "new-worker");
+  assert.deepEqual(f.state.decisions.map((decision) => decision.outcome), ["retry"]);
+  assert.equal(f.state.triggers[0].status, "evaluated");
+});
+
+test("worktree workers surface their branch on the ticket and in the Router prompt", async (t) => {
+  const f = fixture(t, "pending");
+  await f.engine.startTicket("ticket");
+  assert.equal(f.ticket.branchName, "superagent/test-ticket");
+  pendingTrigger(f.state);
+  f.controls.verdict = { actions: [{ action: "ignore", rationale: "status check" }] };
+  await f.engine.runEval("thread");
+  assert.match(
+    f.calls.prompts.at(-1),
+    /- \[ticket\] "test" status=running subscribed=true branch=superagent\/test-ticket/,
+  );
+});
+
 test("recovery launches a persisted pending ticket once despite overlapping reconciliation", async (t) => {
   const f = fixture(t, "pending");
   await Promise.all([f.engine.recover(), f.engine.reconcile(), f.engine.reconcile()]);
@@ -447,6 +649,7 @@ test("shared workers and the Router are pointed at the base directory's AGENTS.m
   f.values.workerIsolation = "shared";
   f.controls.instructionFiles = ["AGENTS.md"];
   await f.engine.startTicket("ticket");
+  assert.equal(f.ticket.branchName, null);
   const prompt = f.calls.workerCreates[0].prompt;
   assert.match(prompt, /own project instructions: \/mock\/repo\/AGENTS\.md/);
   assert.match(prompt, /Their rules on where outputs go take priority/);

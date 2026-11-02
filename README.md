@@ -4,9 +4,9 @@ Paseo 的 Router/Worker 双层编排插件。按《Super-agent 设计探索》�
 
 - **常驻 Router agent**(轻量模型)统一评估触发事件,只裁决、不执行;
 - **Worker agent**(强模型)按 Ticket 在隔离 worktree 工作区执行,parent 挂在 Router 名下,在 app 的 Subagents track 可见、可随时人工介入;
-- **订阅直通**:线程已有活跃订阅 Ticket 时,后续事件绕过 Router 程序直通 Worker(零 LLM);
+- **订阅直通**:线程恰有一个活跃订阅 Ticket 时,后续事件绕过 Router 程序直通其 Worker(零 LLM);存在多个订阅 Worker 时交 Router 选择目标;
 - **批处理**:同一批窗口内的触发合并进一次 Router LLM 调用;
-- **看门狗**:每 15 秒对账——错过完成、卡死启动、运行超时、评估重排,进程重启后自恢复;
+- **看门狗**:每 15 秒对账——错过完成、卡死启动、运行超时、评估重排、待执行动作补执行,进程重启后自恢复;
 - **IM 触发源**:飞书(官方长连接)与 QQ(OneBot 11 / NapCat)接收指令,Router 答复回到原聊天。
 
 ## 架构
@@ -19,9 +19,9 @@ Worker 汇报(完成后自动回流)                  │
                        fast-path(长度截断/线程归属)
                                              │
               ┌──────────────────────────────┴───────────────┐
-              ▼ 线程无活跃订阅 Ticket                          ▼ 线程有活跃订阅 Ticket
+              ▼ 线程无/多个活跃订阅 Ticket                     ▼ 线程恰有一个订阅 Ticket
         批窗口积攒 → 串行 Router 评估                程序直通 Worker(steer,零 LLM)
-        (dispatch / reply / ignore / stop)
+        (dispatch / steer / cancel / retry / reply / ignore / stop)
               │ dispatch
               ▼
         Ticket → worktree 工作区 → Worker agent(parent=Router)
@@ -30,7 +30,7 @@ Worker 汇报(完成后自动回流)                  │
         汇报抓取 → report Trigger 回流线程 → 再次 Router 评估
 ```
 
-状态(`$PASEO_HOME/plugin-data/superagent/state.json`,原子写):`threads / triggers / tickets / decisions` + kv。所有副作用(创建 agent、发消息)发生在落盘之后;看门狗负责崩溃后对账。
+状态(`$PASEO_HOME/plugin-data/superagent/state.json`,原子写):`threads / triggers / tickets / decisions / pendingActions` + kv。所有副作用(创建 agent、发消息)发生在落盘之后;裁决的副作用动作(steer/cancel/retry/stop)先立案成 `pendingActions` 记录、执行成功后移除,看门狗负责崩溃后按序补执行与失败重试(有次数上限,耗尽后失败回流成触发交 Router 重新决策)。
 
 ## 与文章五模块的对应
 

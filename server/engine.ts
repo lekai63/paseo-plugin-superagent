@@ -5,6 +5,9 @@ import {
   newId,
   truncate,
   SUBSCRIBED_STATUSES,
+  type Decision,
+  type PendingAction,
+  type RouterAction,
   type SuperagentSnapshot,
   type SuperagentState,
   type Thread,
@@ -23,10 +26,12 @@ import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type Work
  *
  * 数据流(对齐文章的事件驱动模型):
  *   dispatch() → fast-path 截断/放行 → Thread 归属
- *     ├─ 线程有活跃订阅 Ticket → 直通 Worker(零 LLM)
+ *     ├─ 线程恰有一个活跃订阅 Ticket → 直通其 Worker(零 LLM);多个订阅交 Router 选择
  *     └─ 否则积攒 → 批窗口合并 → 串行 Router 评估 → 裁决执行
+ *   裁决的副作用动作(steer/cancel/retry/stop)立案成 pendingActions 记录,执行成功
+ *   移除、失败按上限重试;崩溃后由恢复流程按序补执行。
  *   Worker 完成 → 汇报抓取 → report Trigger 回流线程 → 再次 Router 评估
- *   看门狗每 15s 对账:错过完成、卡死启动、超时中断、评估重排。
+ *   看门狗每 15s 对账:错过完成、卡死启动、超时中断、评估重排、待执行动作补执行。
  *
  * 不变量:所有状态先落盘再执行副作用;崩溃后 watchdog/prime 恢复。
  */
@@ -34,7 +39,58 @@ import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type Work
 const WATCHDOG_INTERVAL_MS = 15_000;
 const LAUNCH_STUCK_MS = 5 * 60_000;
 const ROUTER_EVAL_TIMEOUT_MS = 10 * 60_000;
+/** 单个待执行动作的尝试上限(首次执行 + 看门狗重试),超过后放弃并回流失败。 */
+const MAX_ACTION_ATTEMPTS = 3;
+/** 同一线程连续放弃的动作数达到上限后,不再自动回流失败触发,防 Router 循环。 */
+const MAX_ABANDONED_ACTIONS = 3;
 const PREFERRED_PROVIDERS = ["claude", "codex", "opencode"];
+
+/**
+ * 带副作用的裁决动作立案成可恢复记录(steer/cancel/retry/stop);
+ * dispatch 的补执行由 pending 票据 + 看门狗承担,reply/ignore 无副作用。
+ */
+function planPendingAction(threadId: string, decisionId: string, action: RouterAction): PendingAction | null {
+  if (action.action === "steer") {
+    return {
+      id: newId("act"),
+      threadId,
+      decisionId,
+      kind: "steer",
+      ticketId: action.ticketId,
+      text: action.text,
+      mode: action.mode ?? null,
+      attempts: 0,
+      createdAt: new Date().toISOString(),
+    };
+  }
+  if (action.action === "cancel" || action.action === "retry") {
+    return {
+      id: newId("act"),
+      threadId,
+      decisionId,
+      kind: action.action,
+      ticketId: action.ticketId,
+      text: null,
+      mode: null,
+      attempts: 0,
+      createdAt: new Date().toISOString(),
+    };
+  }
+  if (action.action === "stop") {
+    return {
+      id: newId("act"),
+      threadId,
+      decisionId,
+      kind: "stop",
+      ticketId: null,
+      text: null,
+      mode: null,
+      attempts: 0,
+      createdAt: new Date().toISOString(),
+    };
+  }
+  return null;
+}
 
 export interface DispatchInput {
   title?: string;
@@ -67,6 +123,10 @@ export class SuperagentEngine {
   private watchedTickets = new Set<string>();
   /** 线程评估连续失败计数(unparsed/异常),≥3 次后看门狗不再自动重排,防失控循环。 */
   private evalFailures = new Map<string, number>();
+  /** 同一线程连续放弃(重试耗尽)的动作计数,达到上限后不再自动回流失败触发。 */
+  private actionFailures = new Map<string, number>();
+  /** 待执行动作的串行链:保证同线程按裁决顺序执行,内联执行与看门狗补执行互不重叠。 */
+  private actionChain: Promise<void> = Promise.resolve();
   /** 已提示过的 provider 设置纠正(每个设置值只告警一次)。 */
   private providerNotes = new Set<string>();
   /** Worker 基础目录检查(可替换,便于测试)与缓存结果。 */
@@ -198,9 +258,10 @@ export class SuperagentEngine {
     const threadKey = thread.key;
     const threadId = thread.id;
 
-    // 订阅直通:活跃订阅 Ticket 存在时,后续事件不过 Router(Worker 汇报除外)。
+    // 订阅直通:恰好一个活跃订阅 Ticket 时后续事件直通其 Worker(Worker 汇报除外)。
+    // 多个订阅 Worker 意见不一时交给 Router 选择目标,不能默认发给第一个。
     const subscribed = this.subscribedTickets(this.store.get(), threadId);
-    const direct = subscribed.length > 0;
+    const direct = subscribed.length === 1 && Boolean(subscribed[0].workerAgentId);
 
     const trigger: Trigger = {
       id: triggerId,
@@ -227,7 +288,7 @@ export class SuperagentEngine {
     });
 
     if (direct) {
-      const directDelivered = await this.deliverDirect(trigger, subscribed);
+      const directDelivered = await this.deliverDirect(trigger, subscribed[0]);
       if (directDelivered) return { threadId, triggerId, directDelivered, note: null };
     }
 
@@ -278,45 +339,78 @@ export class SuperagentEngine {
     );
   }
 
-  /** 订阅直通投递:直接发进 Worker 会话(运行中则 steer),零 LLM。 */
-  private async deliverDirect(trigger: Trigger, tickets: Ticket[]): Promise<boolean> {
-    const paseo = this.requirePaseo();
-    const ticket = tickets[0];
+  /** 订阅直通投递:直接发进唯一订阅 Ticket 的 Worker 会话(运行中则 steer),零 LLM。 */
+  private async deliverDirect(trigger: Trigger, ticket: Ticket): Promise<boolean> {
     if (!ticket.workerAgentId) return false;
     const prefix = trigger.context ? "[context] " : "";
-    try {
-      await paseo.agents
-        .ref(ticket.workerAgentId)
-        .send(`${prefix}${trigger.text}`, { activeTurnBehavior: "steer" });
+    const outcome = await this.sendToWorker(ticket.id, `${prefix}${trigger.text}`, "steer");
+    if (outcome.ok) {
       await this.store.update((next) => {
         const target = next.triggers.find((t) => t.id === trigger.id);
         if (target) {
           target.status = "delivered";
           target.note = `direct → worker of ${ticket.id}`;
         }
-        const worker = next.tickets.find((t) => t.id === ticket.id);
-        if (worker?.status === "waiting") {
-          worker.status = "running";
-          worker.startedAt = new Date().toISOString();
-          worker.updatedAt = worker.startedAt;
-          worker.lastError = null;
-        }
       });
-      const current = this.store.get().tickets.find((t) => t.id === ticket.id);
-      if (current?.status === "running") this.watchTicket(ticket.id);
       return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await this.store.update((next) => {
-        const target = next.triggers.find((t) => t.id === trigger.id);
-        if (target) {
-          target.status = "pending";
-          target.note = `direct delivery failed: ${truncate(message, 200)}`;
-        }
-      });
-      // 直通失败退回评估路径。
-      return false;
     }
+    // 直通失败退回评估路径。
+    await this.store.update((next) => {
+      const target = next.triggers.find((t) => t.id === trigger.id);
+      if (target) {
+        target.status = "pending";
+        target.note = `direct delivery failed: ${truncate(outcome.error, 200)}`;
+      }
+    });
+    return false;
+  }
+
+  /** 向 Ticket 的 Worker 发指令:waiting → running 重新计时并重新挂观察。 */
+  private async sendToWorker(
+    ticketId: string,
+    text: string,
+    mode: "steer" | "interrupt",
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const paseo = this.requirePaseo();
+    const ticket = this.store.get().tickets.find((t) => t.id === ticketId);
+    if (!ticket?.workerAgentId) {
+      return { ok: false, error: `ticket ${ticketId} has no worker to receive messages` };
+    }
+    try {
+      await paseo.agents.ref(ticket.workerAgentId).send(text, { activeTurnBehavior: mode });
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    await this.store.update((next) => {
+      const target = next.tickets.find((t) => t.id === ticketId);
+      if (target?.status === "waiting") {
+        target.status = "running";
+        target.startedAt = new Date().toISOString();
+        target.updatedAt = target.startedAt;
+        target.lastError = null;
+      }
+    });
+    if (this.store.get().tickets.find((t) => t.id === ticketId)?.status === "running") {
+      this.watchTicket(ticketId);
+    }
+    return { ok: true };
+  }
+
+  /** Router 的 steer 动作:仅本线程 running/waiting 的 Worker 可接收指令。 */
+  private async applySteer(
+    threadId: string,
+    ticketId: string,
+    text: string,
+    mode: "steer" | "interrupt",
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const ticket = this.store.get().tickets.find((t) => t.id === ticketId);
+    if (!ticket || ticket.threadId !== threadId) {
+      return { ok: false, error: `ticket ${ticketId} is not on this thread` };
+    }
+    if (!ticket.workerAgentId || !["running", "waiting"].includes(ticket.status)) {
+      return { ok: false, error: `ticket ${ticketId} cannot receive messages while ${ticket.status}` };
+    }
+    return this.sendToWorker(ticketId, text, mode);
   }
 
   // ------------------------------------------------------------ eval loop
@@ -427,96 +521,93 @@ export class SuperagentEngine {
     this.evalFailures.delete(threadId);
     const verdict = parsed.verdict;
 
-    // 4. 执行裁决(先落盘后副作用)。
+    // 4. 执行裁决:每个动作一条 Decision,带副作用的动作另立案待执行记录,一次落盘
+    //    (先落盘后副作用);stop 之后的动作作废,不再立案。
     const triggerIds = batch.map((t) => t.id);
-    const decision = newDecision(threadId, triggerIds, verdict.decision);
-    let createdTicket: Ticket | null = null;
+    const actions = verdict.actions;
+    const decisions: Decision[] = [];
+    const createdTickets: Ticket[] = [];
+    /** 与已立案动作对齐的待执行记录;dispatch/reply/ignore 没有记录(null)。 */
+    const actionRecords: (PendingAction | null)[] = [];
+    const replies: string[] = [];
+    let summary: string | null = null;
+    for (const action of actions) {
+      const decision = newDecision(threadId, triggerIds, action.action);
+      if (action.action === "dispatch") {
+        const ticket: Ticket = {
+          id: newId("tkt"),
+          threadId,
+          title: action.title,
+          mandate: action.mandate,
+          status: "pending",
+          workerAgentId: null,
+          workspaceId: null,
+          branchName: null,
+          startedAt: null,
+          attempts: 0,
+          subscribed: !action.unsubscribe,
+          report: null,
+          lastError: null,
+          createdAt: decision.createdAt,
+          updatedAt: decision.createdAt,
+        };
+        decision.ticketId = ticket.id;
+        createdTickets.push(ticket);
+        if (!summary) summary = action.title;
+      } else if (action.action === "reply") {
+        decision.reply = truncate(action.reply, 2000);
+        replies.push(action.reply);
+        if (!summary) summary = action.reply;
+      } else if (action.action === "steer") {
+        decision.rationale = truncate(action.text, 300);
+      } else if ("rationale" in action) {
+        decision.rationale = action.rationale ?? null;
+      }
+      if ("ticketId" in action && action.ticketId) decision.ticketId = action.ticketId;
+      decisions.push(decision);
+      actionRecords.push(planPendingAction(threadId, decision.id, action));
+      if (action.action === "stop") break;
+    }
+    const decidedAt = decisions[0]?.createdAt ?? new Date().toISOString();
 
-    if (verdict.decision === "dispatch") {
-      createdTicket = {
-        id: newId("tkt"),
-        threadId,
-        title: verdict.title,
-        mandate: verdict.mandate,
-        status: "pending",
-        workerAgentId: null,
-        workspaceId: null,
-        startedAt: null,
-        attempts: 0,
-        subscribed: !verdict.unsubscribe,
-        report: null,
-        lastError: null,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      decision.ticketId = createdTicket.id;
-      if (verdict.reply) decision.reply = truncate(verdict.reply, 2000);
-      await this.store.update((next) => {
-        next.decisions.push(decision);
-        next.tickets.push(createdTicket!);
-        for (const trigger of next.triggers) {
-          if (triggerIds.includes(trigger.id)) trigger.status = "evaluated";
-        }
-        const target = next.threads.find((t) => t.id === threadId);
-        if (target) {
-          target.updatedAt = decision.createdAt;
-          target.summary = truncate(verdict.title, 200);
-        }
-      });
-      void this.startTicket(createdTicket.id).catch((error) => {
-        console.error("[superagent] ticket launch failed", error);
-      });
-    } else if (verdict.decision === "reply") {
-      decision.reply = truncate(verdict.reply, 2000);
-      await this.store.update((next) => {
-        next.decisions.push(decision);
-        for (const trigger of next.triggers) {
-          if (triggerIds.includes(trigger.id)) trigger.status = "evaluated";
-        }
-        const target = next.threads.find((t) => t.id === threadId);
-        if (target) {
-          target.updatedAt = decision.createdAt;
-          target.summary = truncate(verdict.reply, 200);
-        }
-      });
-    } else if (verdict.decision === "ignore") {
-      decision.rationale = verdict.rationale ?? null;
-      await this.store.update((next) => {
-        next.decisions.push(decision);
-        for (const trigger of next.triggers) {
-          if (triggerIds.includes(trigger.id)) trigger.status = "evaluated";
-        }
-        const target = next.threads.find((t) => t.id === threadId);
-        if (target) target.updatedAt = decision.createdAt;
-      });
-    } else if (verdict.decision === "stop") {
-      decision.rationale = verdict.rationale ?? null;
-      const active = this.activeTickets(state, threadId);
-      await this.store.update((next) => {
-        next.decisions.push(decision);
-        for (const trigger of next.triggers) {
-          if (triggerIds.includes(trigger.id)) trigger.status = "evaluated";
-        }
-        for (const ticket of next.tickets) {
-          if (ticket.threadId === threadId && !["completed", "failed", "canceled"].includes(ticket.status)) {
-            ticket.status = "canceled";
-            ticket.subscribed = false;
-            ticket.updatedAt = decision.createdAt;
-          }
-        }
-        const target = next.threads.find((t) => t.id === threadId);
-        if (target) {
-          target.state = "closed";
-          target.updatedAt = decision.createdAt;
-        }
-      });
-      for (const ticket of active) {
-        await retireWorker(paseo, ticket, true);
+    await this.store.update((next) => {
+      next.decisions.push(...decisions);
+      next.tickets.push(...createdTickets);
+      next.pendingActions.push(...actionRecords.filter((record): record is PendingAction => record !== null));
+      for (const trigger of next.triggers) {
+        if (triggerIds.includes(trigger.id)) trigger.status = "evaluated";
+      }
+      const target = next.threads.find((t) => t.id === threadId);
+      if (target) {
+        target.updatedAt = decidedAt;
+        if (summary) target.summary = truncate(summary, 200);
+      }
+      // stop 不在此处关闭线程:关闭发生在动作执行到 stop 时,否则先于 stop 的
+      // steer/cancel 会因票据已被批量取消而无法执行。
+    });
+
+    // 副作用按序执行;失败的动作留在待执行记录里由看门狗按上限重试,不再重放整批。
+    const launchQueue = [...createdTickets];
+    for (let index = 0; index < actionRecords.length; index++) {
+      const action = actions[index];
+      const record = actionRecords[index];
+      if (action.action === "stop") {
+        if (record) await this.runPendingAction(record.id);
+        break;
+      }
+      if (action.action === "dispatch") {
+        const ticket = launchQueue.shift();
+        if (!ticket) continue;
+        void this.startTicket(ticket.id).catch((error) => {
+          console.error("[superagent] ticket launch failed", error);
+        });
+      } else if (record) {
+        await this.runPendingAction(record.id);
       }
     }
 
     // 5. 答复回投:IM 触发回原聊天;agent 委派回原会话。
-    const reply = decision.reply;
+    const reply = replies.length > 0 ? truncate(replies.join("\n\n"), 2000) : null;
     if (reply) {
       const origin = batch.find((t) => t.origin)?.origin ?? null;
       if (origin) {
@@ -540,6 +631,155 @@ export class SuperagentEngine {
         }
       }
     }
+  }
+
+  // -------------------------------------------------------- pending actions
+
+  /**
+   * 串行执行一条待执行动作:全局同一时刻只有一个动作在执行,同线程按裁决顺序推进。
+   * 只执行该线程队列的队首记录;后面的记录等队首完成或放弃后,由内联循环或看门狗接手。
+   */
+  private runPendingAction(recordId: string): Promise<void> {
+    const next = this.actionChain.then(async () => {
+      try {
+        await this.executePendingAction(recordId);
+      } catch (error) {
+        console.error("[superagent] pending action execution failed", error);
+      }
+    });
+    this.actionChain = next;
+    return next;
+  }
+
+  private async executePendingAction(recordId: string): Promise<void> {
+    await this.store.ready;
+    const pending = this.store.get().pendingActions;
+    const record = pending.find((a) => a.id === recordId);
+    if (!record) return;
+    const head = pending.find((a) => a.threadId === record.threadId);
+    if (head?.id !== recordId) return;
+    if (record.attempts >= MAX_ACTION_ATTEMPTS) {
+      await this.abandonPendingAction(record, `${record.kind} exceeded ${MAX_ACTION_ATTEMPTS} attempts`);
+      return;
+    }
+    const attempt = record.attempts + 1;
+    await this.store.update((next) => {
+      const target = next.pendingActions.find((a) => a.id === recordId);
+      if (target && target.attempts === attempt - 1) target.attempts = attempt;
+    });
+    const outcome = await this.performPendingAction(record);
+    if (outcome.ok) {
+      await this.store.update((next) => {
+        next.pendingActions = next.pendingActions.filter((a) => a.id !== recordId);
+      });
+      this.actionFailures.delete(record.threadId);
+      return;
+    }
+    console.error(
+      `[superagent] ${record.kind} action failed (attempt ${attempt}/${MAX_ACTION_ATTEMPTS}) on thread ${record.threadId}: ${outcome.error}`,
+    );
+    const current = this.store.get().pendingActions.find((a) => a.id === recordId);
+    if (current && current.attempts >= MAX_ACTION_ATTEMPTS) {
+      await this.abandonPendingAction(current, outcome.error);
+    }
+  }
+
+  /** 放弃重试耗尽的动作:移除记录、给原批触发留备注,并把失败回流成触发交 Router 重新决策。 */
+  private async abandonPendingAction(record: PendingAction, error: string): Promise<void> {
+    const note = `${record.kind} action failed: ${truncate(error, 200)}`;
+    await this.store.update((next) => {
+      next.pendingActions = next.pendingActions.filter((a) => a.id !== record.id);
+      const decision = next.decisions.find((d) => d.id === record.decisionId);
+      if (!decision) return;
+      for (const trigger of next.triggers) {
+        if (decision.triggerIds.includes(trigger.id)) trigger.note = note;
+      }
+    });
+    const failures = (this.actionFailures.get(record.threadId) ?? 0) + 1;
+    this.actionFailures.set(record.threadId, failures);
+    if (failures >= MAX_ABANDONED_ACTIONS) {
+      console.error(
+        `[superagent] thread ${record.threadId} abandoned ${failures} actions in a row; holding off further re-enqueueing`,
+      );
+      return;
+    }
+    await this.enqueueActionFailure(record, error);
+  }
+
+  /** 失败回流:引擎以触发形式把未送达的意图交回线程重新评估,人发的消息不能凭空消失。 */
+  private async enqueueActionFailure(record: PendingAction, error: string): Promise<void> {
+    const thread = this.store.get().threads.find((t) => t.id === record.threadId);
+    if (!thread) return;
+    const detail =
+      record.kind === "steer" && record.text
+        ? `Undelivered instruction for ${record.ticketId}: "${truncate(record.text, 400)}"`
+        : `Intent: ${record.kind}${record.ticketId ? ` ${record.ticketId}` : ""} (see the matching router decision).`;
+    const now = new Date().toISOString();
+    await this.store.update((next) => {
+      next.triggers.push({
+        id: newId("trg"),
+        kind: "engine",
+        sender: "engine",
+        threadKey: thread.key,
+        text: `[engine] Router ${record.kind} action failed after ${record.attempts} attempts: ${truncate(error, 300)}.\n${detail}`,
+        context: false,
+        replyToAgentId: null,
+        origin: null,
+        receivedAt: now,
+        status: "pending",
+        note: null,
+        threadId: record.threadId,
+      });
+    });
+    this.scheduleEval(record.threadId, 0);
+  }
+
+  /** 动作的幂等执行:执行中断后重跑得到同样的最终状态。 */
+  private async performPendingAction(
+    record: PendingAction,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const paseo = this.requirePaseo();
+    if (record.kind === "steer") {
+      return this.applySteer(record.threadId, record.ticketId ?? "", record.text ?? "", record.mode ?? "steer");
+    }
+    if (record.kind === "cancel") {
+      const ticket = this.store.get().tickets.find((t) => t.id === record.ticketId);
+      if (!ticket || ticket.threadId !== record.threadId) return { ok: true };
+      if (["completed", "failed", "canceled"].includes(ticket.status)) {
+        // 上次执行中断:票据已标取消但 Worker 可能尚未回收,补回收。
+        if (ticket.workerAgentId) await retireWorker(paseo, ticket, true);
+        return { ok: true };
+      }
+      await this.cancelTicket(ticket.id);
+      return { ok: true };
+    }
+    if (record.kind === "retry") {
+      const ticket = this.store.get().tickets.find((t) => t.id === record.ticketId);
+      if (!ticket || ticket.threadId !== record.threadId) return { ok: true };
+      if (["failed", "canceled", "completed"].includes(ticket.status)) {
+        await this.retryTicket(ticket.id);
+        return { ok: true };
+      }
+      // 已被重置过(上次执行中断):pending 票据由看门狗接手启动。
+      return { ok: true };
+    }
+    // stop:快照仍活跃的 Worker,落盘关闭线程,再逐一回收。执行中断后重跑时线程已
+    // 关闭,改为回收已取消但仍持有 Worker 的票据(其中就包括上次没来得及回收的)。
+    const state = this.store.get();
+    const thread = state.threads.find((t) => t.id === record.threadId);
+    if (!thread) return { ok: true };
+    const alreadyClosed = thread.state === "closed";
+    const retiring = state.tickets.filter(
+      (t) =>
+        t.threadId === record.threadId &&
+        t.workerAgentId &&
+        (alreadyClosed
+          ? t.status === "canceled"
+          : !["completed", "failed", "canceled"].includes(t.status)),
+    );
+    await this.markThreadClosed(record.threadId);
+    for (const ticket of retiring) await retireWorker(paseo, ticket, true);
+    return { ok: true };
   }
 
   // -------------------------------------------------------------- workers
@@ -613,6 +853,7 @@ export class SuperagentEngine {
         ) return;
         target.workerAgentId = launch.agentId;
         target.workspaceId = launch.workspaceId;
+        target.branchName = launch.branchName;
         target.status = "running";
         target.updatedAt = new Date().toISOString();
         accepted = true;
@@ -831,6 +1072,15 @@ export class SuperagentEngine {
       }
     }
 
+    // 待执行动作补执行(评估中断/失败重试):每线程只踢队首,串行链保证按序与互斥。
+    const actionHeads = new Set<string>();
+    for (const record of state.pendingActions) {
+      if (actionHeads.has(record.threadId)) continue;
+      actionHeads.add(record.threadId);
+      acted += 1;
+      void this.runPendingAction(record.id);
+    }
+
     // 评估队列保险:pending 触发但既无批窗口定时器、不在队列、也不在当前评估中的线程,重排。
     const pendingByThread = new Set<string>();
     for (const trigger of state.triggers) {
@@ -876,6 +1126,7 @@ export class SuperagentEngine {
     const state = this.store.get();
     if (!state.threads.some((t) => t.id === threadId)) throw new Error("thread not found");
     this.evalFailures.delete(threadId);
+    this.actionFailures.delete(threadId);
     this.scheduleEval(threadId, 0);
   }
 
@@ -919,16 +1170,23 @@ export class SuperagentEngine {
     const paseo = this.requirePaseo();
     const state = this.store.get();
     const active = this.activeTickets(state, threadId);
+    await this.markThreadClosed(threadId);
+    for (const ticket of active) await retireWorker(paseo, ticket, true);
+  }
+
+  /** 关闭线程的落盘部分:线程关闭、活跃票据取消、pending 触发消费。 */
+  private async markThreadClosed(threadId: string): Promise<void> {
+    const now = new Date().toISOString();
     await this.store.update((next) => {
       const thread = next.threads.find((t) => t.id === threadId);
       if (!thread) return;
       thread.state = "closed";
-      thread.updatedAt = new Date().toISOString();
+      thread.updatedAt = now;
       for (const ticket of next.tickets) {
         if (ticket.threadId === threadId && !["completed", "failed", "canceled"].includes(ticket.status)) {
           ticket.status = "canceled";
           ticket.subscribed = false;
-          ticket.updatedAt = thread.updatedAt;
+          ticket.updatedAt = now;
         }
       }
       for (const trigger of next.triggers) {
@@ -938,7 +1196,6 @@ export class SuperagentEngine {
         }
       }
     });
-    for (const ticket of active) await retireWorker(paseo, ticket, true);
   }
 
   async unsubscribe(threadId: string, ticketId: string): Promise<void> {

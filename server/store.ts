@@ -129,5 +129,6 @@ function trim(state: SuperagentState): void {
     state.tickets = state.tickets.filter((tk) => !drop.has(tk.threadId));
     state.triggers = state.triggers.filter((tr) => !tr.threadId || !drop.has(tr.threadId));
     state.decisions = state.decisions.filter((d) => !drop.has(d.threadId));
+    state.pendingActions = state.pendingActions.filter((a) => !drop.has(a.threadId));
   }
 }
