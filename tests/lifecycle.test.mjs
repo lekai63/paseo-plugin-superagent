@@ -185,6 +185,44 @@ test("the snapshot identifies the evaluating thread and clears it when evaluatio
   assert.equal(f.engine.snapshot().engine.currentEvalThreadId, null);
 });
 
+test("reply then stop retains both the Router conclusion and full Worker report before archiving", async (t) => {
+  const f = fixture(t);
+  const report = `${"Verified output. ".repeat(400)}End of original report`;
+  f.controls.timeline = async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: report } }] });
+  await f.engine.settleTicketRun("ticket", null);
+  assert.equal(f.ticket.report, report);
+  assert.equal(f.state.threads[0].latestResult.text, report);
+  assert.ok(f.state.triggers.find((trigger) => trigger.kind === "report").text.length < report.length);
+  f.controls.verdict = { actions: [{ action: "reply", reply: "The work is complete; outputs and checks are ready." }, { action: "stop", rationale: "done" }] };
+  const archive = f.ref("worker").archive;
+  f.ref("worker").archive = async () => {
+    assert.equal(f.state.threads[0].latestResult.kind, "router_reply");
+    assert.equal(f.ticket.report, report);
+    await archive();
+  };
+  await f.engine.runEval("thread");
+  assert.deepEqual(f.calls.archives, ["worker"]);
+  assert.equal(f.engine.snapshot().threads.length, 0);
+  const result = f.engine.snapshot().recentResults[0];
+  assert.equal(result.kind, "router_reply");
+  assert.equal(result.text, "The work is complete; outputs and checks are ready.");
+  assert.deepEqual(result.ticketIds, ["ticket"]);
+  f.state.decisions = [];
+  f.state.triggers = [];
+  f.ref("worker").refresh = async () => null;
+  assert.equal(f.engine.snapshot().recentResults[0].text, result.text);
+  assert.equal(f.engine.snapshot({ includeClosed: true, threadId: "thread" }).tickets[0].report, report);
+});
+
+test("a stop without a Router reply still exposes the saved Worker report", async (t) => {
+  const f = fixture(t);
+  await f.engine.settleTicketRun("ticket", null);
+  f.controls.verdict = { actions: [{ action: "stop", rationale: "done" }] };
+  await f.engine.runEval("thread");
+  assert.equal(f.engine.snapshot().recentResults[0].kind, "worker_report");
+  assert.equal(f.engine.snapshot().recentResults[0].text, "work completed");
+});
+
 test("history includes closed threads without adding them to the live snapshot", (t) => {
   const f = fixture(t);
   f.state.threads.push({ ...f.state.threads[0], id: "closed", key: "manual:closed", state: "closed" });

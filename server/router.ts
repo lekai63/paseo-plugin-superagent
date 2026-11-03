@@ -54,6 +54,8 @@ const ROUTER_RULES = [
   "  a clarifying question back to the human, an acknowledgement, or relaying/summarizing a",
   "  worker report shown in the triggers. If answering would need a lookup, dispatch instead.",
   "- ignore: the event needs no action (dedupe, chatter, out of scope).",
+  "When a worker report arrives, include a reply that relays the outcome, output locations,",
+  "verification and remaining blockers to the human. Put that reply before any stop action.",
   "- stop: cancel ALL tickets of this thread and close it — only when the whole conversation",
   "  is done.",
   "",

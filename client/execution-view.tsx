@@ -4,7 +4,7 @@ import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import type { SuperagentSnapshot, Ticket } from "../shared/model";
 import { agentStatus, currentTickets, directTicket, elapsedTime, ticketPriority, workspaceThreadIds } from "../shared/execution";
-import { ticketStatusLabel, ticketStatusTone, type StatusLabel } from "../shared/labels";
+import { markdownPreview, relativeTime, ticketStatusLabel, ticketStatusTone, type StatusLabel } from "../shared/labels";
 import { useExecutionAgents, type AgentObservation } from "./query";
 import { Button, Card, StatusBadge, fontSize, radius, space, toneColor, type Theme } from "./ui";
 
@@ -48,6 +48,7 @@ export function ExecutionView({ snapshot, theme, hostId, navigation, compact, wo
   const running = workers.filter((ticket) => ticket.status === "running" || ticket.status === "launching").length;
   const waiting = workers.filter((ticket) => ticket.status === "waiting").length;
   const failed = tickets.filter((ticket) => ticket.status === "failed").length;
+  const result = (snapshot.recentResults ?? []).find((item) => !workspaceId || showAllThreads || item.workspaceIds.includes(workspaceId));
   const routerStatus = snapshot.routerAgentId ? observationStatus(agents[snapshot.routerAgentId]) : null;
   const routerState: StatusLabel = snapshot.engine.evalInFlight ? { label: "评估中", tone: "warning" }
     : { label: snapshot.routerAgentId ? "待命" : "等待新任务", tone: "muted" };
@@ -116,6 +117,20 @@ export function ExecutionView({ snapshot, theme, hostId, navigation, compact, wo
             </Text>
             <Button theme={theme} variant="ghost" size="xs" label="详情" accessibilityLabel={`${thread.title}消息详情`} onPress={() => onDetails({ threadId: thread.id })} />
           </View>)}
+        </View> : null}
+        {result ? <View style={{ marginTop: space.md, paddingTop: space.md, borderTopWidth: 1, borderTopColor: theme.colors.border, gap: space.xs }}>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm }}>
+            <Icon name="FileCheck" size={16} color={theme.colors.foregroundMuted} />
+            <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base, fontWeight: "500" }}>
+              {result.kind === "router_reply" ? "Router 最新答复" : "Worker 最新汇报"}
+            </Text>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{relativeTime(result.createdAt)}</Text>
+            <Button theme={theme} variant="outline" size="xs" label="查看结果" onPress={() => onDetails({
+              threadId: result.threadId, ...(result.ticketIds.length === 1 ? { ticketId: result.ticketIds[0] } : {}),
+            })} />
+          </View>
+          <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{result.title}</Text>
+          <Text numberOfLines={2} style={{ color: theme.colors.foreground, fontSize: fontSize.base, lineHeight: 20 }}>{markdownPreview(result.text).replace(/\s+/g, " ").trim()}</Text>
         </View> : null}
       </Card>
     </View>

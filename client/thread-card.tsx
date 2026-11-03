@@ -307,7 +307,7 @@ function TicketRow({
 
       {ticket.report ? (
         <View style={{ gap: space.xs }}>
-          <GroupLabel theme={theme}>汇报</GroupLabel>
+          <GroupLabel theme={theme}>Worker 原始汇报</GroupLabel>
           <ExpandableText theme={theme} text={ticket.report} lines={4} markdown />
         </View>
       ) : null}

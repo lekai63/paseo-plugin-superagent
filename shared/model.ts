@@ -59,6 +59,16 @@ export type Trigger = z.infer<typeof TriggerSchema>;
 export const THREAD_STATES = ["active", "closed"] as const;
 export type ThreadState = (typeof THREAD_STATES)[number];
 
+/** 最近一次对人的答复/汇报,随线程保留,不依赖 Worker 会话或活动窗口。 */
+export const ThreadResultSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["router_reply", "worker_report"]),
+  text: z.string(),
+  ticketIds: z.array(z.string()),
+  createdAt: z.string(),
+});
+export type ThreadResult = z.infer<typeof ThreadResultSchema>;
+
 export const ThreadSchema = z.object({
   id: z.string().min(1),
   /** 稳定关联键,例如 `manual:<uuid>`、`agent:<agentId>:<slug>`。 */
@@ -67,6 +77,7 @@ export const ThreadSchema = z.object({
   state: z.enum(THREAD_STATES),
   /** Router 维护的一句话摘要,供下次评估的上下文存根。 */
   summary: z.string().nullish(),
+  latestResult: ThreadResultSchema.nullish(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -264,6 +275,12 @@ export const SuperagentSnapshotSchema = z.object({
   tickets: z.array(TicketSchema),
   triggers: z.array(TriggerSchema),
   decisions: z.array(DecisionSchema),
+  /** 包含已关闭线程的最近结果,供 Router 区域展示。 */
+  recentResults: z.array(ThreadResultSchema.extend({
+    threadId: z.string(),
+    title: z.string(),
+    workspaceIds: z.array(z.string()),
+  })).default([]),
   engine: z.object({
     running: z.boolean(),
     primed: z.boolean(),

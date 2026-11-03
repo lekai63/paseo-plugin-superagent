@@ -2,6 +2,7 @@ import type { PaseoApi } from "@getpaseo/client";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
 import { directTicket } from "../shared/execution";
+import { recentResults, threadResult } from "../shared/results";
 import {
   newId,
   truncate,
@@ -314,9 +315,15 @@ export class SuperagentEngine {
       .find((t) => t.replyToAgentId || t.origin);
     const replyTo = originTrigger?.replyToAgentId ?? null;
     const origin = originTrigger?.origin ?? null;
+    const reportId = newId("trg");
     await this.store.update((next) => {
+      const target = next.threads.find((item) => item.id === threadId);
+      if (target) {
+        target.latestResult = { id: reportId, kind: "worker_report", text: report, ticketIds: [ticket.id], createdAt: now };
+        target.updatedAt = now;
+      }
       next.triggers.push({
-        id: newId("trg"),
+        id: reportId,
         kind: "report",
         sender: `worker:${ticket.id}`,
         threadKey: thread.key,
@@ -585,6 +592,7 @@ export class SuperagentEngine {
       if (action.action === "stop") break;
     }
     const decidedAt = decisions[0]?.createdAt ?? new Date().toISOString();
+    const replyDecision = decisions.filter((decision) => decision.outcome === "reply").at(-1);
 
     await this.store.update((next) => {
       next.decisions.push(...decisions);
@@ -597,6 +605,11 @@ export class SuperagentEngine {
       if (target) {
         target.updatedAt = decidedAt;
         if (summary) target.summary = truncate(summary, 200);
+        if (replyDecision && replies.length > 0) {
+          target.latestResult = { id: replyDecision.id, kind: "router_reply", text: replies.join("\n\n"),
+            ticketIds: [...new Set(batch.filter((trigger) => trigger.kind === "report" && trigger.sender.startsWith("worker:"))
+              .map((trigger) => trigger.sender.slice("worker:".length)))], createdAt: decidedAt };
+        }
       }
       // stop 不在此处关闭线程:关闭发生在动作执行到 stop 时,否则先于 stop 的
       // steer/cancel 会因票据已被批量取消而无法执行。
@@ -1245,6 +1258,7 @@ export class SuperagentEngine {
         }
         return {
           ...thread,
+          latestResult: threadResult(thread, state),
           pendingTriggers: state.triggers.filter(
             (t) => t.threadId === thread.id && t.status === "pending",
           ).length,
@@ -1260,6 +1274,7 @@ export class SuperagentEngine {
       workerProvider: state.kv.workerProvider || settings.workerProvider || null,
       workerProfiles: settings.workerProfiles.map(({ name, provider, description }) => ({ name, provider, description })),
       threads,
+      recentResults: recentResults(state, options.threadId),
       tickets: state.tickets
         .filter((t) => threads.some((th) => th.id === t.threadId))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),

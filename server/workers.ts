@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { SuperagentSettingsValues } from "../shared/settings";
-import { slugify, truncate, type Ticket } from "../shared/model";
+import { slugify, type Ticket } from "../shared/model";
 import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 
 /**
@@ -202,7 +202,8 @@ export async function harvestReport(paseo: PaseoApi, agentId: string): Promise<s
     for (const entry of messages) {
       if (entry.item.type !== "assistant_message") continue;
       const text = entry.item.text?.trim();
-      if (text) return truncate(text, 4000);
+      // 原文留给人查看;Router 的上下文预算在 enqueueReport/composeEvalPrompt 中控制。
+      if (text) return text;
     }
     return null;
   } catch (error) {
