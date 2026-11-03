@@ -1,27 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { routerSidebarStatus, sidebarWorkerCounts } from "../shared/sidebar-status.ts";
+import { sidebarWorkerCounts } from "../shared/sidebar-status.ts";
 
-const snapshot = () => ({ routerAgentId: "router", engine: { evalInFlight: false }, threads: [], tickets: [], recentResults: [], imDeliveries: [] });
 const ticket = (id, status) => ({ id: `ticket-${id}`, workerAgentId: id, status });
-
-test("the left icon reflects only Router state even with running Workers or failed IM delivery", () => {
-  const state = { ...snapshot(), tickets: [ticket("worker", "running")], imDeliveries: [{ status: "failed" }], threads: [{ pendingTriggers: 1 }] };
-  assert.equal(routerSidebarStatus(state, { id: "router", status: "idle" }), "idle");
-  assert.equal(routerSidebarStatus(state, { id: "router", status: "running" }), "running");
-  assert.equal(routerSidebarStatus({ ...state, engine: { evalInFlight: true } }, { status: "idle" }), "running");
-});
-
-test("Router permission requests, errors and unavailable sessions stay distinct", () => {
-  assert.equal(routerSidebarStatus(snapshot(), { status: "running", pendingPermissions: [{}] }), "needs_input");
-  assert.equal(routerSidebarStatus(snapshot(), { status: "error" }), "failed");
-  assert.equal(routerSidebarStatus(snapshot(), { status: "idle", providerUnavailable: true }), "failed");
-  assert.equal(routerSidebarStatus(snapshot(), null), "unknown");
-  assert.equal(routerSidebarStatus(snapshot(), { status: "closed" }), "unknown");
-  assert.equal(routerSidebarStatus(snapshot(), { status: "idle" }, true), "unknown");
-  assert.equal(routerSidebarStatus(undefined, undefined), "unknown");
-  assert.equal(routerSidebarStatus({ ...snapshot(), routerAgentId: null }, undefined), "idle");
-});
 
 test("right counts independently show running and idle Workers, using live agent state", () => {
   const tickets = [ticket("a", "running"), ticket("b", "waiting"), ticket("c", "running")];

@@ -1,5 +1,4 @@
 import type { PluginClientContext, PluginScreenProps, PluginSidebarItemProps, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
-import { useMemo } from "react";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { SuperagentScreen } from "./client/screen";
 import { SuperagentSettingsScreen } from "./client/settings-screen";
@@ -8,8 +7,7 @@ import { HistoryScreen } from "./client/history-screen";
 import { StatusScreen } from "./client/status-screen";
 import { superagentDispatchRpc } from "./shared/rpc";
 import { useExecutionAgents, useSuperagentState } from "./client/query";
-import { routerSidebarStatus, sidebarWorkerCounts } from "./shared/sidebar-status";
-import { AgentStatusIcon } from "./client/agent-status-icon";
+import { sidebarWorkerCounts } from "./shared/sidebar-status";
 import { SidebarWorkerCounts } from "./client/sidebar-worker-counts";
 
 const SETTINGS_SCREEN_ID = "general";
@@ -20,19 +18,14 @@ function SuperagentSidebarItem({ currentScreen, openScreen, host, theme }: Plugi
   const workerIds = (snapshot?.tickets ?? [])
     .filter((ticket) => ["launching", "running", "waiting", "completed"].includes(ticket.status)).map((ticket) => ticket.workerAgentId)
     .filter((id): id is string => Boolean(id));
-  const ids = [snapshot?.routerAgentId, ...workerIds]
-    .filter((id): id is string => Boolean(id));
-  const agents = useExecutionAgents(host.id, ids);
-  const router = snapshot?.routerAgentId ? agents[snapshot.routerAgentId] : undefined;
-  const status = routerSidebarStatus(snapshot, router?.agent, query.isError || router?.error);
+  const agents = useExecutionAgents(host.id, workerIds);
   const counts = snapshot && !query.isError && !workerIds.some((id) => agents[id]?.error)
     ? sidebarWorkerCounts(snapshot.tickets, Object.fromEntries(Object.entries(agents).map(([id, item]) => [id, item.agent]))) : null;
-  const StatusIcon = useMemo(() => () => <AgentStatusIcon status={status} theme={theme} />, [status, theme]);
   return (
     <SidebarRow
-      icon={StatusIcon}
+      icon="Network"
       label="Superagent"
-      trailing={<SidebarWorkerCounts counts={counts} theme={theme} />}
+      trailing={counts && (counts.running > 0 || counts.done > 0) ? <SidebarWorkerCounts counts={counts} theme={theme} /> : null}
       active={Boolean(currentScreen && ["main", "history", "status"].includes(currentScreen.screenId))}
       onPress={() => openScreen({ screenId: "main" })}
     />
