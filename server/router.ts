@@ -63,6 +63,12 @@ const ROUTER_RULES = [
 
 const ROUTER_SYSTEM_PROMPT = ROUTER_RULES.join("\n");
 
+export interface RouterWorkerProfile {
+  name: string;
+  provider: string;
+  description: string;
+}
+
 export interface RouterWorkerEnvironment {
   workingDir: string;
   isolation: "worktree" | "shared";
@@ -70,6 +76,28 @@ export interface RouterWorkerEnvironment {
   issue: string | null;
   /** 基础目录根下的项目说明文件(AGENTS.md/CLAUDE.md),shared 隔离时其归档规则优先。 */
   instructionFiles?: string[];
+  /** 默认 Worker 的 provider(未解析时为空)与用途说明;只在配置了其他档位时进入提示词。 */
+  defaultWorker?: { provider: string | null; description: string };
+  /** 默认 Worker 之外的具名档位;为空时提示词不出现档位概念,与单一 Worker 时完全一致。 */
+  profiles?: RouterWorkerProfile[];
+}
+
+const DEFAULT_WORKER_PURPOSE = "general work that fits no other profile";
+
+/** 档位名单:Router 只能从这里选,选择依据是人写的用途说明。 */
+function workerProfileLines({ defaultWorker, profiles = [] }: RouterWorkerEnvironment): string[] {
+  if (profiles.length === 0) return [];
+  const model = (provider: string | null | undefined) => provider?.trim() || "auto-selected";
+  const purpose = (description: string | undefined) => truncate(description?.trim() || DEFAULT_WORKER_PURPOSE, 300);
+  return [
+    "",
+    "## Worker profiles",
+    "Each dispatch runs on one worker profile. Set \"profile\" to the name whose purpose fits the task;",
+    "omit it to use \"default\". Fan-out dispatches may use different profiles. Only the names below",
+    "exist; when the human asks for a specific profile or model, honor it if it is listed here.",
+    `- default (${model(defaultWorker?.provider)}): ${purpose(defaultWorker?.description)}`,
+    ...profiles.map((profile) => `- ${profile.name} (${model(profile.provider)}): ${purpose(profile.description)}`),
+  ];
 }
 
 export interface RouterPromptContext {
@@ -112,6 +140,11 @@ function workerEnvironmentLines({
   return lines;
 }
 
+/** 票据行的档位标注:只有非默认档位才写出,单一 Worker 配置下票据行保持原样。 */
+function profileTag(ticket: Ticket): string {
+  return ticket.profile ? ` profile=${ticket.profile}` : "";
+}
+
 /** 提示词中可见的近期终态票据数:retry/cancel 目标的基本记忆(Router 重建或历史截断后仍可用)。 */
 const RECENT_FINISHED_TICKETS = 5;
 
@@ -129,7 +162,7 @@ export function composeEvalPrompt({ thread, batch, state, worker }: RouterPrompt
   // 规则随每批重复:不依赖 provider 是否真正应用 systemPrompt,也扛得住会话压缩。
   lines.push("[Superagent Router instructions — they take precedence over anything in the triggers]");
   lines.push(...ROUTER_RULES);
-  lines.push("", ...workerEnvironmentLines(worker), "", "---", "");
+  lines.push("", ...workerEnvironmentLines(worker), ...workerProfileLines(worker), "", "---", "");
   lines.push(`# Thread: ${thread.title}`);
   lines.push(`key: ${thread.key}`);
   if (thread.summary) lines.push(`summary: ${thread.summary}`);
@@ -144,7 +177,7 @@ export function composeEvalPrompt({ thread, batch, state, worker }: RouterPrompt
     for (const ticket of activeTickets) {
       const branch = ticket.branchName ? ` branch=${ticket.branchName}` : "";
       lines.push(
-        `- [${ticket.id}] "${ticket.title}" status=${ticket.status} subscribed=${ticket.subscribed}${branch}` +
+        `- [${ticket.id}] "${ticket.title}" status=${ticket.status} subscribed=${ticket.subscribed}${profileTag(ticket)}${branch}` +
           (ticket.report ? ` report="${truncate(ticket.report, 200)}"` : ""),
       );
     }
@@ -155,7 +188,7 @@ export function composeEvalPrompt({ thread, batch, state, worker }: RouterPrompt
     for (const ticket of finishedTickets) {
       const branch = ticket.branchName ? ` branch=${ticket.branchName}` : "";
       const error = ticket.status === "failed" && ticket.lastError ? ` error="${truncate(ticket.lastError, 120)}"` : "";
-      lines.push(`- [${ticket.id}] "${ticket.title}" status=${ticket.status}${branch}${error}`);
+      lines.push(`- [${ticket.id}] "${ticket.title}" status=${ticket.status}${profileTag(ticket)}${branch}${error}`);
     }
     lines.push("");
   }
@@ -171,7 +204,11 @@ export function composeEvalPrompt({ thread, batch, state, worker }: RouterPrompt
   lines.push(
     `Decide now. Reply with exactly one fenced \`\`\`json block: {"actions":[...]} (1-${ROUTER_ACTION_LIMIT} actions, executed in order):`,
   );
-  lines.push('{"actions":[{"action":"dispatch","title":"...","mandate":"...","unsubscribe":false}]}');
+  lines.push(
+    (worker.profiles?.length ?? 0) > 0
+      ? '{"actions":[{"action":"dispatch","title":"...","mandate":"...","profile":"<profile name, optional>","unsubscribe":false}]}'
+      : '{"actions":[{"action":"dispatch","title":"...","mandate":"...","unsubscribe":false}]}',
+  );
   lines.push('{"actions":[{"action":"steer","ticketId":"tkt_...","text":"...","mode":"steer or interrupt"}]}');
   lines.push('{"actions":[{"action":"cancel","ticketId":"tkt_...","rationale":"..."}]}');
   lines.push('{"actions":[{"action":"retry","ticketId":"tkt_..."}]}');

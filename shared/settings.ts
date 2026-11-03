@@ -17,6 +17,44 @@ function boundedInt(key: NumberSettingKey, fallback: number) {
 }
 
 /**
+ * Worker 档位:默认 Worker(workerProvider)之外的具名 provider/model。Router 派发时用
+ * `profile` 从这份名单里选一个名字,选不到或省略即用默认 Worker——Router 永远只能用到
+ * 这里列出的 provider,触发文本无法把 Worker 引向任意 provider。
+ */
+export const DEFAULT_WORKER_PROFILE = "default";
+export const MAX_WORKER_PROFILES = 8;
+export const WORKER_PROFILE_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,23}$/;
+export const WORKER_PROFILE_NAME_HINT = "小写字母开头,只含小写字母、数字、- 和 _,最长 24 个字符";
+
+export const WorkerProfileSchema = z.object({
+  /** Router 在 dispatch 里填写的档位名。 */
+  name: z
+    .string()
+    .trim()
+    .regex(WORKER_PROFILE_NAME_PATTERN, WORKER_PROFILE_NAME_HINT)
+    .refine((name) => name !== DEFAULT_WORKER_PROFILE, `"${DEFAULT_WORKER_PROFILE}" 留给默认 Worker`),
+  /** `provider` 或 `provider/model`,与 workerProvider 同一格式。 */
+  provider: z.string().trim().min(1, "需要填写 provider").max(120),
+  /** 用途说明:原样写进 Router 提示词,是 Router 选档位的唯一依据。 */
+  description: z.string().trim().min(1, "需要写明用途,Router 靠它选择档位").max(300),
+});
+export type WorkerProfile = z.infer<typeof WorkerProfileSchema>;
+
+const WorkerProfilesSchema = z
+  .array(WorkerProfileSchema)
+  .max(MAX_WORKER_PROFILES)
+  .superRefine((profiles, ctx) => {
+    const seen = new Set<string>();
+    profiles.forEach((profile, index) => {
+      if (seen.has(profile.name)) {
+        ctx.addIssue({ code: "custom", path: [index, "name"], message: `档位名 "${profile.name}" 重复` });
+      }
+      seen.add(profile.name);
+    });
+  })
+  .default([]);
+
+/**
  * Host 级设置。provider 留空时引擎会在首次需要时从 daemon 的 provider 快照里
  * 自动挑一个稳定的默认(优先 claude → codex → opencode → 任意可用),并记入 kv,
  * 保证 Router/Worker 的模型选择跨重启稳定。
@@ -27,12 +65,16 @@ function boundedInt(key: NumberSettingKey, fallback: number) {
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 4,
+  version: 5,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
-    /** Worker 用最强模型。 */
+    /** 默认 Worker:dispatch 未指定档位(或档位不存在)时使用。 */
     workerProvider: z.string().trim().max(120).default(""),
+    /** 默认 Worker 的用途说明;配置了其他档位时写进 Router 提示词,留空用通用说明。 */
+    workerDescription: z.string().trim().max(300).default(""),
+    /** 默认 Worker 之外的具名档位,Router 按用途说明为每个 dispatch 选择。 */
+    workerProfiles: WorkerProfilesSchema,
     /** Router agent 的 cwd;也是 Worker worktree 的基准仓库。必须是主机上的绝对路径。 */
     workingDir: z.string().trim().max(1024).default(""),
     /** Worker 隔离方式:worktree 独立工作区,或共享 workingDir 的目录工作区。 */
@@ -99,7 +141,10 @@ export const superagentSettings = defineSettings({
     /** IM 回复截断上限(字符)。 */
     imReplyMaxChars: boundedInt("imReplyMaxChars", 600),
   }),
-  /** v1/v2 → v3:新字段由 schema 默认值补齐;v3 → v4:新增 agentToolProviders 同理。 */
+  /**
+   * v1/v2 → v3:新字段由 schema 默认值补齐;v3 → v4:新增 agentToolProviders 同理;
+   * v4 → v5:新增 workerDescription/workerProfiles 同理(无档位 = 与旧版一致的单一 Worker)。
+   */
   migrate: (values) => values,
 });
 

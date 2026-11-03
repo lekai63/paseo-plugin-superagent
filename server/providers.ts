@@ -63,3 +63,39 @@ export function resolveProviderSelection(
   const available = models.map((candidate) => candidate.id).join(", ");
   return { error: `model "${model}" is not offered by provider "${provider}" (available: ${available})` };
 }
+
+export interface WorkerProfileLike {
+  name: string;
+}
+
+export interface WorkerProfileChoice {
+  /** 选中的档位名;null = 默认 Worker。 */
+  profile: string | null;
+  /** 请求的档位不存在而退回默认 Worker 时的说明(记入裁决,供人审计)。 */
+  note: string | null;
+}
+
+/**
+ * 把 Router 在 dispatch 里填写的档位名对到设置名单上。省略、`default` 与未知名字都落到
+ * 默认 Worker:Router 永远只能用到人配置过的 provider,名字写错不会让派发失败。
+ */
+export function matchWorkerProfile(
+  requested: string | null | undefined,
+  profiles: ReadonlyArray<WorkerProfileLike>,
+  defaultName = "default",
+): WorkerProfileChoice {
+  const wanted = requested?.trim().toLowerCase() ?? "";
+  if (!wanted || wanted === defaultName) return { profile: null, note: null };
+  const match = profiles.find((profile) => profile.name === wanted);
+  if (match) return { profile: match.name, note: null };
+  const known = profiles.map((profile) => profile.name).join(", ") || "none";
+  return {
+    profile: null,
+    note: `unknown worker profile "${truncateName(requested ?? "")}" (configured: ${known}); used the default worker`,
+  };
+}
+
+function truncateName(name: string): string {
+  const trimmed = name.trim();
+  return trimmed.length > 40 ? `${trimmed.slice(0, 39)}…` : trimmed;
+}

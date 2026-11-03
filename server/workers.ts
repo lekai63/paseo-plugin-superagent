@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { SuperagentSettingsValues } from "../shared/settings";
-import { slugify, truncate, type SuperagentState, type Ticket } from "../shared/model";
+import { slugify, truncate, type Ticket } from "../shared/model";
 import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 
 /**
@@ -112,16 +112,18 @@ async function resolveActualBranch(workspace: WorkspaceHandle, requested: string
   }
 }
 
-/** 为 Ticket 启动 Worker:先建工作区(worktree/shared),再在其中创建 agent。 */
+/**
+ * 为 Ticket 启动 Worker:先建工作区(worktree/shared),再在其中创建 agent。
+ * provider 由引擎按 Ticket 的档位解析后传入(不同 Ticket 可以跑在不同模型上)。
+ */
 export async function launchWorker(
   paseo: PaseoApi,
   settings: SuperagentSettingsValues,
-  state: SuperagentState,
+  provider: string,
   ticket: Ticket,
   routerAgentId: string | null,
   instructionFiles: string[] = [],
 ): Promise<WorkerLaunch> {
-  const provider = state.kv.workerProvider;
   if (!provider) throw new Error("worker provider is not configured");
   if (!settings.workingDir) throw new Error("working directory is not configured");
 

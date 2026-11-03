@@ -36,7 +36,7 @@ Worker 汇报(完成后自动回流)                  │
 
 | 模块 | 实现 |
 |---|---|
-| 双层架构 | Router = 常驻 agent(`superagent.role=router` 标签,provider 可配轻量模型,规则禁止执行与调用工具;规则随每次评估提示词下发,不依赖 provider 是否应用 systemPrompt——ACP 系如 zcode-acp 会丢弃它);Worker = 每 Ticket 独立 agent + worktree 隔离 + `superagent.ticket` 标签;层级在 app 的 Subagents track 可见 |
+| 双层架构 | Router = 常驻 agent(`superagent.role=router` 标签,provider 可配轻量模型,规则禁止执行与调用工具;规则随每次评估提示词下发,不依赖 provider 是否应用 systemPrompt——ACP 系如 zcode-acp 会丢弃它);Worker = 每 Ticket 独立 agent + worktree 隔离 + `superagent.ticket` 标签,可按 Worker 档位让不同 Ticket 跑在不同模型上;层级在 app 的 Subagents track 可见 |
 | 事件驱动 | Trigger 三源(手动/agent 工具/worker 汇报);fast-path 程序过滤;Thread 归属;批窗口合并评估;订阅直通;Inline & Spill 式上下文(评估提示词只带 8 条线程窗口存根 + 触发全文上限 4000 字) |
 | 面向人的交互 | Paseo app 即信道:推送、attention、权限流;任意 agent 会话内 `/superagent` 或 `superagent_dispatch` 工具委派,Router 答复经 sourceAgentId 回到原会话;Worker 会话可随时人工接管 |
 | 存算/环境分离 | 即 Paseo daemon 本身:daemon 在你的机器,客户端(relay E2EE)在任何地方;执行环境留在原地 |
@@ -58,7 +58,8 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 |---|---|
 | 工作目录 | 绝对路径。Router 的 cwd,也是所有 Worker 的基础目录(**必填**)。`worktree` 隔离时必须位于 git 仓库内,否则主界面与设置页都会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式。所有 Worker 都只在这一个目录(或其 worktree)里工作 |
 | Router provider/model | 留空自动选用宿主可用默认(claude → codex → opencode → 任意)。model id 以 `paseo provider models <provider>` 列出的为准(如 `zcode-acp/builtin:bigmodel-coding-plan\GLM-5.3-Flash`,单个反斜杠);填错时 Router 评估会报出可用 id |
-| Worker provider/model | 同上,建议配最强模型 |
+| Worker provider/model | 同上,建议配最强模型。配置了 Worker 档位时它是**默认 Worker**,可另填一句用途说明 |
+| Worker 档位 | 可选。默认 Worker 之外的具名档位(名字 + provider/model + 用途说明),如 `code → codex/…`「写码、修 bug、跑测试」。Router 的 dispatch 用 `"profile":"<名字>"` 按用途为每个任务选档位;省略或名字不存在时用默认 Worker(后者记入裁决)。Router 只能用到这里列出的模型,触发文本无法把 Worker 引向任意 provider。Ticket 记录所选档位与实际模型:retry 沿用档位、按该档位当前设置的模型启动;档位被删除后改用默认 Worker。不配置档位时行为与单一 Worker 完全一致 |
 | Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared`(直接在工作目录里干活,不需要 git。工作目录根下有 `AGENTS.md`/`CLAUDE.md` 时,Worker 按其中的归档规则放产出并完成要求的登记;没有规则时,每个 Ticket 的产出放进专属子目录 `tasks/<本地日期>-<标题>-<id 尾号>/`。Router 与 Worker 的提示词都会说明) |
 | Worker 超时 / 失败重试次数 / 批处理窗口 / 单条消息上限 | 引擎调参(设置页「执行」分组,超出范围会就地提示) |
 | 注入委派 MCP | 开启后所有普通 agent 的会话注入 `superagent_dispatch` 工具。走**插件自持的本地 MCP server**(`127.0.0.1` 随机端口 + 随机密钥路径),不受宿主 "Paseo tools"(`mcp.injectIntoAgents`)开关影响 |

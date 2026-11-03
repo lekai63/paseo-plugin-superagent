@@ -254,7 +254,16 @@ function SystemCard({
       ) : (
         <SettingsRow label="Router" hint={routerHint} />
       )}
-      <SettingsRow label="Worker" hint={`${snapshot.workerProvider || "自动选择"} · ${isolation}`} />
+      <SettingsRow
+        label={snapshot.workerProfiles.length > 0 ? "默认 Worker" : "Worker"}
+        hint={`${snapshot.workerProvider || "自动选择"} · ${isolation}`}
+      />
+      {snapshot.workerProfiles.length > 0 ? (
+        <SettingsRow
+          label="Worker 档位"
+          hint={snapshot.workerProfiles.map((profile) => `${profile.name} → ${profile.provider}`).join(" · ")}
+        />
+      ) : null}
       <SettingsRow label="工作目录" hint={snapshot.workingDir || "未配置"} />
       <SettingsRow label="触发来源" hint={sources.join(" · ")} />
       <SettingsRow label="看门狗" hint={watchdog} />

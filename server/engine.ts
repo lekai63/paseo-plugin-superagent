@@ -15,10 +15,15 @@ import {
   type Trigger,
   type TriggerOrigin,
 } from "../shared/model";
-import { SETTINGS_DEFAULTS, superagentSettings, type SuperagentSettingsValues } from "../shared/settings";
+import {
+  DEFAULT_WORKER_PROFILE,
+  SETTINGS_DEFAULTS,
+  superagentSettings,
+  type SuperagentSettingsValues,
+} from "../shared/settings";
 import { composeEvalPrompt, ensureRouter, newDecision, parseVerdict, readLastAssistantMessage } from "./router";
 import { harvestReport, launchWorker, retireWorker } from "./workers";
-import { resolveProviderSelection } from "./providers";
+import { matchWorkerProfile, resolveProviderSelection } from "./providers";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 
 /**
@@ -492,6 +497,11 @@ export class SuperagentEngine {
         isolation: this.settingsValues.workerIsolation,
         issue: workerIssue,
         instructionFiles: await this.sharedInstructionFiles(),
+        defaultWorker: {
+          provider: this.settingsValues.workerProvider.trim() || state.kv.workerProvider || null,
+          description: this.settingsValues.workerDescription,
+        },
+        profiles: this.settingsValues.workerProfiles,
       },
     });
     const result = await router.handle.run(prompt, { timeoutMs: ROUTER_EVAL_TIMEOUT_MS });
@@ -534,6 +544,9 @@ export class SuperagentEngine {
     for (const action of actions) {
       const decision = newDecision(threadId, triggerIds, action.action);
       if (action.action === "dispatch") {
+        // 档位只能取自设置名单;未知名字退回默认 Worker 并记入裁决,派发本身不失败。
+        const choice = matchWorkerProfile(action.profile, this.settingsValues.workerProfiles, DEFAULT_WORKER_PROFILE);
+        if (choice.note) decision.rationale = choice.note;
         const ticket: Ticket = {
           id: newId("tkt"),
           threadId,
@@ -543,6 +556,8 @@ export class SuperagentEngine {
           workerAgentId: null,
           workspaceId: null,
           branchName: null,
+          profile: choice.profile,
+          provider: null,
           startedAt: null,
           attempts: 0,
           subscribed: !action.unsubscribe,
@@ -792,8 +807,9 @@ export class SuperagentEngine {
     if (!ticket || ticket.status !== "pending") return;
 
     let workerProvider: string;
+    let profile: string | null;
     try {
-      workerProvider = await this.resolveProvider("worker", state.kv.workerProvider);
+      ({ provider: workerProvider, profile } = await this.resolveTicketWorker(ticket, state));
       if (!workerProvider) throw new Error("no available provider for workers");
     } catch (error) {
       // 设置错误时 Ticket 保持 pending(看门狗会重试),但把原因写进 lastError 供 UI 展示。
@@ -806,7 +822,8 @@ export class SuperagentEngine {
       });
       throw error;
     }
-    if (state.kv.workerProvider !== workerProvider) {
+    // kv 只记默认 Worker 的解析结果(自动选择时跨重启稳定);具名档位的 provider 记在票据上。
+    if (!profile && state.kv.workerProvider !== workerProvider) {
       await this.store.update((next) => {
         next.kv.workerProvider = workerProvider;
       });
@@ -825,6 +842,8 @@ export class SuperagentEngine {
       attempt = target.attempts;
       target.startedAt = now;
       target.lastError = null;
+      target.profile = profile;
+      target.provider = workerProvider;
       target.updatedAt = now;
     });
     if (!attempt) return;
@@ -839,7 +858,7 @@ export class SuperagentEngine {
       const launch = await launchWorker(
         paseo,
         this.settingsValues,
-        state,
+        workerProvider,
         current,
         state.kv.routerAgentId ?? null,
         await this.sharedInstructionFiles(),
@@ -1237,6 +1256,7 @@ export class SuperagentEngine {
       routerAgentId: state.kv.routerAgentId ?? null,
       routerProvider: state.kv.routerProvider || settings.routerProvider || null,
       workerProvider: state.kv.workerProvider || settings.workerProvider || null,
+      workerProfiles: settings.workerProfiles.map(({ name, provider, description }) => ({ name, provider, description })),
       threads,
       tickets: state.tickets
         .filter((t) => threads.some((th) => th.id === t.threadId))
@@ -1285,6 +1305,26 @@ export class SuperagentEngine {
   }
 
   /**
+   * Ticket 的 Worker provider:具名档位按设置校验(设置改了模型时 retry 用新模型);
+   * 档位已从设置里删除或为空时用默认 Worker,并把票据改记为默认档位。
+   */
+  private async resolveTicketWorker(
+    ticket: Ticket,
+    state: SuperagentState,
+  ): Promise<{ provider: string; profile: string | null }> {
+    const name = ticket.profile;
+    if (name) {
+      const profile = this.settingsValues.workerProfiles.find((candidate) => candidate.name === name);
+      if (profile) {
+        const provider = await this.validateConfiguredProvider(`worker profile "${name}"`, profile.provider);
+        return { provider, profile: name };
+      }
+      console.warn(`[superagent] worker profile "${name}" of ticket ${ticket.id} is no longer configured; using the default worker`);
+    }
+    return { provider: await this.resolveProvider("worker", state.kv.workerProvider), profile: null };
+  }
+
+  /**
    * provider 解析:设置显式指定优先;否则从 daemon provider 快照挑一个稳定默认
    * (claude → codex → opencode → 任意 ready),并记入 kv 保证跨重启一致。
    */
@@ -1315,7 +1355,7 @@ export class SuperagentEngine {
    * 显式设置的 provider/model 先对照 provider 快照校验,避免把错误 model 交给 provider
    * 后只拿到一句 "Internal error";过度转义的反斜杠自动纠正。快照不可用时原样放行。
    */
-  private async validateConfiguredProvider(role: "router" | "worker", configured: string): Promise<string> {
+  private async validateConfiguredProvider(role: string, configured: string): Promise<string> {
     const paseo = this.requirePaseo();
     let entries;
     try {

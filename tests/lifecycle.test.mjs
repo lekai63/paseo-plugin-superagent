@@ -666,3 +666,84 @@ test("worktree workers are not told about base-directory instruction files", asy
   await f.engine.startTicket("ticket");
   assert.doesNotMatch(f.calls.workerCreates[0].prompt, /project instructions/);
 });
+
+const GLM = "zcode-acp/builtin:plan\\GLM";
+const WORKER_PROFILES = [
+  { name: "glm", provider: GLM, description: "Chinese reports and research" },
+  { name: "flash", provider: "zcode-acp/builtin:plan\\GLM-Flash", description: "quick lookups" },
+];
+
+test("dispatches run each ticket on the provider of its chosen worker profile", async (t) => {
+  const f = fixture(t, "completed");
+  f.values.workerProfiles = WORKER_PROFILES;
+  pendingTrigger(f.state);
+  f.controls.verdict = {
+    actions: [
+      { action: "dispatch", title: "Code", mandate: "fix the bug" },
+      { action: "dispatch", title: "Report", mandate: "write the report", profile: "glm" },
+    ],
+  };
+  await f.engine.runEval("thread");
+  await until(() => f.calls.workerCreates.length === 2);
+  await until(() => f.state.tickets.filter((ticket) => ticket.status === "running").length === 2);
+  const providers = f.calls.workerCreates.map((options) => options.config.provider).sort();
+  assert.deepEqual(providers, ["codex/test", GLM].sort());
+  const [code, report] = ["Code", "Report"].map((title) => f.state.tickets.find((ticket) => ticket.title === title));
+  assert.deepEqual([code.profile, code.provider], [null, "codex/test"]);
+  assert.deepEqual([report.profile, report.provider], ["glm", GLM]);
+  assert.equal(f.state.kv.workerProvider, "codex/test", "a named profile never overwrites the default worker");
+  assert.match(f.calls.prompts.at(-1), /## Worker profiles/);
+  assert.match(f.calls.prompts.at(-1), /- default \(codex\/test\): general work that fits no other profile/);
+});
+
+test("an unknown profile from the Router falls back to the default worker and is recorded", async (t) => {
+  const f = fixture(t, "completed");
+  f.values.workerProfiles = WORKER_PROFILES;
+  pendingTrigger(f.state);
+  f.controls.verdict = { actions: [{ action: "dispatch", title: "Any", mandate: "m", profile: "codex/gpt-9" }] };
+  await f.engine.runEval("thread");
+  await until(() => f.calls.workerCreates.length === 1);
+  assert.equal(f.calls.workerCreates[0].config.provider, "codex/test");
+  const ticket = f.state.tickets.find((candidate) => candidate.title === "Any");
+  assert.equal(ticket.profile, null);
+  assert.match(f.state.decisions[0].rationale, /unknown worker profile "codex\/gpt-9" \(configured: glm, flash\)/);
+});
+
+test("retry keeps the ticket's profile and picks up that profile's current model", async (t) => {
+  const f = fixture(t, "failed");
+  f.values.workerProfiles = WORKER_PROFILES;
+  Object.assign(f.ticket, { profile: "glm", provider: GLM });
+  f.values.workerProfiles = [{ ...WORKER_PROFILES[0], provider: "zcode-acp/builtin:plan\\GLM-Flash" }];
+  await f.engine.retryTicket("ticket");
+  assert.equal(f.ticket.status, "running");
+  assert.equal(f.ticket.profile, "glm");
+  assert.equal(f.calls.workerCreates[0].config.provider, "zcode-acp/builtin:plan\\GLM-Flash");
+  assert.equal(f.ticket.provider, "zcode-acp/builtin:plan\\GLM-Flash");
+});
+
+test("a profile removed from settings launches on the default worker", async (t) => {
+  const f = fixture(t, "pending");
+  f.ticket.profile = "gone";
+  await f.engine.startTicket("ticket");
+  assert.equal(f.calls.workerCreates[0].config.provider, "codex/test");
+  assert.equal(f.ticket.profile, null);
+  assert.equal(f.ticket.provider, "codex/test");
+});
+
+test("an invalid profile model keeps the ticket pending and names the profile", async (t) => {
+  const f = fixture(t, "pending");
+  f.values.workerProfiles = [{ ...WORKER_PROFILES[0], provider: "zcode-acp/nope" }];
+  f.ticket.profile = "glm";
+  await assert.rejects(f.engine.startTicket("ticket"), /worker profile "glm" provider setting "zcode-acp\/nope" is invalid/);
+  assert.equal(f.ticket.status, "pending");
+  assert.match(f.ticket.lastError, /worker profile "glm"/);
+  assert.equal(f.calls.creates, 0);
+});
+
+test("the snapshot exposes the configured worker profiles", async (t) => {
+  const f = fixture(t);
+  await setImmediate(); // the fixture's settings are delivered asynchronously
+  assert.deepEqual(f.engine.snapshot().workerProfiles, []);
+  f.values.workerProfiles = WORKER_PROFILES;
+  assert.deepEqual(f.engine.snapshot().workerProfiles.map((profile) => profile.name), ["glm", "flash"]);
+});

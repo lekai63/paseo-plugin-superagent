@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSettings, type PluginSurfaceProps, type SettingsState } from "@getpaseo/plugin/client";
@@ -12,17 +12,20 @@ import {
 } from "@getpaseo/plugin/client/ui";
 import type { SuperagentSnapshot } from "../shared/model";
 import {
+  MAX_WORKER_PROFILES,
   NUMBER_LIMITS,
   parseAllowlist,
   superagentSettings,
+  WORKER_PROFILE_NAME_HINT,
   type NumberSettingKey,
   type SuperagentSettingsValues,
+  type WorkerProfile,
 } from "../shared/settings";
 import { STATE_QUERY_KEY } from "./query";
 
 /**
  * Settings → Plugins → Superagent。宿主负责标题栏、返回、滚动与居中栏宽;
- * 这里只按主题分节:工作目录 → 模型 → 执行 → 委派 → IM 触发源 → 保存。
+ * 这里只按主题分节:工作目录 → 模型 → Worker 档位 → 执行 → 委派 → IM 触发源 → 保存。
  *
  * 所有修改先进草稿,统一保存(保存会热重载 Router/IM 连接,不宜逐字触发)。
  * 数值字段在草稿里是字符串,便于边输入边校验。
@@ -30,7 +33,13 @@ import { STATE_QUERY_KEY } from "./query";
 
 type Values = SuperagentSettingsValues;
 type Ready = Extract<SettingsState<typeof superagentSettings.schema>, { status: "ready" }>;
-type FormValues = { [K in keyof Values]: Values[K] extends number ? string : Values[K] };
+/** 档位行带一个本地 key:SettingsInput 只在挂载时读初值,删行时其余行不能重新挂载。 */
+type ProfileRow = WorkerProfile & { key: string };
+type ProfileField = keyof WorkerProfile;
+type ProfileErrors = Partial<Record<ProfileField, string>>[];
+type FormValues = {
+  [K in keyof Values]: K extends "workerProfiles" ? ProfileRow[] : Values[K] extends number ? string : Values[K];
+};
 type FormErrors = Partial<Record<keyof Values, string>>;
 type StringKey = { [K in keyof Values]: Values[K] extends string ? K : never }[keyof Values];
 type BooleanKey = { [K in keyof Values]: Values[K] extends boolean ? K : never }[keyof Values];
@@ -40,16 +49,27 @@ const NUMBER_KEYS = Object.keys(NUMBER_LIMITS) as NumberSettingKey[];
 function toForm(values: Values): FormValues {
   const form = { ...values } as Record<string, unknown>;
   for (const key of NUMBER_KEYS) form[key] = String(values[key]);
+  form.workerProfiles = values.workerProfiles.map((profile, index) => ({ ...profile, key: `saved-${index}` }));
   return form as FormValues;
+}
+
+function stripProfileKeys(rows: ProfileRow[]): WorkerProfile[] {
+  return rows.map(({ name, provider, description }) => ({ name, provider, description }));
+}
+
+/** 草稿比较用的序列化:去掉档位行的本地 key。 */
+function comparable(form: FormValues): string {
+  return JSON.stringify({ ...form, workerProfiles: stripProfileKeys(form.workerProfiles) });
 }
 
 function isAbsolutePath(path: string): boolean {
   return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
 
-function parseForm(form: FormValues): { values: Values | null; errors: FormErrors } {
+function parseForm(form: FormValues): { values: Values | null; errors: FormErrors; profileErrors: ProfileErrors } {
   const errors: FormErrors = {};
-  const raw = { ...form } as Record<string, unknown>;
+  const profileErrors: ProfileErrors = form.workerProfiles.map(() => ({}));
+  const raw = { ...form, workerProfiles: stripProfileKeys(form.workerProfiles) } as Record<string, unknown>;
   for (const key of NUMBER_KEYS) {
     const { min, max } = NUMBER_LIMITS[key];
     const text = form[key].trim();
@@ -66,11 +86,24 @@ function parseForm(form: FormValues): { values: Values | null; errors: FormError
   if (!parsed.success) {
     for (const issue of parsed.error.issues) {
       const key = issue.path[0] as keyof Values | undefined;
-      if (key && !errors[key]) errors[key] = issue.code === "too_big" ? "内容过长" : issue.message;
+      const message = issue.code === "too_big" ? "内容过长" : issue.message;
+      if (key === "workerProfiles" && typeof issue.path[1] === "number") {
+        // 档位错误标在对应行的对应输入框上。
+        const row = profileErrors[issue.path[1]];
+        const field = issue.path[2] as ProfileField | undefined;
+        if (row && field && !row[field]) row[field] = message;
+        else if (row && !field && !row.name) row.name = message;
+        continue;
+      }
+      if (key && !errors[key]) errors[key] = message;
     }
   }
   const valid = parsed.success && Object.keys(errors).length === 0;
-  return { values: valid ? parsed.data : null, errors };
+  return { values: valid ? parsed.data : null, errors, profileErrors };
+}
+
+function countProfileErrors(profileErrors: ProfileErrors): number {
+  return profileErrors.reduce((total, row) => total + Object.keys(row).length, 0);
 }
 
 export function SuperagentSettingsScreen({ theme }: PluginSurfaceProps) {
@@ -111,15 +144,15 @@ function SettingsForm({ settings }: { settings: Ready }) {
   // SettingsInput 只在挂载时读 initialValue;整体重置草稿时换 key 让输入框重新挂载。
   const [formKey, setFormKey] = useState(0);
 
-  const baseForm = useMemo(() => JSON.stringify(toForm(base.values)), [base.values]);
-  const dirty = JSON.stringify(form) !== baseForm;
-  const { values: parsedValues, errors } = useMemo(() => parseForm(form), [form]);
-  const errorCount = Object.keys(errors).length;
+  const baseForm = useMemo(() => comparable(toForm(base.values)), [base.values]);
+  const dirty = comparable(form) !== baseForm;
+  const { values: parsedValues, errors, profileErrors } = useMemo(() => parseForm(form), [form]);
+  const errorCount = Object.keys(errors).length + countProfileErrors(profileErrors);
 
   useEffect(() => {
     if (settings.revision === base.revision) return;
-    const latest = JSON.stringify(toForm(settings.values));
-    if (latest === JSON.stringify(form)) {
+    const latest = comparable(toForm(settings.values));
+    if (latest === comparable(form)) {
       // 自己刚保存成功:草稿已等于新值,只推进 revision。
       setBase({ values: settings.values, revision: settings.revision });
     } else if (!dirty) {
@@ -133,6 +166,25 @@ function SettingsForm({ settings }: { settings: Ready }) {
 
   const set = useCallback(<K extends keyof FormValues>(key: K, value: FormValues[K]) => {
     setForm((current) => ({ ...current, [key]: value }));
+  }, []);
+
+  const nextProfileKey = useRef(0);
+  const setProfile = useCallback((key: string, field: ProfileField, value: string) => {
+    setForm((current) => ({
+      ...current,
+      workerProfiles: current.workerProfiles.map((row) => (row.key === key ? { ...row, [field]: value } : row)),
+    }));
+  }, []);
+  const addProfile = useCallback(() => {
+    nextProfileKey.current += 1;
+    const key = `new-${nextProfileKey.current}`;
+    setForm((current) => ({
+      ...current,
+      workerProfiles: [...current.workerProfiles, { key, name: "", provider: "", description: "" }],
+    }));
+  }, []);
+  const removeProfile = useCallback((key: string) => {
+    setForm((current) => ({ ...current, workerProfiles: current.workerProfiles.filter((row) => row.key !== key) }));
   }, []);
 
   const save = useCallback(async () => {
@@ -207,9 +259,51 @@ function SettingsForm({ settings }: { settings: Ready }) {
           <TextField
             {...field}
             name="workerProvider"
-            label="Worker"
-            hint="负责真正干活,建议用最强的模型"
+            label={form.workerProfiles.length > 0 ? "默认 Worker" : "Worker"}
+            hint={
+              form.workerProfiles.length > 0
+                ? "Router 没有指定档位、或指定的档位不存在时使用"
+                : "负责真正干活,建议用最强的模型"
+            }
             placeholder="自动选择"
+          />
+          {form.workerProfiles.length > 0 ? (
+            <TextField
+              {...field}
+              name="workerDescription"
+              label="默认 Worker 的用途"
+              hint="写进 Router 提示词,和下方各档位的用途一起供 Router 选择;留空时视为「其他档位都不合适的通用任务」"
+              placeholder="通用任务、调研、中文文档与报告"
+            />
+          ) : null}
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Worker 档位"
+        info="让不同类型的任务跑在不同模型上。Router 派发时按用途说明为每个任务选一个档位;没有选、或选了不存在的名字时用默认 Worker。Router 只能使用这里列出的模型。"
+      >
+        {form.workerProfiles.map((row, index) => (
+          <ProfileCard
+            key={row.key}
+            row={row}
+            errors={profileErrors[index] ?? {}}
+            disabled={disabled}
+            onChange={setProfile}
+            onRemove={removeProfile}
+          />
+        ))}
+        <SettingsCard>
+          <SettingsAction
+            label={form.workerProfiles.length > 0 ? `已配置 ${form.workerProfiles.length} 个档位` : "只使用默认 Worker"}
+            hint={
+              form.workerProfiles.length >= MAX_WORKER_PROFILES
+                ? `最多 ${MAX_WORKER_PROFILES} 个档位`
+                : "例如:code → codex,负责写码、修 bug、跑测试"
+            }
+            actionLabel="添加档位"
+            disabled={disabled || form.workerProfiles.length >= MAX_WORKER_PROFILES}
+            onPress={addProfile}
           />
         </SettingsCard>
       </SettingsSection>
@@ -283,6 +377,59 @@ function SettingsForm({ settings }: { settings: Ready }) {
 }
 
 // ---------------------------------------------------------------- Fields
+
+function ProfileCard({
+  row,
+  errors,
+  disabled,
+  onChange,
+  onRemove,
+}: {
+  row: ProfileRow;
+  errors: ProfileErrors[number];
+  disabled: boolean;
+  onChange(key: string, field: ProfileField, value: string): void;
+  onRemove(key: string): void;
+}) {
+  return (
+    <SettingsCard>
+      <SettingsInput
+        label="档位名"
+        hint={`Router 在派发时填写的名字;${WORKER_PROFILE_NAME_HINT}`}
+        placeholder="code"
+        initialValue={row.name}
+        onChangeText={(value) => onChange(row.key, "name", value)}
+        disabled={disabled}
+        error={errors.name ?? null}
+      />
+      <SettingsInput
+        label="Provider / Model"
+        hint="格式同上方的 Worker,保存后启动时会对照 provider 列表校验"
+        placeholder="codex/gpt-5.5"
+        initialValue={row.provider}
+        onChangeText={(value) => onChange(row.key, "provider", value)}
+        disabled={disabled}
+        error={errors.provider ?? null}
+      />
+      <SettingsInput
+        label="用途"
+        hint="原样写进 Router 提示词:说清楚哪类任务该交给这个档位"
+        placeholder="仓库内写码、修 bug、重构、跑测试"
+        initialValue={row.description}
+        onChangeText={(value) => onChange(row.key, "description", value)}
+        disabled={disabled}
+        error={errors.description ?? null}
+      />
+      <SettingsAction
+        label="删除这个档位"
+        hint="运行中的任务不受影响;尚未启动或之后重试的任务会改用默认 Worker"
+        actionLabel="删除"
+        disabled={disabled}
+        onPress={() => onRemove(row.key)}
+      />
+    </SettingsCard>
+  );
+}
 
 interface FieldContext {
   form: FormValues;

@@ -264,6 +264,8 @@ function TicketRow({
   const direct = ticket.subscribed && SUBSCRIBED_STATUSES.includes(ticket.status);
   const active = ACTIVE_TICKET_STATUSES.includes(ticket.status);
   const meta = [
+    ticket.profile ? `档位 ${ticket.profile}` : null,
+    ticket.provider ?? null,
     ticket.workerAgentId ? `Worker ${ticket.workerAgentId.slice(0, 8)}` : null,
     ticket.branchName ? `分支 ${ticket.branchName}` : null,
     active && ticket.startedAt ? `${relativeTime(ticket.startedAt)}启动` : `更新于 ${relativeTime(ticket.updatedAt)}`,
@@ -391,7 +393,7 @@ function buildActivity(triggers: Trigger[], decisions: Decision[], tickets: Tick
       iconTone: tone === "default" ? "muted" : tone,
       title: `Router ${outcomeLabel(decision.outcome)}`,
       titleTone: tone,
-      subtitle: ticket ? `→ ${ticket.title}` : "",
+      subtitle: ticket ? `→ ${ticket.title}${decision.outcome === "dispatch" && ticket.profile ? ` · 档位 ${ticket.profile}` : ""}` : "",
       text: decision.reply ?? decision.rationale ?? decision.raw ?? "",
       markdown: Boolean(decision.reply),
     });

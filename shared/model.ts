@@ -97,6 +97,10 @@ export const TicketSchema = z.object({
   workspaceId: z.string().nullish(),
   /** worktree 隔离的 Worker 分支名(评估提示词与 UI 由此告知人去哪审查);shared 隔离为空。 */
   branchName: z.string().nullish(),
+  /** Router 为该 Ticket 选的 Worker 档位;空 = 默认 Worker。retry 沿用此档位。 */
+  profile: z.string().nullish(),
+  /** 当前(或最近一次)Worker 实际使用的 provider/model,启动时按档位解析后记录。 */
+  provider: z.string().nullish(),
   /** 当前(或最近一次)Worker 启动时间,看门狗超时判定的基准。 */
   startedAt: z.string().nullish(),
   attempts: z.number().int().nonnegative().default(0),
@@ -150,6 +154,8 @@ export const RouterActionSchema = z.discriminatedUnion("action", [
     title: z.string().min(1).max(120),
     mandate: z.string().min(1),
     unsubscribe: z.boolean().optional(),
+    /** Worker 档位名;省略或不在设置名单里时用默认 Worker。 */
+    profile: z.string().max(60).nullish(),
   }),
   z.object({
     action: z.literal("steer"),
@@ -247,6 +253,8 @@ export const SuperagentSnapshotSchema = z.object({
   routerAgentId: z.string().nullish(),
   routerProvider: z.string().nullish(),
   workerProvider: z.string().nullish(),
+  /** 默认 Worker 之外的具名档位(设置原样,UI 展示用)。 */
+  workerProfiles: z.array(z.object({ name: z.string(), provider: z.string(), description: z.string() })),
   threads: z.array(
     ThreadSchema.extend({
       pendingTriggers: z.number().int(),
