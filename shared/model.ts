@@ -186,7 +186,7 @@ export const RouterActionSchema = z.discriminatedUnion("action", [
   }),
   z.object({
     action: z.literal("reply"),
-    reply: z.string().min(1).max(2000),
+    reply: z.string().min(1),
   }),
   z.object({
     action: z.literal("ignore"),
@@ -226,6 +226,19 @@ export const PendingActionSchema = z.object({
 });
 export type PendingAction = z.infer<typeof PendingActionSchema>;
 
+/** IM 答复先落盘;逐段确认后推进 nextPart,失败后从该位置补发。 */
+export const ImDeliverySchema = z.object({
+  id: z.string(),
+  threadId: z.string(),
+  origin: TriggerOriginSchema,
+  parts: z.array(z.string()).min(1),
+  nextPart: z.number().int().nonnegative(),
+  status: z.enum(["pending", "failed", "sent"]),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type ImDelivery = z.infer<typeof ImDeliverySchema>;
+
 /** 整个持久化文件的形状。 */
 export const SuperagentStateSchema = z.object({
   version: z.literal(1),
@@ -240,6 +253,7 @@ export const SuperagentStateSchema = z.object({
   decisions: z.array(DecisionSchema),
   /** 旧状态文件没有此字段,解析时补空数组。 */
   pendingActions: z.array(PendingActionSchema).default([]),
+  imDeliveries: z.array(ImDeliverySchema).default([]),
 });
 export type SuperagentState = z.infer<typeof SuperagentStateSchema>;
 
@@ -252,6 +266,7 @@ export function emptyState(): SuperagentState {
     tickets: [],
     decisions: [],
     pendingActions: [],
+    imDeliveries: [],
   };
 }
 
@@ -275,6 +290,12 @@ export const SuperagentSnapshotSchema = z.object({
   tickets: z.array(TicketSchema),
   triggers: z.array(TriggerSchema),
   decisions: z.array(DecisionSchema),
+  /** 只暴露投递进度,不把 webhook 等通道凭据带到 UI。 */
+  imDeliveries: z.array(z.object({
+    id: z.string(), threadId: z.string(), title: z.string(), channel: TriggerOriginSchema.shape.channel,
+    totalParts: z.number().int(), nextPart: z.number().int(), status: ImDeliverySchema.shape.status,
+    updatedAt: z.string(),
+  })).default([]),
   /** 包含已关闭线程的最近结果,供 Router 区域展示。 */
   recentResults: z.array(ThreadResultSchema.extend({
     threadId: z.string(),

@@ -3,7 +3,8 @@ import { setImmediate } from "node:timers/promises";
 import test from "node:test";
 import { SuperagentEngine } from "../server/engine.ts";
 import { FeishuSource } from "../server/feishu.ts";
-import { emptyState } from "../shared/model.ts";
+import { emptyState, SuperagentStateSchema } from "../shared/model.ts";
+import { splitImReply } from "../server/im-replies.ts";
 import { SETTINGS_DEFAULTS } from "../shared/settings.ts";
 
 const oldTime = "2020-01-01T00:00:00.000Z";
@@ -145,6 +146,105 @@ function pendingTrigger(state) {
     text: "stop", status: "pending", context: false, receivedAt: oldTime,
   });
 }
+
+test("IM sends the complete long reply sequentially and persists each acknowledged part", async (t) => {
+  const f = fixture(t, "waiting");
+  f.values.imReplyMaxChars = 100;
+  pendingTrigger(f.state);
+  const origin = { channel: "dingtalk", chatId: "chat", senderId: "user", replyRef: "private-webhook" };
+  f.state.triggers[0].origin = origin;
+  const text = "完整结果👩🏽‍💻\n\n".repeat(250);
+  f.controls.verdict = { actions: [{ action: "reply", reply: text }, { action: "stop" }] };
+  const sent = [];
+  f.engine.setReplySink({ send: async (target, part) => {
+    const delivery = f.state.imDeliveries[0];
+    assert.deepEqual(target, origin);
+    assert.equal(delivery.nextPart, sent.length, "progress advances only after the send resolves");
+    assert.equal(delivery.parts[sent.length], part, "all parts are already durable before sending");
+    sent.push(part);
+  } });
+  await f.engine.runEval("thread");
+  assert.deepEqual(sent, splitImReply(text, 100));
+  assert.equal(f.state.imDeliveries[0].status, "sent");
+  assert.equal(f.state.imDeliveries[0].nextPart, sent.length);
+  assert.equal(f.state.decisions[0].reply, text);
+  assert.equal(f.state.threads[0].state, "closed");
+  const snapshot = f.engine.snapshot();
+  assert.equal(snapshot.imDeliveries[0].totalParts, sent.length);
+  assert.equal(snapshot.imDeliveries[0].status, "sent");
+  assert.doesNotMatch(JSON.stringify(snapshot.imDeliveries), /private-webhook|origin|parts"/);
+});
+
+test("a failed IM part pauses delivery and manual retry resumes without repeating acknowledged parts", async (t) => {
+  const f = fixture(t, "waiting");
+  f.values.imReplyMaxChars = 100;
+  pendingTrigger(f.state);
+  f.state.triggers[0].origin = { channel: "qq", chatId: "g:1", senderId: "user" };
+  const text = "long reply ".repeat(60);
+  f.controls.verdict = { actions: [{ action: "reply", reply: text }] };
+  const expected = splitImReply(text, 100);
+  const sent = [];
+  let fail = true;
+  f.engine.setReplySink({ send: async (_target, part) => {
+    if (sent.length === 1 && fail) throw new Error("channel refused");
+    sent.push(part);
+  } });
+  await f.engine.runEval("thread");
+  const delivery = f.state.imDeliveries[0];
+  assert.deepEqual(sent, [expected[0]]);
+  assert.equal(delivery.status, "failed");
+  assert.equal(delivery.nextPart, 1);
+  await f.engine.reconcile();
+  assert.deepEqual(sent, [expected[0]], "failed deliveries require explicit retry");
+  fail = false;
+  await f.engine.retryImDelivery(delivery.id);
+  assert.deepEqual(sent, expected);
+  assert.equal(delivery.status, "sent");
+  await assert.rejects(f.engine.retryImDelivery(delivery.id), /只有发送失败/);
+});
+
+test("a restored pending IM delivery resumes at its durable offset and concurrent drains do not duplicate it", async (t) => {
+  const f = fixture(t, "waiting");
+  const delivery = { id: "saved-delivery", threadId: "thread", origin: { channel: "qq", chatId: "g:1", senderId: "user" },
+    parts: ["[1/3] one", "[2/3] two", "[3/3] three"], nextPart: 1, status: "pending", createdAt: oldTime, updatedAt: oldTime };
+  const restored = SuperagentStateSchema.parse({ ...f.state, imDeliveries: [delivery] });
+  f.state.imDeliveries = restored.imDeliveries;
+  const entered = deferred();
+  const finish = deferred();
+  const sent = [];
+  f.engine.setReplySink({ send: async (_target, part) => {
+    sent.push(part);
+    if (sent.length === 1) { entered.resolve(); await finish.promise; }
+  } });
+  await f.engine.reconcile();
+  await entered.promise;
+  const duplicate = f.engine.sendImDelivery(delivery.id);
+  finish.resolve();
+  await duplicate;
+  assert.deepEqual(sent, delivery.parts.slice(1));
+  assert.equal(f.state.imDeliveries[0].status, "sent");
+});
+
+test("an unavailable IM sink retains the answer for later retry", async (t) => {
+  const f = fixture(t, "waiting");
+  pendingTrigger(f.state);
+  f.state.triggers[0].origin = { channel: "qq", chatId: "g:1", senderId: "user" };
+  await f.engine.runEval("thread");
+  assert.equal(f.state.imDeliveries[0].status, "failed");
+  assert.equal(f.state.imDeliveries[0].nextPart, 0);
+});
+
+test("IM recovery sends nothing while the durable outbox cannot be written", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.imDeliveries.push({ id: "unsaved", threadId: "thread", origin: { channel: "qq", chatId: "g:1", senderId: "user" },
+    parts: ["answer"], nextPart: 0, status: "pending", createdAt: oldTime, updatedAt: oldTime });
+  let sends = 0;
+  f.engine.setReplySink({ send: async () => { sends++; } });
+  f.engine.store.update = async () => { throw new Error("disk unavailable"); };
+  await f.engine.sendImDelivery("unsaved");
+  assert.equal(sends, 0);
+  assert.equal(f.state.imDeliveries[0].nextPart, 0);
+});
 
 test("Router rules update on the next eval using the same agent and can be cleared", async (t) => {
   const f = fixture(t, "waiting");

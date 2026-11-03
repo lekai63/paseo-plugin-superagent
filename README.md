@@ -59,6 +59,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 | 工作目录 | 绝对路径。Router 的 cwd,也是所有 Worker 的基础目录(**必填**)。`worktree` 隔离时必须位于 git 仓库内,否则主界面与设置页都会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式。所有 Worker 都只在这一个目录(或其 worktree)里工作 |
 | Router provider/model | 留空自动选用宿主可用默认(claude → codex → opencode → 任意)。model id 以 `paseo provider models <provider>` 列出的为准(如 `zcode-acp/builtin:bigmodel-coding-plan\GLM-5.3-Flash`,单个反斜杠);填错时 Router 评估会报出可用 id |
 | Router 自定义规则 | 设置页「Router 规则」直接填写,支持多行,最多 12000 字符,配置字段为 `routerInstructions`。用于答复语言、分派偏好和汇报格式,留空使用默认规则。保存后下一次评估直接注入提示词,无需重建 Router 会话,也不依赖 provider 读取 `AGENTS.md`/`ROUTER.md`;不改变 Worker 的项目规则。自定义规则补充内置编排约束,Router 仍只做裁决并按 JSON actions 输出 |
+| IM 单条消息上限 | 默认 600,可设 100–4000 字符,沿用配置字段 `imReplyMaxChars`。超长答复按段落/换行优先拆分为多条,添加 `[1/N]` 序号(计入上限)后顺序发送,正文完整保留;普通 emoji 按字素边界拆分。发送前保存全部分段,每段确认成功后记录进度;失败暂停,在「运行状态 → IM 答复投递」从失败段补发。重启恢复未完成的发送,已确认的段不重发。远端已接收但回执丢失或落盘前崩溃时,该段仍可能重复,通道未提供统一的恰好一次投递保证 |
 | Worker provider/model | 同上,建议配最强模型。配置了 Worker 档位时它是**默认 Worker**,可另填一句用途说明 |
 | Worker 档位 | 可选。默认 Worker 之外的具名档位(名字 + provider/model + 用途说明),如 `code → codex/…`「写码、修 bug、跑测试」。Router 的 dispatch 用 `"profile":"<名字>"` 按用途为每个任务选档位;省略或名字不存在时用默认 Worker(后者记入裁决)。Router 只能用到这里列出的模型,触发文本无法把 Worker 引向任意 provider。Ticket 记录所选档位与实际模型:retry 沿用档位、按该档位当前设置的模型启动;档位被删除后改用默认 Worker。不配置档位时行为与单一 Worker 完全一致 |
 | Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared`(直接在工作目录里干活,不需要 git。工作目录根下有 `AGENTS.md`/`CLAUDE.md` 时,Worker 按其中的归档规则放产出并完成要求的登记;没有规则时,每个 Ticket 的产出放进专属子目录 `tasks/<本地日期>-<标题>-<id 尾号>/`。Router 与 Worker 的提示词都会说明) |
@@ -95,7 +96,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 1. 企业微信管理后台创建**智能机器人**,记录 botId 与 Secret;
 2. 设置页填:botId、Secret、允许的发送者 `userid`(或群 `chatid`)。
 
-行为:单聊直接触发;群聊需 @机器人。回复为流式帧(单次完成)。**req_id 回复窗口有限**,晚到的 Worker 汇报回复可能被企微拒绝——长任务建议依赖 app 界面/推送查看结果,IM 内主要收 Router 的即时裁决与 ack。
+行为:单聊直接触发;群聊需 @机器人。答复通过 `chatId` 主动发送独立 Markdown 消息,支持多段续发,不复用已完成的 `req_id` 回复流。通道拒绝时保留未发送内容与进度供补发。
 
 ### QQ(OneBot 11,配合 NapCat;个人号路线)
 
@@ -114,6 +115,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 3. **历史与状态**:顶部「历史消息」打开独立页面,集中查看线程消息、Router 裁决、完整汇报和已关闭线程;选定线程后单独读取其最近记录。「运行状态」独立展示概览数字、组件配置与看门狗巡检。两页均提供返回主界面的入口,命令中心也有同名命令。
 4. **追加与干预**:在线程详情底部追加消息——恰好一个活跃订阅且已有会话的 Worker 时直通它,否则交给 Router。详情页保留取消/重试 Ticket、取消直通(运行中)/标记完成(待命)、重新评估、关闭线程等操作。取消与关闭需要再点一次确认。
 5. **查看结果**:调用图下方保留一条紧凑的「Router 最新答复」摘要,线程关闭、Worker 会话被回收后仍可查看。「查看结果」直接进入该线程,优先展示 Router 答复,下方任务保留 Worker 原始汇报。Router 尚未答复时先展示已保存的 Worker 汇报。最新结果随线程落盘,不依赖会话和活动窗口;旧数据从保留的裁决/汇报还原。新汇报保存原文,Router 的评估输入仍按原有预算截断。
+6. **侧栏状态**:左上角 Superagent 入口沿用 better-paseo 的状态图形:蓝色运行环表示 Router/Worker 正在处理,绿色圆勾表示已有结果且当前执行结束,黄色空心环表示等待权限,红点表示异常,灰点表示待命或状态不可用。Worker 运行期间不会因 Router 待命而显示完成。
 
 ## 设计取舍与限制
 

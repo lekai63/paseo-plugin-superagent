@@ -7,7 +7,7 @@ import type { ImSource, InboundMessage } from "./im";
  * 与 openclaw-china/wecom 同一底层 SDK 与官方通道。
  * - 单聊直接响应;群聊被 @ 才会收到事件。
  * - fast-path:allowUsers(userid)/ allowChats(chatid,群)白名单。
- * - 回复:流式回复帧(单次 finish);req_id 回复窗口有限,晚到回复可能失败。
+ * - 回复:通过 chatId 主动发送独立消息,分段不复用已完成的 req_id 流。
  */
 
 type WeComClient = InstanceType<typeof WSClient>;
@@ -26,7 +26,6 @@ export class WecomSource implements ImSource {
   private client: WeComClient | null = null;
   private stopped = false;
   private seen = new Set<string>();
-  private streamCounter = 0;
 
   constructor(private readonly config: WecomConfig) {}
 
@@ -58,15 +57,8 @@ export class WecomSource implements ImSource {
   async send(origin: TriggerOrigin, text: string): Promise<void> {
     const client = this.client;
     if (!client) throw new Error("wecom source is not started");
-    // replyRef = 入站帧的 req_id;回复窗口有限,Worker 长任务的晚到回复可能被拒。
-    if (!origin.replyRef) throw new Error("wecom reply missing req_id");
-    const streamId = `superagent-${Date.now().toString(36)}-${++this.streamCounter}`;
-    await client.replyStream(
-      { headers: { req_id: origin.replyRef } },
-      streamId,
-      text,
-      true,
-    );
+    const result = await client.sendMessage(origin.chatId, { msgtype: "markdown", markdown: { content: text } });
+    if (result.errcode !== 0) throw new Error(`wecom send rejected (${result.errcode})`);
   }
 
   private translate(frame: WsFrame<TextMessage>): InboundMessage | null {

@@ -27,6 +27,7 @@ import { composeEvalPrompt, ensureRouter, newDecision, parseVerdict, readLastAss
 import { harvestReport, launchWorker, retireWorker } from "./workers";
 import { matchWorkerProfile, resolveProviderSelection } from "./providers";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
+import { splitImReply } from "./im-replies";
 
 /**
  * Superagent 引擎:整个编排层的驱动核心。
@@ -134,6 +135,8 @@ export class SuperagentEngine {
   private actionFailures = new Map<string, number>();
   /** 待执行动作的串行链:保证同线程按裁决顺序执行,内联执行与看门狗补执行互不重叠。 */
   private actionChain: Promise<void> = Promise.resolve();
+  private deliveryChain: Promise<void> = Promise.resolve();
+  private sendingDeliveries = new Set<string>();
   /** 已提示过的 provider 设置纠正(每个设置值只告警一次)。 */
   private providerNotes = new Set<string>();
   /** Worker 基础目录检查(可替换,便于测试)与缓存结果。 */
@@ -214,6 +217,7 @@ export class SuperagentEngine {
     for (const timer of this.batchTimers.values()) clearTimeout(timer);
     this.batchTimers.clear();
     this.primed = false;
+    await this.deliveryChain;
     await this.store.flush();
   }
 
@@ -579,7 +583,7 @@ export class SuperagentEngine {
         createdTickets.push(ticket);
         if (!summary) summary = action.title;
       } else if (action.action === "reply") {
-        decision.reply = truncate(action.reply, 2000);
+        decision.reply = action.reply;
         replies.push(action.reply);
         if (!summary) summary = action.reply;
       } else if (action.action === "steer") {
@@ -594,8 +598,16 @@ export class SuperagentEngine {
     }
     const decidedAt = decisions[0]?.createdAt ?? new Date().toISOString();
     const replyDecision = decisions.filter((decision) => decision.outcome === "reply").at(-1);
+    const fullReply = replies.join("\n\n");
+    const origin = batch.find((trigger) => trigger.origin)?.origin;
+    const delivery = fullReply && origin && replyDecision ? {
+      id: `im-${replyDecision.id}`, threadId, origin,
+      parts: splitImReply(fullReply, this.settingsValues.imReplyMaxChars), nextPart: 0,
+      status: "pending" as const, createdAt: decidedAt, updatedAt: decidedAt,
+    } : null;
 
     await this.store.update((next) => {
+      if (delivery) next.imDeliveries.push(delivery);
       next.decisions.push(...decisions);
       next.tickets.push(...createdTickets);
       next.pendingActions.push(...actionRecords.filter((record): record is PendingAction => record !== null));
@@ -637,29 +649,77 @@ export class SuperagentEngine {
     }
 
     // 5. 答复回投:IM 触发回原聊天;agent 委派回原会话。
-    const reply = replies.length > 0 ? truncate(replies.join("\n\n"), 2000) : null;
-    if (reply) {
-      const origin = batch.find((t) => t.origin)?.origin ?? null;
-      if (origin) {
-        const text = truncate(reply, this.settingsValues.imReplyMaxChars);
+    if (delivery) {
+      await this.sendImDelivery(delivery.id);
+    } else if (fullReply && !origin) {
+      const reply = truncate(fullReply, 2000);
+      const replyTarget = batch.find((t) => t.replyToAgentId)?.replyToAgentId ?? null;
+      if (replyTarget) {
         try {
-          await this.replySink?.send(origin, text);
+          await paseo.agents.ref(replyTarget).send(reply, {
+            sourceAgentId: routerAgentId,
+            activeTurnBehavior: "steer",
+          });
         } catch (error) {
-          console.error("[superagent] reply delivery to channel failed", error);
-        }
-      } else {
-        const replyTarget = batch.find((t) => t.replyToAgentId)?.replyToAgentId ?? null;
-        if (replyTarget) {
-          try {
-            await paseo.agents.ref(replyTarget).send(reply, {
-              sourceAgentId: routerAgentId,
-              activeTurnBehavior: "steer",
-            });
-          } catch (error) {
-            console.error("[superagent] reply relay to agent failed", error);
-          }
+          console.error("[superagent] reply relay to agent failed", error);
         }
       }
+    }
+  }
+
+  /** 全局串行发送,看门狗与手动补发不会同时发送同一段。 */
+  private sendImDelivery(id: string): Promise<void> {
+    if (this.sendingDeliveries.has(id)) return this.deliveryChain;
+    this.sendingDeliveries.add(id);
+    const send = this.deliveryChain.then(async () => {
+      let delivery = this.store.get().imDeliveries.find((item) => item.id === id);
+      if (!delivery || delivery.status !== "pending") return;
+      // 首次落盘失败时记录仍可能留在内存;恢复发送前先确认它可以持久化。
+      await this.store.update(() => {});
+      while (delivery.nextPart < delivery.parts.length) {
+        try {
+          if (!this.replySink) throw new Error("IM reply channel is not available");
+          await this.replySink.send(delivery.origin, delivery.parts[delivery.nextPart]);
+        } catch {
+          await this.store.update((next) => {
+            const target = next.imDeliveries.find((item) => item.id === id);
+            if (target) { target.status = "failed"; target.updatedAt = new Date().toISOString(); }
+          });
+          // 通道异常可能带 webhook 等凭据,只记录安全的定位信息。
+          console.error(`[superagent] IM delivery ${id} failed at part ${delivery.nextPart + 1}/${delivery.parts.length}`);
+          return;
+        }
+        await this.store.update((next) => {
+          const target = next.imDeliveries.find((item) => item.id === id);
+          if (!target) return;
+          target.nextPart++;
+          target.updatedAt = new Date().toISOString();
+          if (target.nextPart === target.parts.length) target.status = "sent";
+        });
+        delivery = this.store.get().imDeliveries.find((item) => item.id === id);
+        if (!delivery) return;
+      }
+    });
+    this.deliveryChain = send.catch((error) => console.error("[superagent] IM outbox processing failed", error))
+      .finally(() => { this.sendingDeliveries.delete(id); });
+    return this.deliveryChain;
+  }
+
+  async retryImDelivery(id: string): Promise<void> {
+    await this.store.ready;
+    const delivery = this.store.get().imDeliveries.find((item) => item.id === id);
+    if (!delivery) throw new Error("IM delivery not found");
+    if (delivery.status !== "failed") throw new Error("只有发送失败的答复可以补发");
+    await this.store.update((next) => {
+      const target = next.imDeliveries.find((item) => item.id === id)!;
+      target.status = "pending";
+    });
+    await this.sendImDelivery(id);
+    if (this.store.get().imDeliveries.find((item) => item.id === id)?.status === "failed") {
+      throw new Error("补发失败,进度已保留。请检查 IM 连接或回复窗口是否过期");
+    }
+    if (this.store.get().imDeliveries.find((item) => item.id === id)?.status !== "sent") {
+      throw new Error("答复尚未全部发送,进度已保留,请稍后查看运行状态");
     }
   }
 
@@ -1057,6 +1117,12 @@ export class SuperagentEngine {
     if (!paseo) return null;
     const state = this.store.get();
     let acted = 0;
+    for (const delivery of state.imDeliveries) {
+      if (delivery.status === "pending" && !this.sendingDeliveries.has(delivery.id)) {
+        acted++;
+        void this.sendImDelivery(delivery.id);
+      }
+    }
 
     for (const ticket of state.tickets) {
       if (ticket.status === "pending" && state.threads.find((t) => t.id === ticket.threadId)?.state === "active") {
@@ -1287,6 +1353,13 @@ export class SuperagentEngine {
         .filter((d) => threads.some((th) => th.id === d.threadId))
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
         .slice(0, 120),
+      imDeliveries: state.imDeliveries
+        .filter((item) => !options.threadId || item.threadId === options.threadId)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        .map(({ id, threadId, origin, parts, nextPart, status, updatedAt }) => ({
+          id, threadId, title: state.threads.find((thread) => thread.id === threadId)?.title ?? threadId,
+          channel: origin.channel, totalParts: parts.length, nextPart, status, updatedAt,
+        })),
       engine: {
         running: this.primed,
         primed: this.primed,

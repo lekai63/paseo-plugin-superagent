@@ -1,4 +1,5 @@
 import type { PluginClientContext, PluginScreenProps, PluginSidebarItemProps, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import { useMemo } from "react";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { SuperagentScreen } from "./client/screen";
 import { SuperagentSettingsScreen } from "./client/settings-screen";
@@ -6,13 +7,24 @@ import { ExecutionPanel } from "./client/execution-panel";
 import { HistoryScreen } from "./client/history-screen";
 import { StatusScreen } from "./client/status-screen";
 import { superagentDispatchRpc } from "./shared/rpc";
+import { useExecutionAgents, useSuperagentState } from "./client/query";
+import { sidebarStatus } from "./shared/sidebar-status";
+import { AgentStatusIcon } from "./client/agent-status-icon";
 
 const SETTINGS_SCREEN_ID = "general";
 
-function SuperagentSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
+function SuperagentSidebarItem({ currentScreen, openScreen, host, theme }: PluginSidebarItemProps) {
+  const query = useSuperagentState(host.id);
+  const snapshot = query.data;
+  const ids = [snapshot?.routerAgentId, ...(snapshot?.tickets ?? [])
+    .filter((ticket) => ["pending", "launching", "running", "waiting"].includes(ticket.status)).map((ticket) => ticket.workerAgentId)]
+    .filter((id): id is string => Boolean(id));
+  const agents = useExecutionAgents(host.id, ids);
+  const status = sidebarStatus(snapshot, Object.values(agents).map((item) => item.agent), query.isError);
+  const StatusIcon = useMemo(() => () => <AgentStatusIcon status={status} theme={theme} />, [status, theme]);
   return (
     <SidebarRow
-      icon="Network"
+      icon={StatusIcon}
       label="Superagent"
       active={Boolean(currentScreen && ["main", "history", "status"].includes(currentScreen.screenId))}
       onPress={() => openScreen({ screenId: "main" })}

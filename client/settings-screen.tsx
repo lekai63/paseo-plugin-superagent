@@ -383,7 +383,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
           <ChannelCard key={channel.enabled} channel={channel} {...field} />
         ))}
         <SettingsCard>
-          <TextField {...field} name="imReplyMaxChars" label="IM 回复上限(字符)" hint="发回聊天的答复超出时截断" />
+          <TextField {...field} name="imReplyMaxChars" label="IM 单条消息上限(字符)" hint="包含分段序号;长答复自动分成多条依次发完" />
         </SettingsCard>
       </SettingsSection>
 

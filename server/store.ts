@@ -78,12 +78,12 @@ export class SuperagentStore {
     mutator(next);
     trim(next);
     this.state = next;
-    this.writeChain = this.writeChain
-      .then(() => persist(next))
-      .catch((error) => {
-        console.error("[superagent] state persist failed", error);
-      });
-    return this.writeChain.then(() => this.state);
+    const write = this.writeChain.then(() => persist(next));
+    this.writeChain = write.catch((error) => {
+      console.error("[superagent] state persist failed", error);
+    });
+    // 调用方必须知道落盘失败,否则会误把未持久化的外发进度当作已保存。
+    return write.then(() => this.state);
   }
 
   /** 只改内存不落盘(仅限恢复流程中已确认存在的一致性修补)。 */
@@ -107,6 +107,11 @@ async function persist(state: SuperagentState): Promise<void> {
 }
 
 function trim(state: SuperagentState): void {
+  state.imDeliveries = [
+    ...state.imDeliveries.filter((item) => item.status !== "sent"),
+    ...state.imDeliveries.filter((item) => item.status === "sent")
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 40),
+  ];
   if (state.triggers.length > MAX_TRIGGERS) {
     const keep = state.triggers.filter((t) => t.status === "pending");
     const done = state.triggers
@@ -121,7 +126,7 @@ function trim(state: SuperagentState): void {
       .slice(0, MAX_DECISIONS);
   }
   const closed = state.threads
-    .filter((t) => t.state === "closed")
+    .filter((t) => t.state === "closed" && !state.imDeliveries.some((item) => item.threadId === t.id && item.status !== "sent"))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   if (closed.length > MAX_CLOSED_THREADS) {
     const drop = new Set(closed.slice(MAX_CLOSED_THREADS).map((t) => t.id));

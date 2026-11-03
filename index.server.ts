@@ -7,6 +7,7 @@ import {
   createDispatchHandler,
   createForceEvalHandler,
   createRetryTicketHandler,
+  createRetryImDeliveryHandler,
   createStateHandler,
   createUnsubscribeHandler,
 } from "./server/handlers";
@@ -23,6 +24,7 @@ import {
   superagentDispatchRpc,
   superagentForceEvalRpc,
   superagentRetryTicketRpc,
+  superagentRetryImDeliveryRpc,
   superagentStateRpc,
   superagentUnsubscribeRpc,
 } from "./shared/rpc";
@@ -53,6 +55,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(superagentForceEvalRpc, withPrime(createForceEvalHandler(engine)));
   server.handle(superagentCancelTicketRpc, withPrime(createCancelTicketHandler(engine)));
   server.handle(superagentRetryTicketRpc, withPrime(createRetryTicketHandler(engine)));
+  server.handle(superagentRetryImDeliveryRpc, withPrime(createRetryImDeliveryHandler(engine)));
   server.handle(superagentCloseThreadRpc, withPrime(createCloseThreadHandler(engine)));
   server.handle(superagentUnsubscribeRpc, withPrime(createUnsubscribeHandler(engine)));
 

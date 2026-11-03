@@ -141,7 +141,7 @@ export const superagentSettings = defineSettings({
     /** 允许的会话 chatid(群聊),逗号分隔;群聊被 @ 才会收到。 */
     wecomAllowChats: z.string().trim().max(2000).default(""),
 
-    /** IM 回复截断上限(字符)。 */
+    /** IM 单条消息上限(含分段序号);长答复完整分段发送。 */
     imReplyMaxChars: boundedInt("imReplyMaxChars", 600),
   }),
   /**

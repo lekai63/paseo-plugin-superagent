@@ -7,6 +7,7 @@ import { ACTIVE_TICKET_STATUSES, clockTime, watchdogNoteLabel } from "../shared/
 import { superagentSettings, type SuperagentSettingsValues } from "../shared/settings";
 import { useSuperagentState } from "./query";
 import { ScreenLayout, StateFeedback } from "./screen-layout";
+import { ImDeliveries } from "./im-deliveries";
 import { Button, StatTile, space, type Theme } from "./ui";
 
 export function StatusScreen(props: PluginScreenProps & { openMain(): void; openSettings(): void }) {
@@ -27,6 +28,9 @@ export function StatusScreen(props: PluginScreenProps & { openMain(): void; open
           <SettingsSection title="组件运行状态">
             <SystemCard snapshot={query.data} settings={settings.status === "ready" ? settings.values : null} navigation={props.navigation} />
           </SettingsSection>
+          {query.data.imDeliveries?.length ? <SettingsSection title="IM 答复投递">
+            <ImDeliveries deliveries={query.data.imDeliveries} theme={props.theme} hostId={props.host.id} />
+          </SettingsSection> : null}
         </> : null}
       </View>
     </ScreenLayout>

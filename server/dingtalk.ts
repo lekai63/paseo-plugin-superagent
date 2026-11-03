@@ -61,10 +61,13 @@ export class DingtalkSource implements ImSource {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ msgtype: "text", text: { content: text } }),
+      signal: AbortSignal.timeout(30_000),
     });
     if (!response.ok) {
-      throw new Error(`dingtalk webhook reply failed: ${response.status} ${await response.text().catch(() => "")}`);
+      throw new Error(`dingtalk webhook reply failed: HTTP ${response.status}`);
     }
+    const result = await response.json() as { errcode?: number };
+    if (result.errcode !== 0) throw new Error(`dingtalk reply rejected (${result.errcode})`);
   }
 
   /** 服务端依赖回调 ACK 防重推(60s 未响应会重发)。 */

@@ -95,13 +95,14 @@ export class FeishuSource implements ImSource {
   async send(origin: TriggerOrigin, text: string): Promise<void> {
     const client = this.requireClient();
     if (origin.messageId) {
-      await client.im.v1.message.reply({
+      const result = await client.im.v1.message.reply({
         path: { message_id: origin.messageId },
         data: { msg_type: "text", content: JSON.stringify({ text }) },
       });
+      if (result.code !== 0) throw new Error(`feishu reply rejected (${result.code})`);
       return;
     }
-    await client.im.v1.message.create({
+    const result = await client.im.v1.message.create({
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: origin.chatId,
@@ -109,6 +110,7 @@ export class FeishuSource implements ImSource {
         content: JSON.stringify({ text }),
       },
     });
+    if (result.code !== 0) throw new Error(`feishu send rejected (${result.code})`);
   }
 
   private requireClient(): LarkClient {

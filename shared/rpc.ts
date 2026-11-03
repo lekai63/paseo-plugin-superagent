@@ -9,6 +9,12 @@ import { SuperagentSnapshotSchema } from "./model";
 
 const OkSchema = z.object({ ok: z.boolean(), error: z.string().nullish() });
 
+export const superagentRetryImDeliveryRpc = defineRpc({
+  name: "superagent.retry_im_delivery",
+  input: z.object({ deliveryId: z.string() }),
+  output: OkSchema,
+});
+
 export const superagentDispatchRpc = defineRpc({
   name: "superagent.dispatch",
   input: z.object({

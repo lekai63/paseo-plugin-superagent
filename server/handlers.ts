@@ -7,6 +7,7 @@ import {
   superagentDispatchRpc,
   superagentForceEvalRpc,
   superagentRetryTicketRpc,
+  superagentRetryImDeliveryRpc,
   superagentStateRpc,
   superagentUnsubscribeRpc,
 } from "../shared/rpc";
@@ -15,6 +16,17 @@ import {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export function createRetryImDeliveryHandler(engine: SuperagentEngine) {
+  return async (input: RpcInput<typeof superagentRetryImDeliveryRpc>, _context: PluginHandlerContext) => {
+    try {
+      await engine.retryImDelivery(input.deliveryId);
+      return { ok: true, error: null };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+  };
 }
 
 export function createDispatchHandler(engine: SuperagentEngine) {
