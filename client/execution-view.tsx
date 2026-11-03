@@ -1,13 +1,12 @@
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
-import { Icon, Modal } from "@getpaseo/plugin/client/ui";
+import { Icon } from "@getpaseo/plugin/client/ui";
 import type { SuperagentSnapshot, Ticket } from "../shared/model";
-import { agentStatus, directTicket, elapsedTime, isFinishedTicket, ticketPriority, workspaceThreadIds } from "../shared/execution";
-import { markdownPreview, relativeTime, threadStatus, ticketStatusLabel, ticketStatusTone, type StatusLabel } from "../shared/labels";
+import { agentStatus, currentTickets, directTicket, elapsedTime, ticketPriority, workspaceThreadIds } from "../shared/execution";
+import { ticketStatusLabel, ticketStatusTone, type StatusLabel } from "../shared/labels";
 import { useExecutionAgents, type AgentObservation } from "./query";
-import { ThreadCard } from "./thread-card";
-import { Button, Card, Divider, StatusBadge, fontSize, radius, space, toneColor, type Theme } from "./ui";
+import { Button, Card, StatusBadge, fontSize, radius, space, toneColor, type Theme } from "./ui";
 
 interface ExecutionViewProps {
   snapshot: SuperagentSnapshot;
@@ -15,8 +14,8 @@ interface ExecutionViewProps {
   hostId: string;
   navigation: PluginScreenProps["navigation"];
   compact: boolean;
-  /** 右侧面板默认按当前 Worker 的工作区定位线程。主界面不设范围。 */
   workspaceId?: string;
+  onDetails(input?: { threadId?: string; ticketId?: string }): void;
 }
 
 function observationStatus(observation?: AgentObservation): StatusLabel {
@@ -25,137 +24,107 @@ function observationStatus(observation?: AgentObservation): StatusLabel {
   return agentStatus(observation.agent);
 }
 
-export function ExecutionView({ snapshot, theme, hostId, navigation, compact, workspaceId }: ExecutionViewProps) {
+/** 一个 Router 连接当前 Worker,终态记录和消息通过详情进入历史页。 */
+export function ExecutionView({ snapshot, theme, hostId, navigation, compact, workspaceId, onDetails }: ExecutionViewProps) {
   const [showAllThreads, setShowAllThreads] = useState(false);
   const [width, setWidth] = useState(0);
-  const narrow = compact || width < 640;
-  const [showFinished, setShowFinished] = useState(false);
-  const [selected, setSelected] = useState<{ threadId: string; ticketId?: string } | null>(null);
+  const [workerAreaWidth, setWorkerAreaWidth] = useState(0);
+  const narrow = compact || width < 720;
+  const columns = narrow ? 1 : Math.max(1, Math.min(3, Math.floor((workerAreaWidth + space.md) / (220 + space.md))));
+  const workerWidth = columns === 1 ? "100%" : Math.floor((workerAreaWidth - (columns - 1) * space.md) / columns);
   const related = workspaceId ? workspaceThreadIds(snapshot, workspaceId) : null;
   const threads = snapshot.threads.filter((thread) => !related || showAllThreads || related.has(thread.id));
   const threadIds = new Set(threads.map((thread) => thread.id));
   const tickets = snapshot.tickets.filter((ticket) => threadIds.has(ticket.threadId));
-  const visibleTickets = tickets.filter((ticket) => showFinished || !isFinishedTicket(ticket));
-  const ids = [snapshot.routerAgentId, ...visibleTickets.map((ticket) => ticket.workerAgentId)].filter((id): id is string => Boolean(id));
+  const workers = currentTickets(tickets);
+  const ids = [snapshot.routerAgentId, ...workers.map((ticket) => ticket.workerAgentId)].filter((id): id is string => Boolean(id));
   const agents = useExecutionAgents(hostId, ids);
-  const routerAgent = snapshot.routerAgentId ? agents[snapshot.routerAgentId] : undefined;
-  const routerState: StatusLabel = snapshot.engine.evalInFlight
-    ? { label: "正在评估", tone: "warning" }
-    : { label: snapshot.routerAgentId ? "待命" : "首次评估时启动", tone: "muted" };
-  const selectedThread = snapshot.threads.find((thread) => thread.id === selected?.threadId);
-  const finishedCount = tickets.filter(isFinishedTicket).length;
-  const orderedThreads = [...threads].sort((a, b) => {
-    const rank = (id: string) => {
-      if (snapshot.engine.currentEvalThreadId === id) return -1;
-      return Math.min(5, ...visibleTickets.filter((ticket) => ticket.threadId === id)
-        .map((ticket) => ticketPriority(ticket, ticket.workerAgentId ? agents[ticket.workerAgentId]?.agent : null)));
-    };
-    return rank(a.id) - rank(b.id) || b.updatedAt.localeCompare(a.updatedAt);
-  });
-
+  const ordered = [...workers].sort((a, b) => ticketPriority(a, a.workerAgentId ? agents[a.workerAgentId]?.agent : null)
+    - ticketPriority(b, b.workerAgentId ? agents[b.workerAgentId]?.agent : null)
+    || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  const directIds = new Set(threads.map((thread) => directTicket(tickets.filter((ticket) => ticket.threadId === thread.id))?.id));
+  const evaluating = snapshot.threads.find((thread) => thread.id === snapshot.engine.currentEvalThreadId);
+  const pending = threads.filter((thread) => thread.pendingTriggers > 0);
+  const running = workers.filter((ticket) => ticket.status === "running" || ticket.status === "launching").length;
+  const waiting = workers.filter((ticket) => ticket.status === "waiting").length;
+  const failed = tickets.filter((ticket) => ticket.status === "failed").length;
+  const routerStatus = snapshot.routerAgentId ? observationStatus(agents[snapshot.routerAgentId]) : null;
+  const routerState: StatusLabel = snapshot.engine.evalInFlight ? { label: "评估中", tone: "warning" }
+    : { label: snapshot.routerAgentId ? "待命" : "等待新任务", tone: "muted" };
   return (
     <View onLayout={(event) => setWidth(event.nativeEvent.layout.width)} style={{ gap: space.md }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: space.sm }}>
         {workspaceId ? <Button theme={theme} size="xs" variant="outline"
-          label={showAllThreads ? "范围：全部线程" : "范围：当前工作区"}
-          onPress={() => setShowAllThreads((value) => !value)} /> : null}
-        {finishedCount > 0 ? <Button theme={theme} size="xs" variant="ghost"
-          label={showFinished ? "收起已完成／取消" : `显示已完成／取消 · ${finishedCount}`}
-          onPress={() => setShowFinished((value) => !value)} /> : null}
+          label={showAllThreads ? "全部线程" : "当前工作区"} onPress={() => setShowAllThreads((value) => !value)} /> : null}
         <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
-          {threads.length} 个线程 · {visibleTickets.length} 个可见任务
+          {running} 执行中 · {waiting} 待命 · {pending.reduce((sum, thread) => sum + thread.pendingTriggers, 0)} 待评估
         </Text>
+        {failed ? <Button theme={theme} variant="ghost" size="xs" icon="CircleAlert" label={`${failed} 个失败任务`} danger onPress={() => onDetails()} /> : null}
+        {workspaceId ? <Button theme={theme} variant="ghost" size="xs" icon="History" label="历史消息" onPress={() => onDetails()} /> : null}
       </View>
-
-      <Card theme={theme} style={{ padding: space.md, gap: space.sm }}>
-        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "center" }}>
-          <Icon name="Route" size={18} color={theme.colors.foregroundMuted} />
-          <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base, fontWeight: "600" }}>Router</Text>
-          <StatusBadge theme={theme} {...routerState} />
-          {snapshot.routerAgentId ? <StatusBadge theme={theme} {...observationStatus(routerAgent)} /> : null}
-          {snapshot.routerAgentId && navigation ? <Button theme={theme} label="打开会话" icon="ArrowUpRight" size="xs" variant="ghost"
-            onPress={() => navigation.openAgent({ agentId: snapshot.routerAgentId! })} /> : null}
-        </View>
-        <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
-          {snapshot.routerProvider || "自动选择模型"}
-          {snapshot.engine.currentEvalThreadId ? ` · 正在评估：${snapshot.threads.find((thread) => thread.id === snapshot.engine.currentEvalThreadId)?.title ?? "线程"}` : " · 按线程派发任务，汇报回流后继续评估"}
-        </Text>
-      </Card>
-
-      {orderedThreads.length === 0 ? (
-        <Card theme={theme} style={{ padding: space.lg, gap: space.sm }}>
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.base }}>
-            {workspaceId && !showAllThreads ? "当前工作区没有关联的 Ticket" : "派发任务后，在这里查看 Router 与 Worker 的执行关系"}
-          </Text>
-          {workspaceId && !showAllThreads ? <Button theme={theme} label="查看全部线程" size="xs" variant="outline" onPress={() => setShowAllThreads(true)} /> : null}
-        </Card>
-      ) : orderedThreads.map((thread) => {
-        const allTickets = tickets.filter((ticket) => ticket.threadId === thread.id);
-        const workers = visibleTickets.filter((ticket) => ticket.threadId === thread.id).sort((a, b) =>
-          ticketPriority(a, a.workerAgentId ? agents[a.workerAgentId]?.agent : null)
-          - ticketPriority(b, b.workerAgentId ? agents[b.workerAgentId]?.agent : null)
-          || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
-        const direct = directTicket(allTickets);
-        const evaluating = snapshot.engine.currentEvalThreadId === thread.id;
-        const status = evaluating ? { label: "Router 评估中", tone: "warning" as const }
-          : threadStatus(thread, allTickets, snapshot.decisions.filter((decision) => decision.threadId === thread.id));
-        const route = direct ? `追加消息 → ${direct.title}（直通）`
-          : "追加消息 → Router 评估";
-        return (
-          <Card key={thread.id} theme={theme} style={{ borderColor: evaluating ? theme.colors.statusWarning : theme.colors.border }}>
-            <View style={{ padding: space.md, gap: space.sm }}>
-              <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: space.sm }}>
-                <Text numberOfLines={2} style={{ flex: 1, minWidth: 100, color: theme.colors.foreground, fontSize: fontSize.base, fontWeight: "500" }}>{thread.title}</Text>
-                <StatusBadge theme={theme} {...status} />
-                <Button theme={theme} label="线程详情" variant="ghost" size="xs" onPress={() => setSelected({ threadId: thread.id })} />
-              </View>
-              <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{route}</Text>
-              {thread.pendingTriggers > 0 ? <Text style={{ color: theme.colors.statusWarning, fontSize: fontSize.sm }}>
-                {thread.pendingTriggers} 条消息{evaluating ? "正在评估" : "等待 Router 评估"}
-              </Text> : null}
+      <Card theme={theme} style={{ padding: space.lg }}>
+        <View style={{ flexDirection: narrow ? "column" : "row", gap: space.md }}>
+          <Card theme={theme} style={{ width: narrow ? undefined : 180, alignSelf: narrow ? "stretch" : "center",
+            backgroundColor: theme.colors.surface0, padding: space.md, gap: space.sm,
+            borderColor: snapshot.engine.evalInFlight ? theme.colors.statusWarning : theme.colors.border }}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+              <Icon name="Route" size={18} color={theme.colors.foregroundMuted} />
+              <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base, fontWeight: "600" }}>Router</Text>
             </View>
-            <Divider theme={theme} />
-            <View style={{ padding: space.md, flexDirection: narrow ? "column" : "row", gap: space.md }}>
-              <View style={{ width: narrow ? undefined : 132, gap: space.sm }}>
-                <View style={{ borderWidth: 1, borderRadius: radius.md, borderColor: evaluating ? theme.colors.statusWarning : theme.colors.border,
-                  padding: space.sm, flexDirection: "row", alignItems: "center", gap: space.sm, alignSelf: "flex-start" }}>
-                  <Icon name="Route" size={16} color={evaluating ? theme.colors.statusWarning : theme.colors.foregroundMuted} />
-                  <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base }}>Router</Text>
-                  <Icon name={narrow ? "ArrowDown" : "ArrowRight"} size={14} color={theme.colors.foregroundMuted} />
-                </View>
-                <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>按 Ticket 派发 Worker</Text>
-                <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>Worker 汇报 ↩ Router</Text>
-              </View>
-              <View style={{ flex: 1, minWidth: 0, borderLeftWidth: 1, borderLeftColor: theme.colors.border, paddingLeft: space.md, gap: space.md }}>
-                {workers.length === 0 ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
-                  {allTickets.length ? "已完成／取消的任务已折叠" : "尚未派发 Worker，Router 也可直接答复"}
-                </Text> : workers.map((ticket) => (
-                  <View key={ticket.id}>
-                    <View style={{ position: "absolute", left: -space.md, top: 28, width: space.md, height: 1, backgroundColor: theme.colors.border }} />
-                    <WorkerCard ticket={ticket} observation={ticket.workerAgentId ? agents[ticket.workerAgentId] : undefined}
-                    direct={ticket.id === direct?.id} theme={theme} navigation={navigation}
-                    onDetails={() => setSelected({ threadId: thread.id, ticketId: ticket.id })} />
-                  </View>
-                ))}
-              </View>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs }}>
+              <StatusBadge theme={theme} {...routerState} />
+              {routerStatus && routerStatus.tone !== "muted" && routerStatus.label !== "会话执行中"
+                ? <StatusBadge theme={theme} {...routerStatus} /> : null}
             </View>
+            <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{snapshot.routerProvider || "自动选择模型"}</Text>
+            {evaluating ? <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>正在评估 · {evaluating.title}</Text> : null}
+            {snapshot.routerAgentId && navigation ? <Button theme={theme} label="打开会话" icon="ArrowUpRight" size="xs" variant="ghost"
+              onPress={() => navigation.openAgent({ agentId: snapshot.routerAgentId! })} /> : null}
           </Card>
-        );
-      })}
 
-      <Modal title="任务详情与活动" open={Boolean(selectedThread)} onOpenChange={(open) => { if (!open) setSelected(null); }}>
-        <Modal.Content>
-          {selectedThread ? <ThreadCard key={`${selectedThread.id}:${selected?.ticketId ?? "thread"}`}
-            thread={selectedThread} tickets={snapshot.tickets} triggers={snapshot.triggers} decisions={snapshot.decisions}
-            theme={theme} navigation={navigation} defaultExpanded focusTicketId={selected?.ticketId} /> : null}
-        </Modal.Content>
-      </Modal>
+          <View style={{ width: narrow ? undefined : 24, height: narrow ? 24 : undefined, alignSelf: "stretch", alignItems: "center", justifyContent: "center" }}>
+            <View style={narrow
+              ? { position: "absolute", top: 0, bottom: 0, width: 1, backgroundColor: theme.colors.border }
+              : { position: "absolute", left: 0, right: 0, height: 1, backgroundColor: theme.colors.border }} />
+            <View style={{ backgroundColor: theme.colors.surface1 }}>
+              <Icon name={narrow ? "ArrowDown" : "ArrowRight"} size={16} color={theme.colors.foregroundMuted} />
+            </View>
+          </View>
+
+          <View onLayout={(event) => setWorkerAreaWidth(event.nativeEvent.layout.width)}
+            style={{ flex: 1, minWidth: 0, flexDirection: "row", flexWrap: "wrap", gap: space.md, alignContent: "center" }}>
+            {ordered.length === 0 ? <View style={{ flex: 1, minWidth: 0, justifyContent: "center", gap: space.sm, padding: space.md }}>
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.base }}>
+                {workspaceId && !showAllThreads ? "当前工作区没有活跃 Worker" : pending.length ? "Router 正在处理待评估任务" : "暂无活跃 Worker"}
+              </Text>
+              <Button theme={theme} variant="ghost" size="xs"
+                label={workspaceId && !showAllThreads ? "查看全部线程" : "查看历史消息"}
+                onPress={() => workspaceId && !showAllThreads ? setShowAllThreads(true) : onDetails()} />
+            </View> : ordered.map((ticket) => <View key={ticket.id} style={{ width: workerWidth }}>
+              <WorkerNode ticket={ticket} threadTitle={threads.find((thread) => thread.id === ticket.threadId)?.title ?? ""}
+                observation={ticket.workerAgentId ? agents[ticket.workerAgentId] : undefined}
+                direct={directIds.has(ticket.id)} theme={theme} navigation={navigation}
+                onDetails={() => onDetails({ threadId: ticket.threadId, ticketId: ticket.id })} />
+            </View>)}
+          </View>
+        </View>
+        {pending.length > 0 ? <View style={{ marginTop: space.lg, paddingTop: space.md, borderTopWidth: 1, borderTopColor: theme.colors.border, gap: space.xs }}>
+          {pending.map((thread) => <View key={thread.id} style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+            <Icon name="MessageCircle" size={14} color={theme.colors.foregroundMuted} />
+            <Text numberOfLines={1} style={{ flex: 1, color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
+              {thread.id === snapshot.engine.currentEvalThreadId ? "评估中" : "等待评估"} · {thread.title} · {thread.pendingTriggers} 条
+            </Text>
+            <Button theme={theme} variant="ghost" size="xs" label="详情" accessibilityLabel={`${thread.title}消息详情`} onPress={() => onDetails({ threadId: thread.id })} />
+          </View>)}
+        </View> : null}
+      </Card>
     </View>
   );
 }
 
-function WorkerCard({ ticket, observation, direct, theme, navigation, onDetails }: {
+function WorkerNode({ ticket, threadTitle, observation, direct, theme, navigation, onDetails }: {
   ticket: Ticket;
+  threadTitle: string;
   observation?: AgentObservation;
   direct: boolean;
   theme: Theme;
@@ -163,39 +132,35 @@ function WorkerCard({ ticket, observation, direct, theme, navigation, onDetails 
   onDetails(): void;
 }) {
   const session = observationStatus(observation);
-  const priority = ticketPriority(ticket, observation?.error ? null : observation?.agent);
+  const attention = ticketPriority(ticket, observation?.error ? null : observation?.agent) === 0;
   const active = ticket.status === "running" || ticket.status === "launching";
-  const meta = [ticket.profile ? `档位 ${ticket.profile}` : "默认 Worker", ticket.provider,
-    observation?.agent?.model && !ticket.provider?.endsWith(`/${observation.agent.model}`) ? observation.agent.model : null,
-    active && ticket.startedAt ? `本次启动至今 ${elapsedTime(ticket.startedAt)}` : `更新于 ${relativeTime(ticket.updatedAt)}`,
-    ticket.attempts > 1 ? `第 ${ticket.attempts} 次尝试` : null].filter(Boolean).join(" · ");
   const canOpen = Boolean(ticket.workerAgentId && navigation);
+  // 普通的 running/idle 不重复占一枚徽标,权限与异常仍独立可见。
+  const sessionNotice = ticket.workerAgentId && !["会话执行中", "会话空闲", "会话初始化"].includes(session.label);
   return (
-    <View style={{ borderWidth: 1, borderRadius: radius.md, borderColor: priority === 0
-      ? toneColor(ticket.status === "failed" ? "danger" : session.tone, theme) : theme.colors.border, overflow: "hidden" }}>
+    <View style={{ borderWidth: 1, borderRadius: radius.md, borderColor: attention ? toneColor(session.tone, theme) : theme.colors.border, overflow: "hidden", backgroundColor: theme.colors.surface0 }}>
       <Pressable disabled={!canOpen} accessibilityRole={canOpen ? "button" : undefined}
         accessibilityLabel={`${ticket.title}，${ticketStatusLabel(ticket.status)}${canOpen ? "，打开 Worker 会话" : ""}`}
         onPress={() => { if (ticket.workerAgentId) navigation?.openAgent({ agentId: ticket.workerAgentId }); }}
-        style={({ pressed }) => ({ padding: space.md, gap: space.sm, backgroundColor: pressed ? theme.colors.surface2 : theme.colors.surface0 })}>
+        style={({ pressed }) => ({ padding: space.md, gap: space.xs + 2, backgroundColor: pressed ? theme.colors.surface2 : "transparent" })}>
+        <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{threadTitle}</Text>
         <View style={{ flexDirection: "row", gap: space.sm, alignItems: "center" }}>
-          <Icon name="Bot" size={16} color={theme.colors.foregroundMuted} />
-          <Text numberOfLines={2} style={{ flex: 1, color: theme.colors.foreground, fontSize: fontSize.base, fontWeight: "500" }}>{ticket.title}</Text>
-          {canOpen ? <Icon name="ArrowUpRight" size={14} color={theme.colors.foregroundMuted} /> : null}
+          <Icon name="Bot" size={15} color={theme.colors.foregroundMuted} />
+          <Text numberOfLines={2} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: fontSize.base, fontWeight: "500" }}>{ticket.title}</Text>
+          {canOpen ? <Icon name="ArrowUpRight" size={12} color={theme.colors.foregroundMuted} /> : null}
         </View>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs }}>
-          <StatusBadge theme={theme} label={`Ticket · ${ticketStatusLabel(ticket.status)}`} tone={ticketStatusTone(ticket.status)} />
-          {ticket.workerAgentId ? <StatusBadge theme={theme} {...session} /> : null}
-          {direct ? <StatusBadge theme={theme} label="消息直通" tone="default" /> : null}
+          <StatusBadge theme={theme} label={ticketStatusLabel(ticket.status)} tone={ticketStatusTone(ticket.status)} />
+          {sessionNotice ? <StatusBadge theme={theme} {...session} /> : null}
+          {direct ? <StatusBadge theme={theme} label="直通" tone="default" /> : null}
         </View>
-        <Text numberOfLines={3} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{meta}</Text>
-        {ticket.branchName ? <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>分支 · {ticket.branchName}</Text> : null}
-        {ticket.lastError || observation?.agent?.lastError ? <Text numberOfLines={2} style={{ color: theme.colors.statusDanger, fontSize: fontSize.sm }}>
-          {ticket.lastError || observation?.agent?.lastError}
-        </Text> : null}
-        {ticket.report ? <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>最近汇报 · {markdownPreview(ticket.report)}</Text> : null}
+        <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{ticket.profile || "默认 Worker"} · {ticket.provider || "启动时选择模型"}</Text>
       </Pressable>
-      <View style={{ paddingHorizontal: space.sm, paddingVertical: space.xs, alignItems: "flex-start" }}>
-        <Button theme={theme} label="详情与操作" size="xs" variant="ghost" onPress={onDetails} />
+      <View style={{ paddingHorizontal: space.sm, paddingBottom: space.xs, flexDirection: "row", alignItems: "center", gap: space.xs }}>
+        <Text numberOfLines={1} style={{ flex: 1, paddingLeft: space.xs, color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
+          {active && ticket.startedAt ? `启动至今 ${elapsedTime(ticket.startedAt)}` : ""}
+        </Text>
+        <Button theme={theme} label="详情" accessibilityLabel={`${ticket.title}详情`} size="xs" variant="ghost" onPress={onDetails} />
       </View>
     </View>
   );

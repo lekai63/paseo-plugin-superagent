@@ -5,7 +5,9 @@ import { ExecutionView } from "./execution-view";
 import { useSuperagentState } from "./query";
 import { Button, Notice, space } from "./ui";
 
-export function ExecutionPanel(props: PluginWorkspacePanelProps) {
+export function ExecutionPanel(props: PluginWorkspacePanelProps & {
+  openHistory(input?: { threadId?: string; ticketId?: string }): void;
+}) {
   const query = useSuperagentState(props.host.id);
   if (query.isPending) return <Loading />;
   return (
@@ -16,7 +18,7 @@ export function ExecutionPanel(props: PluginWorkspacePanelProps) {
       </Notice> : null}
       <View>
         {query.data ? <ExecutionView snapshot={query.data} theme={props.theme} hostId={props.host.id} navigation={props.navigation}
-          compact={props.layout.compact} workspaceId={props.workspaceId} /> : null}
+          compact={props.layout.compact} workspaceId={props.workspaceId} onDetails={props.openHistory} /> : null}
       </View>
     </ScrollView>
   );

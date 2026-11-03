@@ -38,8 +38,9 @@ export function agentStatus(agent: ExecutionAgent | null | undefined): StatusLab
   return { label: "会话空闲", tone: "muted" };
 }
 
-export function isFinishedTicket(ticket: Ticket): boolean {
-  return ticket.status === "completed" || ticket.status === "canceled";
+/** 调用图只保留当前工作;终态任务及其消息由历史页面承载。 */
+export function currentTickets(tickets: readonly Ticket[]): Ticket[] {
+  return tickets.filter((ticket) => ["pending", "launching", "running", "waiting"].includes(ticket.status));
 }
 
 /** 权限、错误最先展示,随后是启动/执行、排队、待命、完成;同类保持稳定顺序。 */

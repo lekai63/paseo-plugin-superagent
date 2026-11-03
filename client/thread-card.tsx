@@ -192,6 +192,7 @@ function ThreadDetail({
                 <View key={ticket.id} style={index > 0 ? { borderTopWidth: 1, borderTopColor: theme.colors.border } : undefined}>
                   <TicketRow
                     ticket={ticket}
+                    readOnly={closed}
                     theme={theme}
                     navigation={navigation}
                     onCancel={() => runAction("已取消 Ticket", () => cancelTicket({ ticketId: ticket.id }))}
@@ -251,6 +252,7 @@ function ThreadDetail({
 
 function TicketRow({
   ticket,
+  readOnly,
   theme,
   navigation,
   onCancel,
@@ -258,6 +260,7 @@ function TicketRow({
   onUnsubscribe,
 }: {
   ticket: Ticket;
+  readOnly: boolean;
   theme: Theme;
   navigation?: Navigation;
   onCancel(): void;
@@ -320,7 +323,7 @@ function TicketRow({
             onPress={() => navigation.openAgent({ agentId: ticket.workerAgentId! })}
           />
         ) : null}
-        {direct ? (
+        {direct && !readOnly ? (
           <Button
             theme={theme}
             variant="ghost"
@@ -329,8 +332,8 @@ function TicketRow({
             onPress={onUnsubscribe}
           />
         ) : null}
-        {terminal ? <Button theme={theme} variant="ghost" size="xs" icon="RotateCcw" label="重试" onPress={onRetry} /> : null}
-        {terminal ? null : (
+        {terminal && !readOnly ? <Button theme={theme} variant="ghost" size="xs" icon="RotateCcw" label="重试" onPress={onRetry} /> : null}
+        {terminal || readOnly ? null : (
           <ConfirmButton theme={theme} size="xs" label="取消" confirmLabel="确认取消 Ticket" onConfirm={onCancel} />
         )}
       </View>

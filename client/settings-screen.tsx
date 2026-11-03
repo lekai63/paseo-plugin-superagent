@@ -106,7 +106,7 @@ function countProfileErrors(profileErrors: ProfileErrors): number {
   return profileErrors.reduce((total, row) => total + Object.keys(row).length, 0);
 }
 
-export function SuperagentSettingsScreen({ theme }: PluginSurfaceProps) {
+export function SuperagentSettingsScreen({ theme, host }: PluginSurfaceProps) {
   const settings = useSettings(superagentSettings);
 
   if (settings.status === "loading") {
@@ -134,10 +134,10 @@ export function SuperagentSettingsScreen({ theme }: PluginSurfaceProps) {
       </SettingsSection>
     );
   }
-  return <SettingsForm settings={settings} />;
+  return <SettingsForm settings={settings} hostId={host.id} />;
 }
 
-function SettingsForm({ settings }: { settings: Ready }) {
+function SettingsForm({ settings, hostId }: { settings: Ready; hostId: string }) {
   // 草稿与它基于的 revision 一起保存:别的客户端先保存时,这里的保存会冲突而不是静默覆盖。
   const [base, setBase] = useState({ values: settings.values, revision: settings.revision });
   const [form, setForm] = useState<FormValues>(() => toForm(settings.values));
@@ -199,7 +199,7 @@ function SettingsForm({ settings }: { settings: Ready }) {
   }, [settings.revision, settings.values]);
 
   // 主界面已拉取过状态时,把服务端检出的工作目录问题标在对应输入行上(只读缓存,不发请求)。
-  const cached = useQueryClient().getQueryData<SuperagentSnapshot>(STATE_QUERY_KEY);
+  const cached = useQueryClient().getQueryData<SuperagentSnapshot>([...STATE_QUERY_KEY, hostId, {}]);
   const serverIssue =
     cached?.workingDirIssue && cached.workingDir === settings.values.workingDir && form.workingDir === settings.values.workingDir
       ? `Worker 无法启动:${cached.workingDirIssue}`

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { agentStatus, directTicket, elapsedTime, isFinishedTicket, ticketPriority, workspaceThreadIds } from "../shared/execution.ts";
+import { agentStatus, currentTickets, directTicket, elapsedTime, ticketPriority, workspaceThreadIds } from "../shared/execution.ts";
 
 const ticket = (id, extra = {}) => ({ id, threadId: "thread", status: "running", subscribed: true, workerAgentId: `worker-${id}`, ...extra });
 
@@ -25,9 +25,8 @@ test("session permission and provider errors remain distinct from Ticket lifecyc
   assert.equal(agentStatus({ ...agent, pendingPermissions: [], requiresAttention: true, attentionReason: "permission" }).label, "等待权限");
   assert.equal(agentStatus({ ...agent, archivedAt: "2026-01-01" }).label, "会话已关闭");
   assert.equal(agentStatus({ id: "worker", status: "idle" }).label, "会话空闲");
-  assert.equal(isFinishedTicket(ticket("waiting", { status: "waiting" })), false);
-  assert.equal(isFinishedTicket(ticket("failed", { status: "failed" })), false);
-  assert.equal(isFinishedTicket(ticket("completed", { status: "completed" })), true);
+  const statuses = ["pending", "launching", "running", "waiting", "completed", "failed", "canceled"];
+  assert.deepEqual(currentTickets(statuses.map((status) => ticket(status, { status }))).map((item) => item.status), statuses.slice(0, 4));
   assert.equal(agentStatus({ id: "worker", status: "error" }).tone, "danger");
   assert.equal(agentStatus({ id: "worker", status: "idle", providerUnavailable: true }).tone, "danger");
   assert.equal(agentStatus(null).label, "会话不存在");

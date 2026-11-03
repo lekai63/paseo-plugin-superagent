@@ -185,6 +185,34 @@ test("the snapshot identifies the evaluating thread and clears it when evaluatio
   assert.equal(f.engine.snapshot().engine.currentEvalThreadId, null);
 });
 
+test("history includes closed threads without adding them to the live snapshot", (t) => {
+  const f = fixture(t);
+  f.state.threads.push({ ...f.state.threads[0], id: "closed", key: "manual:closed", state: "closed" });
+  f.state.tickets.push({ ...f.ticket, id: "old-ticket", threadId: "closed", status: "completed" });
+  assert.deepEqual(f.engine.snapshot().threads.map((thread) => thread.id), ["thread"]);
+  const history = f.engine.snapshot({ includeClosed: true });
+  assert.equal(history.threads.length, 2);
+  assert.equal(history.tickets.find((ticket) => ticket.id === "old-ticket").status, "completed");
+  assert.equal(f.state.threads[1].state, "closed");
+});
+
+test("thread history keeps its message window even when other threads have newer activity", (t) => {
+  const f = fixture(t);
+  pendingTrigger(f.state);
+  f.state.decisions.push({ id: "decision", threadId: "thread", triggerIds: ["trigger"], outcome: "reply", createdAt: oldTime });
+  f.state.threads.push({ ...f.state.threads[0], id: "busy", key: "manual:busy" });
+  for (let index = 0; index < 125; index++) {
+    f.state.triggers.push({ ...f.state.triggers[0], id: `other-${index}`, threadId: "busy", receivedAt: "2026-01-01T00:00:00Z" });
+    f.state.decisions.push({ ...f.state.decisions[0], id: `other-${index}`, threadId: "busy", createdAt: "2026-01-01T00:00:00Z" });
+  }
+  assert.ok(!f.engine.snapshot().triggers.some((trigger) => trigger.id === "trigger"));
+  const focused = f.engine.snapshot({ includeClosed: true, threadId: "thread" });
+  assert.deepEqual(focused.threads.map((thread) => thread.id), ["thread"]);
+  assert.deepEqual(focused.triggers.map((trigger) => trigger.id), ["trigger"]);
+  assert.deepEqual(focused.decisions.map((decision) => decision.id), ["decision"]);
+  assert.equal(f.engine.snapshot({ includeClosed: true, threadId: "missing" }).tickets.length, 0);
+});
+
 test("a failed direct send returns false and the Router evaluates the original message", async (t) => {
   const f = fixture(t, "waiting");
   f.controls.send = async () => { throw new Error("offline"); };

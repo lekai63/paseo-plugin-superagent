@@ -1230,11 +1230,12 @@ export class SuperagentEngine {
 
   // ------------------------------------------------------------- snapshot
 
-  snapshot(): SuperagentSnapshot {
+  snapshot(options: { includeClosed?: boolean; threadId?: string } = {}): SuperagentSnapshot {
     const state = this.store.get();
     const settings = this.settingsValues;
     const threads = state.threads
-      .filter((t) => t.state === "active" || state.tickets.some((k) => k.threadId === t.id && k.status === "running"))
+      .filter((t) => (!options.threadId || t.id === options.threadId)
+        && (options.includeClosed || t.state === "active" || state.tickets.some((k) => k.threadId === t.id && k.status === "running")))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .map((thread) => {
         const tickets = state.tickets.filter((t) => t.threadId === thread.id);

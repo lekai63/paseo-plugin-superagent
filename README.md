@@ -108,10 +108,10 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 ## 使用
 
-1. **派发**:主界面「新任务」卡片,或任意 agent 会话里 `/superagent 修复登录页的 CORS 问题并补测试`。
-2. **观察**:顶部概览看线程/运行中/待评估/失败数;「执行视图」按线程展示 Router → Ticket → Worker 关系、当前评估线程、追加消息的直通目标与最近汇报。Ticket 状态和 Worker 会话状态分开展示,权限等待/会话异常优先排列,完成与取消的任务默认折叠。点击 Worker 卡片打开会话,「详情与操作」查看任务、活动并取消/重试。原线程详情与时间线继续保留。工作区标签页或右侧面板可添加「Superagent 执行视图」(命令中心同名入口),默认定位当前 Worker 工作区所属线程,可切换查看全部线程;窄面板自动采用纵向布局。
-3. **追加**:线程卡片底部的回复框追加消息——提示文字会说明去向:恰好一个活跃订阅且已有会话的 Worker 时直通它,否则交给 Router。
-4. **干预**:取消/重试 Ticket、取消直通(运行中)/标记完成(待命)、重新评估、关闭线程(取消活跃 Worker 并归档其工作区)。取消与关闭需要再点一次确认。
+1. **派发**:「新任务」始终位于主界面最前面;也可在任意 agent 会话里 `/superagent 修复登录页的 CORS 问题并补测试`。
+2. **观察**:主界面主要展示一个 Router 连接当前 Worker 的调用图。Worker 节点仅保留任务名、所属线程、模型、运行状态与直通标识;权限等待/会话异常优先排列,已完成、失败与取消的任务进入历史页面。点击 Worker 节点打开会话,「详情」进入对应线程。工作区标签页或右侧面板仍可添加「Superagent 执行视图」,默认定位当前 Worker 工作区所属线程,可切换查看全部线程;窄面板自动采用纵向布局。
+3. **历史与状态**:顶部「历史消息」打开独立页面,集中查看线程消息、Router 裁决、完整汇报和已关闭线程;选定线程后单独读取其最近记录。「运行状态」独立展示概览数字、组件配置与看门狗巡检。两页均提供返回主界面的入口,命令中心也有同名命令。
+4. **追加与干预**:在线程详情底部追加消息——恰好一个活跃订阅且已有会话的 Worker 时直通它,否则交给 Router。详情页保留取消/重试 Ticket、取消直通(运行中)/标记完成(待命)、重新评估、关闭线程等操作。取消与关闭需要再点一次确认。
 
 ## 设计取舍与限制
 
@@ -133,6 +133,6 @@ npm install
 npm run typecheck
 ```
 
-目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用;execution 提供直通判定与执行视图状态推导)、`server/`(store/router/workers/engine)、`client/`(主界面 screen、执行视图 execution-view 与工作区面板 execution-panel、设置页 settings-screen、新任务 dispatch-card、线程 thread-card,以及 ui.tsx 里的按钮/徽标/提示条等小型原语)。引擎细节见 `server/engine.ts` 头注。
+目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用;execution 提供直通判定与调用图状态推导)、`server/`(store/router/workers/engine)、`client/`(主界面 screen、历史页 history-screen、运行状态页 status-screen、调用图 execution-view 与工作区面板 execution-panel、设置页 settings-screen、新任务 dispatch-card、线程 thread-card,以及 ui.tsx 里的按钮/徽标/提示条等小型原语)。引擎细节见 `server/engine.ts` 头注。
 
 `npm test` 使用 Node.js 24+ 的内置测试运行器与现有 TypeScript 依赖,验证 Worker 续跑、投递失败回退、取消竞态、重启恢复与飞书连接清理;不连接真实 provider 或 IM 服务。

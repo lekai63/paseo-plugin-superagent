@@ -34,7 +34,11 @@ export const superagentDispatchRpc = defineRpc({
 
 export const superagentStateRpc = defineRpc({
   name: "superagent.state",
-  input: z.object({}),
+  input: z.object({
+    includeClosed: z.boolean().optional(),
+    /** 详情页只读取当前线程的消息,避免被其他线程占用最近记录窗口。 */
+    threadId: z.string().optional(),
+  }),
   output: SuperagentSnapshotSchema,
 });
 

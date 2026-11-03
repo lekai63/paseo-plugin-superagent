@@ -2,17 +2,18 @@ import { useEffect } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePaseo, useRpc } from "@getpaseo/plugin/client";
 import type { PaseoAgent } from "@getpaseo/client";
+import type { RpcInput } from "@getpaseo/plugin";
 import { superagentStateRpc } from "../shared/rpc";
 import type { ExecutionAgent } from "../shared/execution";
 
 /** 操作后按此前缀失效;具体快照再按宿主隔离。 */
 export const STATE_QUERY_KEY = ["superagent", "state"] as const;
 
-export function useSuperagentState(hostId: string) {
+export function useSuperagentState(hostId: string, input: RpcInput<typeof superagentStateRpc> = {}) {
   const fetchState = useRpc(superagentStateRpc);
   return useQuery({
-    queryKey: [...STATE_QUERY_KEY, hostId],
-    queryFn: () => fetchState({}),
+    queryKey: [...STATE_QUERY_KEY, hostId, input],
+    queryFn: () => fetchState(input),
     refetchInterval: 3000,
   });
 }

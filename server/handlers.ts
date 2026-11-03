@@ -26,9 +26,9 @@ export function createDispatchHandler(engine: SuperagentEngine) {
 
 export function createStateHandler(engine: SuperagentEngine) {
   return async (
-    _input: RpcInput<typeof superagentStateRpc>,
+    input: RpcInput<typeof superagentStateRpc>,
     _context: PluginHandlerContext,
-  ) => engine.snapshot();
+  ) => engine.snapshot(input);
 }
 
 export function createForceEvalHandler(engine: SuperagentEngine) {
