@@ -500,6 +500,7 @@ export class SuperagentEngine {
       thread,
       batch,
       state,
+      routerInstructions: this.settingsValues.routerInstructions,
       worker: {
         workingDir: this.settingsValues.workingDir,
         isolation: this.settingsValues.workerIsolation,

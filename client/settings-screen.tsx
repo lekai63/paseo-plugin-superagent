@@ -9,10 +9,12 @@ import {
   SettingsSection,
   SettingsSelect,
   SettingsSwitch,
+  TextInput,
 } from "@getpaseo/plugin/client/ui";
 import type { SuperagentSnapshot } from "../shared/model";
 import {
   MAX_WORKER_PROFILES,
+  MAX_ROUTER_INSTRUCTIONS_CHARS,
   NUMBER_LIMITS,
   parseAllowlist,
   superagentSettings,
@@ -22,12 +24,13 @@ import {
   type WorkerProfile,
 } from "../shared/settings";
 import { STATE_QUERY_KEY } from "./query";
+import { fontSize, radius, space } from "./ui";
 
 /**
  * Settings → Plugins → Superagent。宿主负责标题栏、返回、滚动与居中栏宽;
- * 这里只按主题分节:工作目录 → 模型 → Worker 档位 → 执行 → 委派 → IM 触发源 → 保存。
+ * 这里只按主题分节:工作目录 → 模型 → Router 规则 → Worker 档位 → 执行 → 委派 → IM 触发源 → 保存。
  *
- * 所有修改先进草稿,统一保存(保存会热重载 Router/IM 连接,不宜逐字触发)。
+ * 所有修改先进草稿,统一保存(规则用于下一次评估,IM 配置变更会重连)。
  * 数值字段在草稿里是字符串,便于边输入边校验。
  */
 
@@ -134,10 +137,10 @@ export function SuperagentSettingsScreen({ theme, host }: PluginSurfaceProps) {
       </SettingsSection>
     );
   }
-  return <SettingsForm settings={settings} hostId={host.id} />;
+  return <SettingsForm settings={settings} hostId={host.id} theme={theme} />;
 }
 
-function SettingsForm({ settings, hostId }: { settings: Ready; hostId: string }) {
+function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: string; theme: PluginSurfaceProps["theme"] }) {
   // 草稿与它基于的 revision 一起保存:别的客户端先保存时,这里的保存会冲突而不是静默覆盖。
   const [base, setBase] = useState({ values: settings.values, revision: settings.revision });
   const [form, setForm] = useState<FormValues>(() => toForm(settings.values));
@@ -215,7 +218,7 @@ function SettingsForm({ settings, hostId }: { settings: Ready; hostId: string })
     <View key={formKey}>
       <SettingsSection
         title="工作目录"
-        info="Router 在这个目录里运行,所有 Worker 也只在这里(或从它派生的 worktree)工作。"
+        info="Worker 的基础目录,同时用作 Router 会话的启动目录。Router 的自定义规则在下方直接填写。"
       >
         <SettingsCard>
           <TextField
@@ -276,6 +279,38 @@ function SettingsForm({ settings, hostId }: { settings: Ready; hostId: string })
               placeholder="通用任务、调研、中文文档与报告"
             />
           ) : null}
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection
+        title="Router 规则"
+        info="设置答复语言、任务分派偏好和汇报格式。仅影响 Router;保存后从下一次评估开始使用,无需重建会话。"
+      >
+        <SettingsCard>
+          <View style={{ padding: space.lg, gap: space.sm }}>
+            <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base }}>自定义规则</Text>
+            <TextInput
+              accessibilityLabel="Router 自定义规则"
+              multiline
+              textAlignVertical="top"
+              value={form.routerInstructions}
+              onChangeText={(value) => set("routerInstructions", value)}
+              editable={!disabled}
+              placeholder={"面向用户使用中文。\n独立任务分别派发给 Worker。\n汇报包含结论、产出路径、验证情况与未解决问题。"}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={{
+                minHeight: 180, maxHeight: 420, padding: space.md, borderWidth: 1,
+                borderColor: errors.routerInstructions ? theme.colors.statusDanger : theme.colors.border,
+                borderRadius: radius.md, backgroundColor: theme.colors.surface0,
+                color: theme.colors.foreground, fontSize: fontSize.base, lineHeight: 22,
+                opacity: disabled ? 0.5 : 1,
+              }}
+            />
+            <Text style={{ color: errors.routerInstructions ? theme.colors.statusDanger : theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
+              {errors.routerInstructions ? `${errors.routerInstructions},最多 ${MAX_ROUTER_INSTRUCTIONS_CHARS} 字符。` : "留空使用默认规则。内置的职责和输出约束始终保留。"}
+              {` ${form.routerInstructions.length}/${MAX_ROUTER_INSTRUCTIONS_CHARS}`}
+            </Text>
+          </View>
         </SettingsCard>
       </SettingsSection>
 

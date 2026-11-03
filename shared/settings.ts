@@ -23,6 +23,7 @@ function boundedInt(key: NumberSettingKey, fallback: number) {
  */
 export const DEFAULT_WORKER_PROFILE = "default";
 export const MAX_WORKER_PROFILES = 8;
+export const MAX_ROUTER_INSTRUCTIONS_CHARS = 12000;
 export const WORKER_PROFILE_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,23}$/;
 export const WORKER_PROFILE_NAME_HINT = "小写字母开头,只含小写字母、数字、- 和 _,最长 24 个字符";
 
@@ -65,10 +66,12 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 5,
+  version: 6,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
+    /** 每次评估直接注入,不依赖 provider 读取工作目录中的规则文件。 */
+    routerInstructions: z.string().trim().max(MAX_ROUTER_INSTRUCTIONS_CHARS).default(""),
     /** 默认 Worker:dispatch 未指定档位(或档位不存在)时使用。 */
     workerProvider: z.string().trim().max(120).default(""),
     /** 默认 Worker 的用途说明;配置了其他档位时写进 Router 提示词,留空用通用说明。 */
@@ -143,7 +146,8 @@ export const superagentSettings = defineSettings({
   }),
   /**
    * v1/v2 → v3:新字段由 schema 默认值补齐;v3 → v4:新增 agentToolProviders 同理;
-   * v4 → v5:新增 workerDescription/workerProfiles 同理(无档位 = 与旧版一致的单一 Worker)。
+   * v4 → v5:新增 workerDescription/workerProfiles 同理(无档位 = 与旧版一致的单一 Worker);
+   * v5 → v6:新增 routerInstructions,留空沿用内置编排规则。
    */
   migrate: (values) => values,
 });

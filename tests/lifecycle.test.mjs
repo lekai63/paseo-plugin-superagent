@@ -125,7 +125,7 @@ function fixture(t, status = "running", subscribed = true) {
     ...SETTINGS_DEFAULTS, workingDir: "/mock/repo", routerProvider: "codex/test", workerProvider: "codex/test",
   };
   const engine = new SuperagentEngine(store, {
-    subscribe: () => {}, read: async () => ({ status: "ready", values }),
+    subscribe: (listener) => { controls.settingsChanged = listener; }, read: async () => ({ status: "ready", values }),
   });
   engine.paseo = paseo;
   engine.workingDirProbe = {
@@ -145,6 +145,23 @@ function pendingTrigger(state) {
     text: "stop", status: "pending", context: false, receivedAt: oldTime,
   });
 }
+
+test("Router rules update on the next eval using the same agent and can be cleared", async (t) => {
+  const f = fixture(t, "waiting");
+  await setImmediate();
+  for (const rules of ["中文汇报,列出验证情况。", "简洁答复,优先说明阻塞项。", ""]) {
+    f.controls.settingsChanged({ status: "ready", values: { ...f.values, routerInstructions: rules } });
+    pendingTrigger(f.state);
+    await f.engine.runEval("thread");
+    const prompt = f.calls.prompts.at(-1);
+    if (rules) assert.ok(prompt.includes(rules));
+    else assert.match(prompt, /No custom Router preferences are configured\. Use the built-in rules only/);
+    f.state.triggers = [];
+  }
+  assert.equal(f.calls.prompts.length, 3);
+  assert.equal(f.calls.routerCreates.length, 0, "the existing Router is reused");
+  assert.equal(f.calls.workerCreates.length, 0);
+});
 
 test("a waiting worker resumes tracking and produces a report for its follow-up", async (t) => {
   const f = fixture(t, "waiting");

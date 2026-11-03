@@ -3,8 +3,37 @@ import test from "node:test";
 import { composeEvalPrompt, parseVerdict } from "../server/router.ts";
 import { composeWorkerPrompt, taskDirectory } from "../server/workers.ts";
 import { emptyState } from "../shared/model.ts";
+import { MAX_ROUTER_INSTRUCTIONS_CHARS, SETTINGS_DEFAULTS, superagentSettings } from "../shared/settings.ts";
 
 // ACP providers (e.g. zcode-acp) drop systemPrompt, so the role rules must travel in the prompts.
+
+test("Router preferences support old settings, multiline text and a bounded size", () => {
+  assert.equal(SETTINGS_DEFAULTS.routerInstructions, "");
+  const legacy = superagentSettings.schema.parse({ workingDir: "/repo", routerProvider: "zcode-acp" });
+  assert.equal(legacy.routerInstructions, "");
+  const text = "中文答复。\n\n汇报包含验证情况。";
+  assert.equal(superagentSettings.schema.parse({ routerInstructions: `  ${text}\n` }).routerInstructions, text);
+  assert.equal(superagentSettings.schema.safeParse({ routerInstructions: "a".repeat(MAX_ROUTER_INSTRUCTIONS_CHARS) }).success, true);
+  const oversized = superagentSettings.schema.safeParse({ routerInstructions: "a".repeat(MAX_ROUTER_INSTRUCTIONS_CHARS + 1) });
+  assert.deepEqual(oversized.error.issues[0].path, ["routerInstructions"]);
+});
+
+test("Router preferences enter the eval prompt without changing Worker instructions or the output contract", () => {
+  const context = {
+    thread: { id: "t", title: "test" }, batch: [], state: emptyState(),
+    worker: { workingDir: "/repo", isolation: "worktree", issue: null },
+  };
+  const rules = "面向用户使用中文。\n汇报必须包含验证情况。";
+  const prompt = composeEvalPrompt({ ...context, routerInstructions: rules });
+  assert.ok(prompt.includes(rules));
+  assert.ok(prompt.indexOf("do NOT call any tools") < prompt.indexOf(rules));
+  assert.ok(prompt.indexOf(rules) < prompt.indexOf("# Thread:"));
+  assert.match(prompt, /keep the decision-only role, configured worker profiles, action limit/);
+  assert.match(prompt, /These replace any preferences from earlier evaluations/);
+  assert.match(prompt, /Decide now\. Reply with exactly one fenced/);
+  assert.equal(composeEvalPrompt({ ...context, routerInstructions: " \n " }), composeEvalPrompt(context));
+  assert.doesNotMatch(composeWorkerPrompt({ id: "ticket", title: "test", mandate: "work" }, "/repo", "worktree"), /面向用户使用中文/);
+});
 
 test("every Router eval prompt carries the decision-only rules before the thread", () => {
   const state = emptyState();
