@@ -8,24 +8,31 @@ import { HistoryScreen } from "./client/history-screen";
 import { StatusScreen } from "./client/status-screen";
 import { superagentDispatchRpc } from "./shared/rpc";
 import { useExecutionAgents, useSuperagentState } from "./client/query";
-import { sidebarStatus } from "./shared/sidebar-status";
+import { routerSidebarStatus, sidebarWorkerCounts } from "./shared/sidebar-status";
 import { AgentStatusIcon } from "./client/agent-status-icon";
+import { SidebarWorkerCounts } from "./client/sidebar-worker-counts";
 
 const SETTINGS_SCREEN_ID = "general";
 
 function SuperagentSidebarItem({ currentScreen, openScreen, host, theme }: PluginSidebarItemProps) {
   const query = useSuperagentState(host.id);
   const snapshot = query.data;
-  const ids = [snapshot?.routerAgentId, ...(snapshot?.tickets ?? [])
-    .filter((ticket) => ["pending", "launching", "running", "waiting"].includes(ticket.status)).map((ticket) => ticket.workerAgentId)]
+  const workerIds = (snapshot?.tickets ?? [])
+    .filter((ticket) => ["launching", "running", "waiting", "completed"].includes(ticket.status)).map((ticket) => ticket.workerAgentId)
+    .filter((id): id is string => Boolean(id));
+  const ids = [snapshot?.routerAgentId, ...workerIds]
     .filter((id): id is string => Boolean(id));
   const agents = useExecutionAgents(host.id, ids);
-  const status = sidebarStatus(snapshot, Object.values(agents).map((item) => item.agent), query.isError);
+  const router = snapshot?.routerAgentId ? agents[snapshot.routerAgentId] : undefined;
+  const status = routerSidebarStatus(snapshot, router?.agent, query.isError || router?.error);
+  const counts = snapshot && !query.isError && !workerIds.some((id) => agents[id]?.error)
+    ? sidebarWorkerCounts(snapshot.tickets, Object.fromEntries(Object.entries(agents).map(([id, item]) => [id, item.agent]))) : null;
   const StatusIcon = useMemo(() => () => <AgentStatusIcon status={status} theme={theme} />, [status, theme]);
   return (
     <SidebarRow
       icon={StatusIcon}
       label="Superagent"
+      trailing={<SidebarWorkerCounts counts={counts} theme={theme} />}
       active={Boolean(currentScreen && ["main", "history", "status"].includes(currentScreen.screenId))}
       onPress={() => openScreen({ screenId: "main" })}
     />
