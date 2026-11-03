@@ -5,6 +5,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { Icon, TextInput, useToast } from "@getpaseo/plugin/client/ui";
 import type { Decision, SuperagentSnapshot, Ticket, Trigger } from "../shared/model";
 import { SUBSCRIBED_STATUSES } from "../shared/model";
+import { directTicket } from "../shared/execution";
 import {
   ACTIVE_TICKET_STATUSES,
   outcomeLabel,
@@ -53,6 +54,7 @@ interface ThreadCardProps {
   theme: Theme;
   navigation?: Navigation;
   defaultExpanded?: boolean;
+  focusTicketId?: string;
 }
 
 /** 活动时间线默认只显示最近几条,更早的折叠。 */
@@ -66,11 +68,13 @@ export function ThreadCard({
   theme,
   navigation,
   defaultExpanded = false,
+  focusTicketId,
 }: ThreadCardProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [hovered, setHovered] = useState(false);
 
-  const threadTickets = useMemo(() => tickets.filter((t) => t.threadId === thread.id), [tickets, thread.id]);
+  const threadTickets = useMemo(() => tickets.filter((t) => t.threadId === thread.id)
+    .sort((a, b) => Number(b.id === focusTicketId) - Number(a.id === focusTicketId)), [tickets, thread.id, focusTicketId]);
   const threadTriggers = useMemo(() => triggers.filter((t) => t.threadId === thread.id), [triggers, thread.id]);
   const threadDecisions = useMemo(() => decisions.filter((d) => d.threadId === thread.id), [decisions, thread.id]);
   const status = threadStatus(thread, threadTickets, threadDecisions);
@@ -173,8 +177,8 @@ function ThreadDetail({
     [queryClient, toast],
   );
 
-  // 有订阅中的 Worker 时,追加消息不经 Router 直接送达;输入框提示据此说明去向。
-  const directTarget = tickets.find((t) => t.subscribed && SUBSCRIBED_STATUSES.includes(t.status));
+  // 恰好一个可直通的订阅 Worker 时,追加消息直接送达;与引擎共用判断。
+  const directTarget = directTicket(tickets);
 
   return (
     <>

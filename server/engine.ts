@@ -1,6 +1,7 @@
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
+import { directTicket } from "../shared/execution";
 import {
   newId,
   truncate,
@@ -266,7 +267,7 @@ export class SuperagentEngine {
     // 订阅直通:恰好一个活跃订阅 Ticket 时后续事件直通其 Worker(Worker 汇报除外)。
     // 多个订阅 Worker 意见不一时交给 Router 选择目标,不能默认发给第一个。
     const subscribed = this.subscribedTickets(this.store.get(), threadId);
-    const direct = subscribed.length === 1 && Boolean(subscribed[0].workerAgentId);
+    const direct = directTicket(subscribed);
 
     const trigger: Trigger = {
       id: triggerId,
@@ -293,7 +294,7 @@ export class SuperagentEngine {
     });
 
     if (direct) {
-      const directDelivered = await this.deliverDirect(trigger, subscribed[0]);
+      const directDelivered = await this.deliverDirect(trigger, direct);
       if (directDelivered) return { threadId, triggerId, directDelivered, note: null };
     }
 
@@ -1275,6 +1276,7 @@ export class SuperagentEngine {
         lastWatchdogAt: this.lastWatchdogAt,
         lastWatchdogNote: this.lastWatchdogNote,
         evalInFlight: this.evalInFlight,
+        currentEvalThreadId: this.currentEvalThread,
       },
     };
   }

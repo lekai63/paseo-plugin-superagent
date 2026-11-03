@@ -171,6 +171,20 @@ test("steering an already running worker keeps its deadline and existing watcher
   assert.equal(f.calls.sends[0].options.activeTurnBehavior, "steer");
 });
 
+test("the snapshot identifies the evaluating thread and clears it when evaluation settles", async (t) => {
+  const f = fixture(t);
+  const finish = deferred();
+  f.engine.runEval = () => finish.promise;
+  f.engine.evalQueued.add("thread");
+  const evaluation = f.engine.drainEvalQueue();
+  assert.equal(f.engine.snapshot().engine.evalInFlight, true);
+  assert.equal(f.engine.snapshot().engine.currentEvalThreadId, "thread");
+  finish.resolve();
+  await evaluation;
+  assert.equal(f.engine.snapshot().engine.evalInFlight, false);
+  assert.equal(f.engine.snapshot().engine.currentEvalThreadId, null);
+});
+
 test("a failed direct send returns false and the Router evaluates the original message", async (t) => {
   const f = fixture(t, "waiting");
   f.controls.send = async () => { throw new Error("offline"); };

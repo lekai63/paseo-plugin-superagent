@@ -270,6 +270,8 @@ export const SuperagentSnapshotSchema = z.object({
     lastWatchdogAt: z.string().nullish(),
     lastWatchdogNote: z.string().nullish(),
     evalInFlight: z.boolean(),
+    /** 当前正在评估的线程;仅运行时状态,不写入持久化文件。 */
+    currentEvalThreadId: z.string().nullish(),
   }),
 });
 export type SuperagentSnapshot = z.infer<typeof SuperagentSnapshotSchema>;

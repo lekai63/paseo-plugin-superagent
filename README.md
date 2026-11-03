@@ -109,8 +109,8 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 ## 使用
 
 1. **派发**:主界面「新任务」卡片,或任意 agent 会话里 `/superagent 修复登录页的 CORS 问题并补测试`。
-2. **观察**:顶部概览看线程/运行中/待评估/失败数;线程卡片标题旁的徽标说明当前状态(运行中、待评估、评估失败、已完成…),展开后看 Ticket 与按时间排列的「活动」(触发消息与 Router 裁决);「打开 Worker 会话」直接跳转;Router 会话在底部「运行状态」里打开。
-3. **追加**:线程卡片底部的回复框追加消息——提示文字会说明去向:有订阅 Worker 时直通它,否则交给 Router。
+2. **观察**:顶部概览看线程/运行中/待评估/失败数;「执行视图」按线程展示 Router → Ticket → Worker 关系、当前评估线程、追加消息的直通目标与最近汇报。Ticket 状态和 Worker 会话状态分开展示,权限等待/会话异常优先排列,完成与取消的任务默认折叠。点击 Worker 卡片打开会话,「详情与操作」查看任务、活动并取消/重试。原线程详情与时间线继续保留。工作区标签页或右侧面板可添加「Superagent 执行视图」(命令中心同名入口),默认定位当前 Worker 工作区所属线程,可切换查看全部线程;窄面板自动采用纵向布局。
+3. **追加**:线程卡片底部的回复框追加消息——提示文字会说明去向:恰好一个活跃订阅且已有会话的 Worker 时直通它,否则交给 Router。
 4. **干预**:取消/重试 Ticket、取消直通(运行中)/标记完成(待命)、重新评估、关闭线程(取消活跃 Worker 并归档其工作区)。取消与关闭需要再点一次确认。
 
 ## 设计取舍与限制
@@ -119,6 +119,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 - **评估串行**:单个 Router agent 全局串行评估(避免相互打断);高并发线程会排队。
 - **失败退避**:线程连续 3 次评估失败(unparsed/异常)后看门狗不再自动重排,线程徽标显示「评估失败」,需在线程卡片点「重新评估」手动重试——防止 Router 持续劣化时烧 token 的失控循环。
 - **权限等待**:Worker 的权限请求走 Paseo 原生权限流(app 内批准);等待期间 Ticket 保持运行,不误判完成。
+- **执行视图刷新**:编排快照每 3 秒更新,可见 Worker 与 Router 会话每 5 秒读取,权限/attention 事件触发即时刷新;读取失败明确显示状态不可用。视图表达当前状态和路由关系,不提供完整调用回放或逐条消息传输动画。
 - **外部 Trigger 源**:飞书/QQ 已支持;GitHub/Slack 轮询源是下一扩展点(Paseo Hub 触发器亦可作为上游把事件投给 `superagent.dispatch`)。
 - **裁决解析**:Router 必须回 fenced JSON;解析失败记录 `unparsed` 决策并保留触发供重试,不做模型侧重问。
 - **取消语义**:取消 Ticket 归档 Worker agent 及其 worktree 工作区(soft delete,可从 History 找回)。
@@ -132,6 +133,6 @@ npm install
 npm run typecheck
 ```
 
-目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用)、`server/`(store/router/workers/engine)、`client/`(主界面 screen、设置页 settings-screen、新任务 dispatch-card、线程 thread-card,以及 ui.tsx 里的按钮/徽标/提示条等小型原语)。引擎细节见 `server/engine.ts` 头注。
+目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用;execution 提供直通判定与执行视图状态推导)、`server/`(store/router/workers/engine)、`client/`(主界面 screen、执行视图 execution-view 与工作区面板 execution-panel、设置页 settings-screen、新任务 dispatch-card、线程 thread-card,以及 ui.tsx 里的按钮/徽标/提示条等小型原语)。引擎细节见 `server/engine.ts` 头注。
 
 `npm test` 使用 Node.js 24+ 的内置测试运行器与现有 TypeScript 依赖,验证 Worker 续跑、投递失败回退、取消竞态、重启恢复与飞书连接清理;不连接真实 provider 或 IM 服务。

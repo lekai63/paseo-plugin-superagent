@@ -2,6 +2,7 @@ import type { PluginClientContext, PluginScreenProps, PluginSidebarItemProps } f
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { SuperagentScreen } from "./client/screen";
 import { SuperagentSettingsScreen } from "./client/settings-screen";
+import { ExecutionPanel } from "./client/execution-panel";
 import { superagentDispatchRpc } from "./shared/rpc";
 
 const SETTINGS_SCREEN_ID = "general";
@@ -29,6 +30,21 @@ export default function contribute(client: PluginClientContext) {
     id: "main",
     title: "Superagent",
     Component: MainScreen,
+  });
+  client.addWorkspacePanel({
+    id: "execution",
+    title: "Superagent 执行视图",
+    icon: "Network",
+    locations: ["workspace", "explorer"],
+    Component: ExecutionPanel,
+  });
+  client.addCommandCenterItem({
+    id: "open-execution",
+    title: "Superagent 执行视图",
+    icon: "Network",
+    keywords: ["superagent", "router", "worker", "执行", "监控"],
+    context: "workspace",
+    onSelect({ openPanel }) { openPanel("execution"); },
   });
   client.addSidebarHeaderItem({
     id: "main",

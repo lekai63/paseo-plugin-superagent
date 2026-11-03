@@ -1,7 +1,6 @@
 import { useMemo } from "react";
 import { Text, View } from "react-native";
-import { useQuery } from "@tanstack/react-query";
-import { useRpc, useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
+import { useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
 import {
   Loading,
   ScrollView,
@@ -12,14 +11,14 @@ import {
 } from "@getpaseo/plugin/client/ui";
 import type { SuperagentSnapshot } from "../shared/model";
 import { ACTIVE_TICKET_STATUSES, clockTime, watchdogNoteLabel } from "../shared/labels";
-import { superagentStateRpc } from "../shared/rpc";
 import { superagentSettings, type SuperagentSettingsValues } from "../shared/settings";
 import { DispatchCard } from "./dispatch-card";
-import { STATE_QUERY_KEY } from "./query";
+import { useSuperagentState } from "./query";
+import { ExecutionView } from "./execution-view";
 import { ThreadCard } from "./thread-card";
 import { Button, Card, MAX_CONTENT_WIDTH, Notice, StatTile, fontSize, space, type Theme } from "./ui";
 
-export { STATE_QUERY_KEY };
+export { STATE_QUERY_KEY } from "./query";
 
 export interface SuperagentScreenProps extends PluginScreenProps {
   /** 打开本插件的设置页(Settings → Plugins → Superagent)。 */
@@ -28,21 +27,16 @@ export interface SuperagentScreenProps extends PluginScreenProps {
 
 /**
  * Superagent 主界面,自上而下:
- *   提示(未配置 / 工作目录不可用) → 概览数字 → 新任务 → 线程 → 运行状态。
- * 先放"要操作的",再放"要理解的";配置项都在设置页。
+ *   提示 → 概览数字 → 执行视图 → 新任务 → 线程详情 → 运行状态。
+ * 执行概览与任务操作集中在主界面;配置项都在设置页。
  */
 export function SuperagentScreen(props: SuperagentScreenProps) {
   const { theme, layout, navigation, openSettings } = props;
-  const fetchState = useRpc(superagentStateRpc);
   const settings = useSettings(superagentSettings);
   const settingsValues = settings.status === "ready" ? settings.values : null;
   const padding = layout.compact ? space.lg : space.xl;
 
-  const stateQuery = useQuery({
-    queryKey: STATE_QUERY_KEY,
-    queryFn: () => fetchState({}),
-    refetchInterval: 3000,
-  });
+  const stateQuery = useSuperagentState(props.host.id);
   const snapshot = stateQuery.data;
 
   if (stateQuery.isLoading && !snapshot) return <Loading />;
@@ -85,6 +79,10 @@ export function SuperagentScreen(props: SuperagentScreenProps) {
           <Overview snapshot={snapshot} theme={theme} compact={layout.compact} />
         </SettingsSection>
 
+        <SettingsSection title="执行视图" info="按线程查看 Router 派发与 Worker 状态。点击 Worker 卡片打开会话，在详情中查看活动、取消或重试。">
+          <ExecutionView snapshot={snapshot} theme={theme} hostId={props.host.id} navigation={navigation} compact={layout.compact} />
+        </SettingsSection>
+
         <SettingsSection
           title="新任务"
           info="Router 先评估任务:直接答复、派发 Worker 执行,或忽略。Worker 在工作目录(或独立 worktree)里干活,完成后把汇报送回线程。"
@@ -94,7 +92,7 @@ export function SuperagentScreen(props: SuperagentScreenProps) {
 
         <SettingsSection
           title={snapshot.threads.length > 0 ? `线程 · ${snapshot.threads.length}` : "线程"}
-          info="每个线程是同一话题的事件流。线程里有订阅中的 Worker 时,追加的消息直接发给它(不经过 Router);否则交给 Router 评估。"
+          info="每个线程是同一话题的事件流。恰有一个可直通的订阅 Worker 时，追加消息直接送达；否则交给 Router 评估。"
         >
           {snapshot.threads.length === 0 ? (
             <EmptyThreads theme={theme} />
