@@ -12,6 +12,18 @@ export function agentStatusColors(theme: Theme) {
 
 /** 沿用 better-paseo 的 16px 状态图形、配色与 900ms 运行环。 */
 export function AgentStatusIcon({ status, theme }: { status: SidebarStatus; theme: Theme }) {
+  const colors = agentStatusColors(theme);
+  return <View accessibilityLabel={`Router ${SIDEBAR_STATUS_LABELS[status]}`} testID={`superagent-router-status-${status}`}
+    style={{ width: 16, height: 16, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+    {status === "running" ? <RunningStatusRing color={colors.running} />
+      : status === "needs_input" ? <View style={{ width: 12, height: 12, borderRadius: 6, borderWidth: 1.5, borderColor: colors.warning }} />
+      : <View style={{ width: status === "failed" ? 8 : 6, height: status === "failed" ? 8 : 6, borderRadius: 4,
+        backgroundColor: status === "failed" ? colors.danger : theme.colors.foregroundMuted }} />}
+  </View>;
+}
+
+/** Router 与右侧 Worker 计数共用运行环;无运行时卸载,减少动态效果设置下保持静止。 */
+export function RunningStatusRing({ color }: { color: string }) {
   const rotation = useRef(new Animated.Value(0)).current;
   const arc = useRef<unknown>(null);
   const [reduced, setReduced] = useState(false);
@@ -28,7 +40,7 @@ export function AgentStatusIcon({ status, theme }: { status: SidebarStatus; them
     return () => { mounted = false; listener.remove(); };
   }, []);
   useEffect(() => {
-    if (status !== "running" || reduced) return;
+    if (reduced) return;
     if (Platform.OS === "web") {
       const node = arc.current as HTMLElement | null;
       if (!node?.animate) return;
@@ -40,19 +52,13 @@ export function AgentStatusIcon({ status, theme }: { status: SidebarStatus; them
     const loop = Animated.loop(Animated.timing(rotation, { toValue: 1, duration: 900, easing: (value) => Math.floor(value * 12) / 12, useNativeDriver: true, isInteraction: false }));
     loop.start();
     return () => loop.stop();
-  }, [status, reduced, rotation]);
-  const colors = agentStatusColors(theme);
+  }, [reduced, rotation]);
   const circle: ViewStyle = { position: "absolute", width: 12, height: 12, borderRadius: 6, borderWidth: 1.5 };
-  const head: ViewStyle = { ...circle, borderColor: "transparent", borderTopColor: colors.running, opacity: 0.9 };
-  return <View accessibilityLabel={`Router ${SIDEBAR_STATUS_LABELS[status]}`} testID={`superagent-router-status-${status}`}
-    style={{ width: 16, height: 16, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-    {status === "running" ? <>
-      <View style={{ ...circle, borderColor: colors.running, opacity: 0.3 }} />
-      {Platform.OS === "web" ? <View ref={(node) => { arc.current = node; }} style={head} />
-        : <Animated.View style={[head, { transform: [{ rotate: rotation.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] }) }] }]} />}
-      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: colors.running }} />
-    </> : status === "needs_input" ? <View style={{ ...circle, borderColor: colors.warning }} />
-      : <View style={{ width: status === "failed" ? 8 : 6, height: status === "failed" ? 8 : 6, borderRadius: 4,
-        backgroundColor: status === "failed" ? colors.danger : theme.colors.foregroundMuted }} />}
+  const head: ViewStyle = { ...circle, borderColor: "transparent", borderTopColor: color, opacity: 0.9 };
+  return <View style={{ width: 16, height: 16, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+    <View style={{ ...circle, borderColor: color, opacity: 0.3 }} />
+    {Platform.OS === "web" ? <View ref={(node) => { arc.current = node; }} style={head} />
+      : <Animated.View style={[head, { transform: [{ rotate: rotation.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "360deg"] }) }] }]} />}
+    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color }} />
   </View>;
 }
