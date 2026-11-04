@@ -4,9 +4,9 @@ import { ChatScreen } from "./client/chat-screen";
 import type { SidebarTab } from "./client/chat-sidebar";
 import { SuperagentSettingsScreen } from "./client/settings-screen";
 import { superagentDispatchRpc } from "./shared/rpc";
-import { useExecutionAgents, useSuperagentState } from "./client/query";
-import { sidebarWorkerCounts } from "./shared/sidebar-status";
-import { SidebarWorkerCounts } from "./client/sidebar-worker-counts";
+import { useExecutionAgents, useSuperagentState, useRouterAgents } from "./client/query";
+import { routerStatusMark, sidebarWorkerCounts } from "./shared/sidebar-status";
+import { SidebarRouterMark, SidebarWorkerCounts } from "./client/sidebar-worker-counts";
 
 const SETTINGS_SCREEN_ID = "general";
 
@@ -19,11 +19,17 @@ function SuperagentSidebarItem({ currentScreen, openScreen, host, theme }: Plugi
   const agents = useExecutionAgents(host.id, workerIds);
   const counts = snapshot && !query.isError && !workerIds.some((id) => agents[id]?.error)
     ? sidebarWorkerCounts(snapshot.tickets, Object.fromEntries(Object.entries(agents).map(([id, item]) => [id, item.agent]))) : null;
+  // 有 Worker 在运行/待命时只显示 Worker 计数;状态不可用(counts 为 null)时两者都不显示。
+  const workersQuiet = counts !== null && counts.running === 0 && counts.done === 0;
+  const routers = useRouterAgents(host.id, snapshot?.routerAgentId ?? null, workersQuiet);
+  const routerMark = workersQuiet && !routers.isError ? routerStatusMark(routers.data ?? []) : null;
   return (
     <SidebarRow
       icon="Network"
       label="Superagent"
-      trailing={counts && (counts.running > 0 || counts.done > 0) ? <SidebarWorkerCounts counts={counts} theme={theme} /> : null}
+      trailing={workersQuiet
+        ? (routerMark ? <SidebarRouterMark mark={routerMark} theme={theme} /> : null)
+        : counts && (counts.running > 0 || counts.done > 0) ? <SidebarWorkerCounts counts={counts} theme={theme} /> : null}
       active={Boolean(currentScreen && ["main", "history", "status"].includes(currentScreen.screenId))}
       onPress={() => openScreen({ screenId: "main" })}
     />

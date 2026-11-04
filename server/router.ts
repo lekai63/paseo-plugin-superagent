@@ -1,14 +1,15 @@
 import type { PaseoApi, PaseoAgent, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { SuperagentState, Thread, Ticket, Trigger, Decision } from "../shared/model";
-import { newId, truncate, verdictPlaceholderIssue, ROUTER_ACTION_LIMIT, type RouterVerdict, RouterVerdictSchema } from "../shared/model";
+import { newId, truncate, verdictPlaceholderIssue, ROUTER_ACTION_LIMIT, ROUTER_AGENT_LABEL, ROUTER_AGENT_LABEL_VALUE, type RouterVerdict, RouterVerdictSchema } from "../shared/model";
 
 /**
  * Router 层:一个常驻 Paseo agent(轻量模型),只做语义裁决,不执行任务。
  * 对应文章双层架构的 Router:统一承接、批处理评估、向人汇报。
  */
 
-export const ROUTER_LABEL = "superagent.role";
-export const ROUTER_LABEL_VALUE = "router";
+/** 标签常量在 shared/model(客户端枚举 Router 会话也用);这里保留原导出名。 */
+export const ROUTER_LABEL = ROUTER_AGENT_LABEL;
+export const ROUTER_LABEL_VALUE = ROUTER_AGENT_LABEL_VALUE;
 export const TICKET_LABEL = "superagent.ticket";
 
 /**

@@ -14,6 +14,13 @@ import { ChatTabsSchema } from "./chat-tabs";
  * 都发生在状态落盘之后,看门狗负责对账恢复。
  */
 
+/**
+ * Router 会话在 Paseo agent 目录里的标签(服务端创建时打上,客户端据此枚举全部
+ * Router 会话——引擎记住的 id 之外,状态重置后残留的旧 Router 也算)。
+ */
+export const ROUTER_AGENT_LABEL = "superagent.role";
+export const ROUTER_AGENT_LABEL_VALUE = "router";
+
 export const TRIGGER_KINDS = ["manual", "agent", "report", "engine", "feishu", "qq", "dingtalk", "wecom"] as const;
 export const TriggerKindSchema = z.enum(TRIGGER_KINDS);
 export type TriggerKind = z.infer<typeof TriggerKindSchema>;
