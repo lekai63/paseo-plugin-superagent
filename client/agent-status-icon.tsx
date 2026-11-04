@@ -26,7 +26,10 @@ export function RunningStatusRing({ color, size = 16 }: { color: string; size?: 
       return () => query.removeEventListener("change", update);
     }
     let mounted = true;
-    void AccessibilityInfo.isReduceMotionEnabled().then((value) => { if (mounted) setReduced(value); });
+    // 查询失败时保持默认动画;未处理的拒绝会被宿主上报为异常(better-paseo 同款处理)。
+    AccessibilityInfo.isReduceMotionEnabled()
+      .then((value) => { if (mounted) setReduced(value); })
+      .catch(() => {});
     const listener = AccessibilityInfo.addEventListener("reduceMotionChanged", setReduced);
     return () => { mounted = false; listener.remove(); };
   }, []);

@@ -35,18 +35,28 @@ export function useExecutionAgents(hostId: string, agentIds: string[]): Record<s
     const scope = new Set<string>(JSON.parse(key));
     if (!scope.size) return;
     const prefix = ["superagent", "agent", hostId];
+    // 订阅回调运行在宿主的消息分发上下文里,不在 React 边界内:任何抛错都会被宿主当作
+    // 未捕获异常直接终止 app(0.15.0 iOS 实测闪退)。这里只做缓存写入,宁可丢一次更新。
     const off = paseo.agents.subscribe((update) => {
-      const id = update.kind === "upsert" ? update.agent.id : update.agentId;
-      if (!scope.has(id)) return;
-      client.setQueryData<PaseoAgent | null>([...prefix, id], update.kind === "upsert" ? update.agent : null);
+      try {
+        const id = update.kind === "upsert" ? update.agent?.id : update.agentId;
+        if (!id || !scope.has(id)) return;
+        client.setQueryData<PaseoAgent | null>([...prefix, id], update.kind === "upsert" ? update.agent : null);
+      } catch (error) {
+        console.warn("[superagent] agent update handler failed", error);
+      }
     });
     const events = paseo.observeEvents(["agent_permission_request", "agent_permission_resolved", "agent_attention_required"]);
     events.subscribe({
       snapshot() {},
       update(message) {
-        if (message.type !== "agent_permission_request" && message.type !== "agent_permission_resolved" && message.type !== "agent_attention_required") return;
-        const id = message.payload.agentId;
-        if (scope.has(id)) void client.invalidateQueries({ queryKey: [...prefix, id] });
+        try {
+          if (message.type !== "agent_permission_request" && message.type !== "agent_permission_resolved" && message.type !== "agent_attention_required") return;
+          const id = message.payload?.agentId;
+          if (id && scope.has(id)) void client.invalidateQueries({ queryKey: [...prefix, id] });
+        } catch (error) {
+          console.warn("[superagent] event handler failed", error);
+        }
       },
     });
     // 定时读取也负责断线恢复和未打开原生会话时的状态更新。
