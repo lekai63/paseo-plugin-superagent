@@ -136,20 +136,33 @@ export function ConfirmButton({
   icon,
   onConfirm,
   size = "sm",
+  variant = "outline",
   disabled,
+  accessibilityLabel,
+  onArmedChange,
 }: {
   theme: Theme;
-  label: string;
+  /** 省略时为纯图标按钮,此时应给 accessibilityLabel。 */
+  label?: string;
   confirmLabel: string;
   icon?: string;
   onConfirm(): void;
   size?: "xs" | "sm";
+  /** 上膛前的样式;上膛后总是红色填充。 */
+  variant?: ButtonVariant;
   disabled?: boolean;
+  accessibilityLabel?: string;
+  /** 上膛与复位时通知外层,例如悬停才显示的按钮在上膛期间保持可见。 */
+  onArmedChange?(armed: boolean): void;
 }) {
   const [armed, setArmed] = useState(false);
+  const arm = (value: boolean) => {
+    setArmed(value);
+    onArmedChange?.(value);
+  };
   useEffect(() => {
     if (!armed) return;
-    const timer = setTimeout(() => setArmed(false), 4000);
+    const timer = setTimeout(() => arm(false), 4000);
     return () => clearTimeout(timer);
   }, [armed]);
 
@@ -163,14 +176,15 @@ export function ConfirmButton({
         label={confirmLabel}
         disabled={disabled}
         onPress={() => {
-          setArmed(false);
+          arm(false);
           onConfirm();
         }}
       />
     );
   }
   return (
-    <Button theme={theme} variant="outline" size={size} icon={icon} label={label} disabled={disabled} onPress={() => setArmed(true)} />
+    <Button theme={theme} variant={variant} size={size} icon={icon} label={label} disabled={disabled}
+      accessibilityLabel={accessibilityLabel} onPress={() => arm(true)} />
   );
 }
 

@@ -97,6 +97,8 @@ export type TicketStatus = (typeof TICKET_STATUSES)[number];
 
 /** 这些状态的 Ticket 若仍订阅线程,线程后续事件程序直通其 Worker,不过 Router。 */
 export const SUBSCRIBED_STATUSES: readonly TicketStatus[] = ["running", "waiting"];
+/** 已结束的 Ticket:不再占用 Worker,关闭线程时不会被取消。 */
+export const TERMINAL_TICKET_STATUSES: readonly TicketStatus[] = ["completed", "failed", "canceled"];
 
 export const TicketSchema = z.object({
   id: z.string().min(1),

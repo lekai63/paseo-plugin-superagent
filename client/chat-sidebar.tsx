@@ -1,10 +1,10 @@
 import { useCallback, useState, type ReactNode } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Platform, Pressable, Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRpc, useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/ui";
 import type { SuperagentSnapshot, Ticket } from "../shared/model";
-import { SUBSCRIBED_STATUSES } from "../shared/model";
+import { SUBSCRIBED_STATUSES, TERMINAL_TICKET_STATUSES } from "../shared/model";
 import { agentStatus, currentTickets, directTicket, elapsedTime, ticketPriority } from "../shared/execution";
 import {
   ACTIVE_TICKET_STATUSES,
@@ -53,6 +53,8 @@ export interface ChatSidebarProps {
   snapshot: SuperagentSnapshot | undefined;
   threadId: string | null;
   onSelectThread(threadId: string | null): void;
+  /** 手动关闭对话成功后调用:顺带关掉它的标签。 */
+  onThreadClosed(threadId: string): void;
   theme: Theme;
   hostId: string;
   navigation: Navigation;
@@ -101,16 +103,30 @@ export function SidebarContent(props: ChatSidebarProps) {
 function useAction() {
   const toast = useToast();
   const queryClient = useQueryClient();
-  return useCallback(async (successLabel: string, action: () => Promise<{ ok: boolean; error?: string | null }>) => {
+  /** 执行操作并提示结果;返回是否成功。 */
+  return useCallback(async (successLabel: string, action: () => Promise<{ ok: boolean; error?: string | null }>): Promise<boolean> => {
     try {
       const result = await action();
       void queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
       if (result.ok) toast.show(successLabel, { variant: "success" });
       else toast.error(result.error ?? "操作失败");
+      return result.ok;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
+      return false;
     }
   }, [queryClient, toast]);
+}
+
+/** 关闭对话(取消它未结束的 Worker),成功后关掉它的标签。 */
+function useCloseThread(onThreadClosed: (threadId: string) => void) {
+  const run = useAction();
+  const closeThread = useRpc(superagentCloseThreadRpc);
+  return (threadId: string) => {
+    void run("对话已关闭", () => closeThread({ threadId })).then((ok) => {
+      if (ok) onThreadClosed(threadId);
+    });
+  };
 }
 
 function observationStatus(observation?: AgentObservation): StatusLabel | null {
@@ -119,7 +135,7 @@ function observationStatus(observation?: AgentObservation): StatusLabel | null {
   return agentStatus(observation.agent);
 }
 
-function TasksTab({ snapshot, threadId, onSelectThread, theme, hostId, navigation }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
+function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, hostId, navigation }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
   const thread = threadId ? snapshot.threads.find((item) => item.id === threadId) : undefined;
   const tickets = thread
     ? snapshot.tickets.filter((ticket) => ticket.threadId === thread.id)
@@ -149,7 +165,7 @@ function TasksTab({ snapshot, threadId, onSelectThread, theme, hostId, navigatio
             onOpenThread={thread ? undefined : () => onSelectThread(ticket.threadId)} />
         ))}
       </View>
-      {thread && thread.state !== "closed" ? <ThreadActions thread={thread} theme={theme} /> : null}
+      {thread && thread.state !== "closed" ? <ThreadActions thread={thread} theme={theme} onThreadClosed={onThreadClosed} /> : null}
     </>
   );
 }
@@ -205,7 +221,7 @@ function TicketItem({ ticket, observation, direct, threadTitle, readOnly, theme,
   const cancelTicket = useRpc(superagentCancelTicketRpc);
   const retryTicket = useRpc(superagentRetryTicketRpc);
   const unsubscribe = useRpc(superagentUnsubscribeRpc);
-  const terminal = ["completed", "failed", "canceled"].includes(ticket.status);
+  const terminal = TERMINAL_TICKET_STATUSES.includes(ticket.status);
   const subscribed = ticket.subscribed && SUBSCRIBED_STATUSES.includes(ticket.status);
   const active = ACTIVE_TICKET_STATUSES.includes(ticket.status);
   const session = ticket.workerAgentId ? observationStatus(observation) : null;
@@ -264,10 +280,10 @@ function TicketItem({ ticket, observation, direct, threadTitle, readOnly, theme,
   );
 }
 
-function ThreadActions({ thread, theme }: { thread: Thread; theme: Theme }) {
+function ThreadActions({ thread, theme, onThreadClosed }: { thread: Thread; theme: Theme; onThreadClosed(threadId: string): void }) {
   const run = useAction();
   const forceEval = useRpc(superagentForceEvalRpc);
-  const closeThread = useRpc(superagentCloseThreadRpc);
+  const closeThread = useCloseThread(onThreadClosed);
   return (
     <View style={{ gap: space.sm }}>
       <GroupLabel theme={theme}>对话操作</GroupLabel>
@@ -275,7 +291,7 @@ function ThreadActions({ thread, theme }: { thread: Thread; theme: Theme }) {
         <Button theme={theme} size="xs" variant="outline" icon="RotateCcw" label="重新评估"
           onPress={() => void run("已请求 Router 重新评估", () => forceEval({ threadId: thread.id }))} />
         <ConfirmButton theme={theme} size="xs" icon="X" label="关闭对话" confirmLabel="确认关闭(取消进行中的 Worker)"
-          onConfirm={() => void run("对话已关闭", () => closeThread({ threadId: thread.id }))} />
+          onConfirm={() => closeThread(thread.id)} />
       </View>
     </View>
   );
@@ -283,13 +299,16 @@ function ThreadActions({ thread, theme }: { thread: Thread; theme: Theme }) {
 
 // ---------------------------------------------------------------- threads
 
-function ThreadsTab({ snapshot, threadId, onSelectThread, theme }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
-  const [showClosed, setShowClosed] = useState(false);
+function ThreadsTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
   const open = snapshot.threads.filter((thread) => thread.state !== "closed");
   const closed = snapshot.threads.filter((thread) => thread.state === "closed");
+  // 正在看已关闭的对话时默认展开,让选中项可见;之后展开/收起只由按钮决定。
+  const [showClosed, setShowClosed] = useState(() => closed.some((thread) => thread.id === threadId));
+  const closeThread = useCloseThread(onThreadClosed);
   const row = (thread: Thread) => (
     <ThreadRow key={thread.id} thread={thread} tickets={snapshot.tickets} selected={thread.id === threadId}
-      theme={theme} onPress={() => onSelectThread(thread.id)} />
+      theme={theme} onPress={() => onSelectThread(thread.id)}
+      onClose={thread.state === "closed" ? undefined : () => closeThread(thread.id)} />
   );
   return (
     <>
@@ -306,38 +325,57 @@ function ThreadsTab({ snapshot, threadId, onSelectThread, theme }: ChatSidebarPr
             <Text accessibilityRole="button" onPress={() => setShowClosed((value) => !value)}
               style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{showClosed ? "收起" : "展开"}</Text>
           }>{`已关闭 · ${closed.length}`}</GroupLabel>
-          {showClosed || closed.some((thread) => thread.id === threadId) ? closed.map(row) : null}
+          {showClosed ? closed.map(row) : null}
         </View>
       ) : null}
     </>
   );
 }
 
-function ThreadRow({ thread, tickets, selected, theme, onPress }: {
+function ThreadRow({ thread, tickets, selected, theme, onPress, onClose }: {
   thread: Thread;
   tickets: Ticket[];
   selected: boolean;
   theme: Theme;
   onPress(): void;
+  /** 给出时行尾有「关闭对话」(再点一次确认),不必先打开对话再去「任务」里关。 */
+  onClose?: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
-  const status = threadStatus(thread, tickets.filter((ticket) => ticket.threadId === thread.id),
-    thread.lastDecision ? [thread.lastDecision] : []);
+  const [pressed, setPressed] = useState(false);
+  const [armed, setArmed] = useState(false);
+  const own = tickets.filter((ticket) => ticket.threadId === thread.id);
+  const status = threadStatus(thread, own, thread.lastDecision ? [thread.lastDecision] : []);
   const preview = thread.latestResult ? markdownPreview(thread.latestResult.text).replace(/\s+/g, " ").trim() : thread.summary ?? "";
+  // 关闭对话会取消它所有未结束的 Ticket(含待命的 Worker),确认文案里说清楚。
+  const workers = own.filter((ticket) => !TERMINAL_TICKET_STATUSES.includes(ticket.status)).length;
+  // 触屏没有悬停:一直显示;桌面在悬停、选中或已上膛时显示,隐藏时仍占位,避免标题宽度跳动。
+  const showClose = Boolean(onClose) && (Platform.OS !== "web" || hovered || selected || armed);
   return (
-    <Pressable accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={`${thread.title},${status.label}`}
-      onPress={onPress} onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
-      style={({ pressed }) => ({ gap: 2, paddingHorizontal: space.sm, paddingVertical: space.sm, borderRadius: radius.lg,
-        backgroundColor: selected ? theme.colors.surface2 : pressed || hovered ? theme.colors.surface1 : "transparent" })}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-        <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: toneColor(status.tone, theme) }} />
-        <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: fontSize.base }}>{thread.title}</Text>
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{relativeTime(thread.updatedAt)}</Text>
-      </View>
-      <Text numberOfLines={1} style={{ marginLeft: 6 + space.sm, color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
-        {status.label}{preview ? ` · ${preview}` : ""}
-      </Text>
-    </Pressable>
+    <View onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}
+      style={{ flexDirection: "row", alignItems: "center", gap: space.xs, paddingRight: onClose ? space.xs : 0, borderRadius: radius.lg,
+        backgroundColor: selected ? theme.colors.surface2 : pressed || hovered ? theme.colors.surface1 : "transparent" }}>
+      <Pressable accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={`${thread.title},${status.label}`}
+        onPress={onPress} onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
+        style={{ flex: 1, minWidth: 0, gap: 2, paddingLeft: space.sm, paddingRight: onClose ? 0 : space.sm, paddingVertical: space.sm }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: toneColor(status.tone, theme) }} />
+          <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: fontSize.base }}>{thread.title}</Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{relativeTime(thread.updatedAt)}</Text>
+        </View>
+        <Text numberOfLines={1} style={{ marginLeft: 6 + space.sm, color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
+          {status.label}{preview ? ` · ${preview}` : ""}
+        </Text>
+      </Pressable>
+      {onClose ? (
+        <View accessibilityElementsHidden={!showClose} importantForAccessibility={showClose ? "auto" : "no-hide-descendants"}
+          style={{ flexShrink: 0, opacity: showClose ? 1 : 0, pointerEvents: showClose ? "auto" : "none" }}>
+          <ConfirmButton theme={theme} size="xs" variant="ghost" icon="Archive" accessibilityLabel={`关闭对话 ${thread.title}`}
+            confirmLabel={workers ? `关闭并取消 ${workers} 个 Worker` : "确认关闭"} disabled={!showClose}
+            onArmedChange={setArmed} onConfirm={onClose} />
+        </View>
+      ) : null}
+    </View>
   );
 }
 

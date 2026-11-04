@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { KeyboardAvoidingView, Pressable, Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
@@ -52,6 +52,9 @@ export function ChatScreen(props: ChatScreenProps) {
   // undefined:标签还没读到,稍后进入最后查看的对话;null:新对话。
   const [selected, setSelected] = useState<string | null | undefined>(() => params.threadId || (tabs ? entryChatTab(tabs) : undefined));
   const threadId = selected ?? null;
+  // 关闭对话的 RPC 返回时可能已切到别的对话:关标签时按那时的当前对话决定接下来显示哪段。
+  const threadIdRef = useRef(threadId);
+  threadIdRef.current = threadId;
   const deciding = selected === undefined;
   const requestedPanel = panelParam(params.panel) ?? props.defaultPanel ?? null;
   const [tab, setTab] = useState<SidebarTab>(requestedPanel ?? (selected ? "tasks" : "threads"));
@@ -135,15 +138,19 @@ export function ChatScreen(props: ChatScreenProps) {
     setSelected(id);
     setSheetOpen(false);
   };
-  /** 关闭标签(不关闭对话):关的是当前标签就切到相邻标签,没有标签时回到新对话。 */
+  /**
+   * 关闭标签(本身不关闭对话;在侧栏手动关闭对话成功后也调用它):关的是当前标签就切到相邻标签,
+   * 没有标签时回到新对话。
+   */
   const closeTab = (id: string | null) => {
     if (id === null) {
       setSelected(tabs ? entryChatTab(tabs) : null);
       return;
     }
-    let next: string | null = threadId;
+    const active = threadIdRef.current;
+    let next: string | null = active;
     updateTabs((current) => {
-      const result = closeChatTab(current, id, threadId);
+      const result = closeChatTab(current, id, active);
       next = result.next;
       return result.tabs;
     });
@@ -165,7 +172,8 @@ export function ChatScreen(props: ChatScreenProps) {
 
   const activeQuery = threadId ? detail : list;
   const sidebarProps = {
-    tab, onTab: setTab, snapshot, threadId, onSelectThread: selectThread, theme, hostId: host.id, navigation, openSettings,
+    tab, onTab: setTab, snapshot, threadId, onSelectThread: selectThread, onThreadClosed: closeTab, theme, hostId: host.id,
+    navigation, openSettings,
   };
   const notFound = Boolean(threadId && detailData && !thread);
 
