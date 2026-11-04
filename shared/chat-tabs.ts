@@ -7,6 +7,9 @@ import { z } from "zod";
  */
 
 export const MAX_CHAT_TABS = 12;
+/** 首次使用时自动打开的对话:最近一天内有活动的,最多几个。线程不会自动关闭,更早的留在「对话」列表里。 */
+export const SEED_TAB_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const MAX_SEED_TABS = 4;
 
 export const ChatTabsSchema = z.object({
   /** 打开顺序;新标签追加在末尾。 */
@@ -57,12 +60,13 @@ export function pruneChatTabs(tabs: ChatTabs, threadIds: ReadonlySet<string>): C
 }
 
 /**
- * 从未保存过标签时的初始标签:在界面里发起(手动触发、发送者为 user)且仍进行中的对话,
- * 按创建时间排列;最后查看的取最近更新的一段。
+ * 从未保存过标签时的初始标签:在界面里发起(手动触发、发送者为 user)、仍进行中且最近一天内
+ * 有活动的对话,取最近的几个,按创建时间排列;最后查看的取最近更新的一段。
  */
 export function defaultChatTabs(
   threads: readonly { id: string; state: string; createdAt: string; updatedAt: string }[],
   triggers: readonly { threadId?: string | null; kind: string; sender: string; receivedAt: string }[],
+  now: number = Date.now(),
 ): ChatTabs {
   const first = new Map<string, { kind: string; sender: string; receivedAt: string }>();
   for (const trigger of triggers) {
@@ -70,13 +74,16 @@ export function defaultChatTabs(
     const seen = first.get(trigger.threadId);
     if (!seen || trigger.receivedAt < seen.receivedAt) first.set(trigger.threadId, trigger);
   }
-  const mine = threads.filter((thread) => {
-    const origin = first.get(thread.id);
-    return thread.state === "active" && origin?.kind === "manual" && origin.sender === "user";
-  });
-  const open = [...mine].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(-MAX_CHAT_TABS).map((thread) => thread.id);
-  const latest = mine.filter((thread) => open.includes(thread.id)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-  return { open, last: latest?.id ?? null };
+  const since = now - SEED_TAB_WINDOW_MS;
+  const recent = threads
+    .filter((thread) => {
+      const origin = first.get(thread.id);
+      return thread.state === "active" && origin?.kind === "manual" && origin.sender === "user" && Date.parse(thread.updatedAt) >= since;
+    })
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, MAX_SEED_TABS);
+  const open = [...recent].sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map((thread) => thread.id);
+  return { open, last: recent[0]?.id ?? null };
 }
 
 export function sameChatTabs(a: ChatTabs, b: ChatTabs): boolean {

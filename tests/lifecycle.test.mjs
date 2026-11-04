@@ -448,6 +448,8 @@ test("chat tabs start from UI conversations, then restore exactly what the scree
     id: "first", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
     text: "hi", status: "evaluated", context: false, receivedAt: oldTime,
   });
+  assert.deepEqual(f.engine.snapshot().chatTabs, { open: [], last: null }, "conversations idle for over a day are not reopened");
+  f.state.threads[0].updatedAt = new Date().toISOString();
   assert.deepEqual(f.engine.snapshot().chatTabs, { open: ["thread"], last: "thread" });
   await f.engine.saveChatTabs({ open: ["thread", "gone"], last: "gone" });
   assert.deepEqual(f.state.kv.chatTabs, { open: ["thread"], last: null }, "unknown threads are not persisted");

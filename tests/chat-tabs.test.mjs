@@ -51,8 +51,9 @@ test("pruning drops tabs whose threads were cleaned up", () => {
   assert.deepEqual(pruneChatTabs(tabs, new Set(["a"])), { open: ["a"], last: null });
 });
 
-test("initial tabs are the open conversations started from the UI, not IM or agent delegations", () => {
+test("initial tabs are recent open conversations started from the UI, not IM or agent delegations", () => {
   const thread = (id, createdAt, updatedAt, state = "active") => ({ id, state, createdAt, updatedAt });
+  const now = Date.parse("2026-01-10T00:00:00Z");
   const trigger = (threadId, kind, sender, receivedAt) => ({ threadId, kind, sender, receivedAt });
   const threads = [
     thread("ui-1", "2026-01-01", "2026-01-05"), thread("ui-2", "2026-01-02", "2026-01-03"),
@@ -64,8 +65,21 @@ test("initial tabs are the open conversations started from the UI, not IM or age
     trigger("ui-2", "manual", "user", "2026-01-02"), trigger("closed", "manual", "user", "2026-01-03"),
     trigger("im", "feishu", "ou_x", "2026-01-04"), trigger("agent", "manual", "agent:abc", "2026-01-05"),
   ];
-  assert.deepEqual(defaultChatTabs(threads, triggers), { open: ["ui-1", "ui-2"], last: "ui-1" });
-  assert.deepEqual(defaultChatTabs([], []), { open: [], last: null });
+  // 日期都在 now 之前 5 天以上:全部过旧。
+  assert.deepEqual(defaultChatTabs(threads, triggers, now), { open: [], last: null });
+  assert.deepEqual(defaultChatTabs(threads, triggers, Date.parse("2026-01-05T12:00:00Z")), { open: ["ui-1"], last: "ui-1" });
+  assert.deepEqual(defaultChatTabs(threads, triggers, Date.parse("2026-01-04T00:00:00Z")), { open: ["ui-1", "ui-2"], last: "ui-1" });
+  assert.deepEqual(defaultChatTabs([], [], now), { open: [], last: null });
+});
+
+test("initial tabs keep only the few most recently active conversations, in the order they were started", () => {
+  const now = Date.parse("2026-01-10T12:00:00Z");
+  const threads = [1, 2, 3, 4, 5, 6].map((n) => ({
+    id: `t${n}`, state: "active", createdAt: `2026-01-10T0${n}:00:00Z`, updatedAt: `2026-01-10T${String(12 - n).padStart(2, "0")}:00:00Z`,
+  }));
+  const triggers = threads.map((thread) => ({ threadId: thread.id, kind: "manual", sender: "user", receivedAt: thread.createdAt }));
+  // 最近更新的是 t1(11:00)… t4(08:00);t5、t6 被上限挤掉。
+  assert.deepEqual(defaultChatTabs(threads, triggers, now), { open: ["t1", "t2", "t3", "t4"], last: "t1" });
 });
 
 test("the count font follows Paseo's interface size like the host's own type ramp", () => {
