@@ -3,10 +3,17 @@ import { AccessibilityInfo, Animated, Platform, View, type ViewStyle } from "rea
 import type { Theme } from "./ui";
 import { startWebRotation, subscribeWebReducedMotion } from "./web";
 
+/**
+ * 状态点颜色取宿主 theme.ts 的 statusDot* 色带:点要比同排的文字徽标更亮才压得住行,
+ * 宿主侧栏状态点即用此带(PluginTheme 未暴露,故按 surface0 亮度在两套宿主值中二选)。
+ * 非活跃点宿主不用此带,而是 border 色,见 SidebarRouterMark。
+ */
 export function agentStatusColors(theme: Theme) {
   const hex = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})/i.exec(theme.colors.surface0);
   const dark = hex ? (0.299 * parseInt(hex[1], 16) + 0.587 * parseInt(hex[2], 16) + 0.114 * parseInt(hex[3], 16)) < 127.5 : false;
-  return dark ? { running: "#5caaf6", success: "#35c264" } : { running: "#268ae0", success: "#299f51" };
+  return dark
+    ? { running: "#5caaf6", success: "#35c264", warning: "#db932e", danger: "#f7796d" }
+    : { running: "#268ae0", success: "#299f51", warning: "#b37824", danger: "#f12e2f" };
 }
 
 /** 状态图形在 size 方框内的直径:与 better-paseo `statusMarkSize` 一致(16 → 12,14 → 10.5)。 */
