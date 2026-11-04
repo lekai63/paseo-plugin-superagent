@@ -1,5 +1,7 @@
 # paseo-plugin-superagent
 
+要求 Paseo daemon 与各端客户端均为 0.15.0 或更新版本。
+
 Paseo 的 Router/Worker 双层编排插件。按《Super-agent 设计探索》的架构思路,在 Paseo 原语之上实现事件驱动的 super-agent 编排层,**不依赖 DeepSeek Harness**:
 
 - **常驻 Router agent**(轻量模型)统一评估触发事件,只裁决、不执行;

@@ -1,6 +1,9 @@
 import { useEffect, useSyncExternalStore } from "react";
-import * as ReactNative from "react-native";
+// Paseo 0.15 eagerly copies namespace imports. Import only the modules we use,
+// otherwise loading this file also initializes unrelated native modules on iOS.
+import { NativeModules, Platform, TurboModuleRegistry } from "react-native";
 import { APP_SETTINGS_KEY, LEGACY_SETTINGS_KEY, defaultUiFontSize, resolveUiFontSize } from "../shared/host-font";
+import { readWebUiFontSize, subscribeWebAppearance } from "./web";
 
 /**
  * 跟随 Paseo 界面字号(Settings → Appearance)。宿主没有给插件字号 API,与 better-paseo 一样
@@ -13,7 +16,7 @@ import { APP_SETTINGS_KEY, LEGACY_SETTINGS_KEY, defaultUiFontSize, resolveUiFont
 
 type MultiGet = (keys: string[], callback: (errors?: unknown, result?: [string, string | null][]) => void) => void;
 
-const PLATFORM = ReactNative.Platform.OS;
+const PLATFORM = Platform.OS;
 const RECHECK_MS = 500;
 const TRAILING_MS = 600;
 
@@ -22,38 +25,22 @@ let checkedAt = -Infinity;
 let nativeInflight = false;
 let trailing: ReturnType<typeof setTimeout> | null = null;
 const listeners = new Set<() => void>();
-
-function webStorage(): Pick<Storage, "getItem"> | null {
-  try {
-    const storage = (globalThis as { localStorage?: Storage }).localStorage;
-    return storage && typeof storage.getItem === "function" ? storage : null;
-  } catch {
-    return null;
-  }
-}
-
-function readWeb(storage: Pick<Storage, "getItem">, key: string): string | null {
-  try {
-    return storage.getItem(key);
-  } catch {
-    return null;
-  }
-}
+let unsubscribeWeb: (() => void) | null = null;
 
 function nativeMultiGet(): MultiGet | null {
   if (PLATFORM !== "ios" && PLATFORM !== "android") return null;
-  const rn = ReactNative as unknown as {
-    TurboModuleRegistry?: { get?: (name: string) => { multiGet?: MultiGet } | null };
-    NativeModules?: { RNCAsyncStorage?: { multiGet?: MultiGet } };
-  };
   try {
-    const turbo = rn.TurboModuleRegistry?.get?.("RNCAsyncStorage");
+    const turbo = TurboModuleRegistry?.get?.("RNCAsyncStorage") as { multiGet?: MultiGet } | null;
     if (typeof turbo?.multiGet === "function") return turbo.multiGet.bind(turbo);
   } catch {
     // 新架构下模块未注册时 get 可能抛错,退回旧桥接。
   }
-  const legacy = rn.NativeModules?.RNCAsyncStorage;
-  return typeof legacy?.multiGet === "function" ? legacy.multiGet.bind(legacy) : null;
+  try {
+    const legacy = NativeModules?.RNCAsyncStorage as { multiGet?: MultiGet } | undefined;
+    return typeof legacy?.multiGet === "function" ? legacy.multiGet.bind(legacy) : null;
+  } catch {
+    return null;
+  }
 }
 
 function readNative(multiGet: MultiGet, key: string): Promise<string | null> {
@@ -78,9 +65,9 @@ function accept(next: number) {
 function check(now = Date.now()) {
   if (now - checkedAt < RECHECK_MS) return;
   checkedAt = now;
-  const storage = webStorage();
-  if (storage) {
-    accept(resolveUiFontSize(readWeb(storage, APP_SETTINGS_KEY), readWeb(storage, LEGACY_SETTINGS_KEY), PLATFORM));
+  const webFontSize = readWebUiFontSize();
+  if (webFontSize !== null) {
+    accept(webFontSize);
     return;
   }
   const multiGet = nativeMultiGet();
@@ -101,23 +88,14 @@ function trigger() {
   }, TRAILING_MS);
 }
 
-function onStorage(event: Event) {
-  const key = (event as StorageEvent).key;
-  if (key === null || key === APP_SETTINGS_KEY || key === LEGACY_SETTINGS_KEY) trigger();
-}
-
 function subscribe(listener: () => void) {
   listeners.add(listener);
-  const target = globalThis as Partial<Pick<Window, "addEventListener" | "removeEventListener">>;
-  if (listeners.size === 1 && typeof target.addEventListener === "function") {
-    target.addEventListener("focus", trigger);
-    target.addEventListener("storage", onStorage);
-  }
+  if (listeners.size === 1) unsubscribeWeb = subscribeWebAppearance(trigger);
   return () => {
     listeners.delete(listener);
-    if (listeners.size === 0 && typeof target.removeEventListener === "function") {
-      target.removeEventListener("focus", trigger);
-      target.removeEventListener("storage", onStorage);
+    if (listeners.size === 0) {
+      unsubscribeWeb?.();
+      unsubscribeWeb = null;
       if (trailing !== null) clearTimeout(trailing);
       trailing = null;
     }

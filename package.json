@@ -18,16 +18,17 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "0.14.0",
+    "@getpaseo/plugin": "0.15.0",
     "@tanstack/react-query": "^5.90.2",
     "@types/node": "^26.5.0",
     "@types/react": "~19.2.0",
+    "esbuild": "0.27.3",
     "react": "19.1.0",
     "react-native": "0.81.5",
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@getpaseo/client": "0.14.0",
+    "@getpaseo/client": "0.15.0",
     "@larksuiteoapi/node-sdk": "^1.76.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@openclaw-china/dingtalk": "^2026.4.24",

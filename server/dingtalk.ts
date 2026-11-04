@@ -1,4 +1,5 @@
 import { DWClient, TOPIC_ROBOT, type DWClientDownStream, type RobotTextMessage } from "dingtalk-stream";
+import { clearTimeout, setTimeout } from "node:timers";
 import { truncate, type TriggerOrigin } from "../shared/model";
 import type { ImSource, InboundMessage } from "./im";
 
@@ -57,17 +58,24 @@ export class DingtalkSource implements ImSource {
   async send(origin: TriggerOrigin, text: string): Promise<void> {
     // replyRef = 消息自带的 sessionWebhook(有过期时间,晚到回复可能失败)。
     if (!origin.replyRef) throw new Error("dingtalk reply missing sessionWebhook");
-    const response = await fetch(origin.replyRef, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ msgtype: "text", text: { content: text } }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok) {
-      throw new Error(`dingtalk webhook reply failed: HTTP ${response.status}`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+    timeout.unref();
+    try {
+      const response = await fetch(origin.replyRef, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ msgtype: "text", text: { content: text } }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`dingtalk webhook reply failed: HTTP ${response.status}`);
+      }
+      const result = await response.json() as { errcode?: number };
+      if (result.errcode !== 0) throw new Error(`dingtalk reply rejected (${result.errcode})`);
+    } finally {
+      clearTimeout(timeout);
     }
-    const result = await response.json() as { errcode?: number };
-    if (result.errcode !== 0) throw new Error(`dingtalk reply rejected (${result.errcode})`);
   }
 
   /** 服务端依赖回调 ACK 防重推(60s 未响应会重发)。 */

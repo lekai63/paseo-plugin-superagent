@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AccessibilityInfo, Animated, Platform, View, type ViewStyle } from "react-native";
 import type { Theme } from "./ui";
+import { startWebRotation, subscribeWebReducedMotion } from "./web";
 
 export function agentStatusColors(theme: Theme) {
   const hex = /^#([\da-f]{2})([\da-f]{2})([\da-f]{2})/i.exec(theme.colors.surface0);
@@ -20,10 +21,7 @@ export function RunningStatusRing({ color, size = 16 }: { color: string; size?: 
   const [reduced, setReduced] = useState(false);
   useEffect(() => {
     if (Platform.OS === "web") {
-      const query = window.matchMedia("(prefers-reduced-motion: reduce)");
-      const update = () => setReduced(query.matches);
-      update(); query.addEventListener("change", update);
-      return () => query.removeEventListener("change", update);
+      return subscribeWebReducedMotion(setReduced);
     }
     let mounted = true;
     // 查询失败时保持默认动画;未处理的拒绝会被宿主上报为异常(better-paseo 同款处理)。
@@ -36,11 +34,7 @@ export function RunningStatusRing({ color, size = 16 }: { color: string; size?: 
   useEffect(() => {
     if (reduced) return;
     if (Platform.OS === "web") {
-      const node = arc.current as HTMLElement | null;
-      if (!node?.animate) return;
-      const animation = node.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }], { duration: 900, iterations: Infinity });
-      animation.startTime = 0;
-      return () => animation.cancel();
+      return startWebRotation(arc.current);
     }
     // 判别实验(iOS 闪退排查):原生端先停用 Animated 循环,画静止圆弧。
     // 若闪退消失,则问题锁定在 useNativeDriver 动画链路;确认后再换安全实现。
