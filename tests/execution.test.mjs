@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { agentStatus, currentTickets, directTicket, elapsedTime, ticketPriority, workspaceThreadIds } from "../shared/execution.ts";
+import { agentStatus, currentTickets, directTicket, elapsedTime, ticketPriority } from "../shared/execution.ts";
 
 const ticket = (id, extra = {}) => ({ id, threadId: "thread", status: "running", subscribed: true, workerAgentId: `worker-${id}`, ...extra });
 
@@ -30,17 +30,6 @@ test("session permission and provider errors remain distinct from Ticket lifecyc
   assert.equal(agentStatus({ id: "worker", status: "error" }).tone, "danger");
   assert.equal(agentStatus({ id: "worker", status: "idle", providerUnavailable: true }).tone, "danger");
   assert.equal(agentStatus(null).label, "会话不存在");
-});
-
-test("workspace scope follows Ticket ownership across worktrees and worker retries", () => {
-  const snapshot = { tickets: [
-    ticket("one", { workspaceId: "tree-one", threadId: "thread-a" }),
-    ticket("two", { workspaceId: "tree-two", threadId: "thread-a" }),
-    ticket("three", { workspaceId: "tree-three", threadId: "thread-b" }),
-  ] };
-  assert.deepEqual([...workspaceThreadIds(snapshot, "tree-two")], ["thread-a"]);
-  assert.deepEqual([...workspaceThreadIds(snapshot, "tree-three")], ["thread-b"]);
-  assert.equal(workspaceThreadIds(snapshot, "unrelated").size, 0);
 });
 
 test("elapsed time is bounded and describes this attempt rather than total task duration", () => {

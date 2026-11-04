@@ -213,6 +213,50 @@ export const RouterVerdictSchema = z.object({
 });
 export type RouterVerdict = z.infer<typeof RouterVerdictSchema>;
 
+/** 照抄提示词 JSON 示例产生的占位值:整个字符串仅由省略号/句点/空白组成("..."、"…" 等)。 */
+const PLACEHOLDER_ELLIPSIS = /^[\s.。…·]*$/;
+/** 票据 id 的占位值:可选 tkt_ 前缀加纯省略号/句点("tkt_...")。 */
+const PLACEHOLDER_TICKET_ID = /^(?:tkt_)?[\s.。…·]*$/;
+
+/**
+ * 裁决里的示例占位值检查。模型在多块自我纠正时可能照抄提示词里的动作示例
+ * ("title":"..."、"ticketId":"tkt_..."):这类裁决 schema 完全合法,执行出去却
+ * 是空标题/空指令/空目标的工单,必须当无效候选跳过。返回问题描述;全部为真实值时
+ * 返回 null。
+ */
+export function verdictPlaceholderIssue(verdict: RouterVerdict): string | null {
+  for (const action of verdict.actions) {
+    let field: string | null = null;
+    if (action.action === "dispatch") {
+      if (PLACEHOLDER_ELLIPSIS.test(action.title) || PLACEHOLDER_ELLIPSIS.test(action.mandate)) {
+        field = "dispatch title/mandate";
+      }
+    } else if (action.action === "steer") {
+      if (PLACEHOLDER_TICKET_ID.test(action.ticketId) || PLACEHOLDER_ELLIPSIS.test(action.text)) {
+        field = "steer ticketId/text";
+      }
+    } else if (action.action === "cancel" || action.action === "retry") {
+      if (PLACEHOLDER_TICKET_ID.test(action.ticketId)) field = `${action.action} ticketId`;
+    } else if (action.action === "reply") {
+      if (PLACEHOLDER_ELLIPSIS.test(action.reply)) field = "reply text";
+    }
+    if (field) return `router echoed the JSON example ("..." placeholder in ${field})`;
+  }
+  return null;
+}
+
+/**
+ * dispatch mandate 的派发兜底:剥除空白后仅剩省略号/句点的指令不可能承载任务。
+ * parseVerdict 已把此类裁决当无效候选拒绝;引擎在落盘工单前再拦一次,防未来解析
+ * 路径放宽后空工单再次漏网。返回问题描述;可用时返回 null。
+ */
+export function dispatchMandateIssue(mandate: string): string | null {
+  if (PLACEHOLDER_ELLIPSIS.test(mandate)) {
+    return 'dispatch mandate is only "..." — the router echoed the JSON example instead of a real instruction';
+  }
+  return null;
+}
+
 /**
  * 引擎待执行的动作记录:带副作用的裁决动作(steer/cancel/retry/stop)在消费触发时
  * 先落盘此记录,执行成功后移除;崩溃后由恢复流程按序补执行,失败重试有次数上限。

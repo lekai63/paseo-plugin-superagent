@@ -693,6 +693,22 @@ test("a fan-out verdict dispatches one worker per independent ask", async (t) =>
   assert.deepEqual(launched.map((ticket) => ticket.subscribed), [true, false]);
   assert.equal(f.state.triggers[0].status, "evaluated");
   assert.equal(f.state.threads[0].state, "active");
+  // 成功裁决保留截断的原始回复,事后可从决策审计 Router 实际输出。
+  assert.ok(f.state.decisions[0].raw.includes("do the first thing"));
+});
+
+test("a placeholder dispatch mandate is recorded unparsed and the trigger stays pending", async (t) => {
+  const f = fixture(t, "completed");
+  pendingTrigger(f.state);
+  f.controls.verdict = { actions: [{ action: "dispatch", title: "...", mandate: "..." }] };
+  await f.engine.runEval("thread");
+  const decision = f.state.decisions.at(-1);
+  assert.equal(decision.outcome, "unparsed");
+  assert.match(decision.rationale, /placeholder/);
+  assert.ok(decision.raw.includes("mandate"));
+  // 整批触发保留 pending 供 watchdog 重试;不产生空工单。
+  assert.equal(f.state.triggers[0].status, "pending");
+  assert.equal(f.state.tickets.filter((ticket) => ticket.title === "...").length, 0);
 });
 
 test("a Router steer action reaches the ticket's worker and revives a waiting one", async (t) => {

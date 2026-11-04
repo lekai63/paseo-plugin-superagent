@@ -7,6 +7,7 @@ import { directTicket } from "../shared/execution";
 import { recentResults, threadResult } from "../shared/results";
 import { defaultChatTabs, pruneChatTabs, type ChatTabs } from "../shared/chat-tabs";
 import {
+  dispatchMandateIssue,
   newId,
   truncate,
   SUBSCRIBED_STATUSES,
@@ -574,16 +575,29 @@ export class SuperagentEngine {
       state.threads.find((t) => t.id === threadId)?.state !== "active" ||
       batch.some((trigger) => state.triggers.find((t) => t.id === trigger.id)?.status !== "pending")
     ) return;
-    if ("error" in parsed) {
+    const recordUnparsed = async (reason: string) => {
       this.evalFailures.set(threadId, (this.evalFailures.get(threadId) ?? 0) + 1);
       await this.store.update((next) => {
         next.decisions.push(
           newDecision(threadId, batch.map((t) => t.id), "unparsed", {
-            rationale: parsed.error,
+            rationale: reason,
             raw: truncate(replyText, 1200),
           }),
         );
       });
+    };
+    if ("error" in parsed) {
+      await recordUnparsed(parsed.error);
+      return;
+    }
+    // dispatch 兜底:mandate 仅剩省略号时按解析失败处理(parseVerdict 已拒绝此类候选,
+    // 此处防解析路径放宽后空工单漏网),整批触发同样保留 pending 供重试。
+    const mandateBlock = parsed.verdict.actions
+      .filter((action): action is Extract<RouterAction, { action: "dispatch" }> => action.action === "dispatch")
+      .map((action) => dispatchMandateIssue(action.mandate))
+      .find((issue): issue is string => issue !== null);
+    if (mandateBlock) {
+      await recordUnparsed(mandateBlock);
       return;
     }
     this.evalFailures.delete(threadId);
@@ -651,6 +665,9 @@ export class SuperagentEngine {
       parts: splitImReply(fullReply, this.settingsValues.imReplyMaxChars), nextPart: 0,
       status: "pending" as const, createdAt: decidedAt, updatedAt: decidedAt,
     } : null;
+
+    // 成功裁决也留一份截断的原始回复,挂在批内首条决策上:格式/占位类问题事后可审计。
+    decisions[0].raw = truncate(replyText, 1200);
 
     this.routerSessionsSeen.add(routerAgentId);
     await this.store.update((next) => {

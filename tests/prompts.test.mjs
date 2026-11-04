@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { composeEvalPrompt, parseVerdict } from "../server/router.ts";
 import { composeWorkerPrompt, taskDirectory } from "../server/workers.ts";
-import { emptyState } from "../shared/model.ts";
+import { dispatchMandateIssue, emptyState, verdictPlaceholderIssue } from "../shared/model.ts";
 import { MAX_ROUTER_INSTRUCTIONS_CHARS, SETTINGS_DEFAULTS, superagentSettings } from "../shared/settings.ts";
 
 // ACP providers receive initialization in their first user turn; subsequent turns only carry events.
@@ -217,4 +217,61 @@ test("parseVerdict normalizes legacy single-decision verdicts", () => {
     { action: "dispatch", title: "T", mandate: "m", unsubscribe: true },
     { action: "reply", reply: "on it" },
   ]);
+});
+
+// 模型多块自我纠正的回复形态:首个围栏块结构错误,第二个围栏块照抄提示词示例的
+// 占位值("..." / "tkt_..."),真正的裁决反而是围栏外的裸 JSON(线上实际事故)。
+
+test("parseVerdict rescues the bare final JSON after a broken block and an example-echo block", () => {
+  const reply = [
+    "```json",
+    '{"actions":[{"action":"dispatch","title":"采集","mandate":"完整指令",},{"action":"oops"}],"profile":"p"}',
+    "```",
+    "Wait — I need to fix the JSON structure. Let me correct:",
+    "```json",
+    '{"actions":[{"action":"dispatch","title":"...","mandate":"...","profile":"p","unsubscribe":false}]}',
+    "```",
+    "Replying with the corrected block:",
+    '{"actions":[{"action":"dispatch","title":"采集","mandate":"完整指令","profile":"p","unsubscribe":false}]}',
+  ].join("\n");
+  const parsed = parseVerdict(reply);
+  assert.ok(!("error" in parsed), `expected a verdict, got: ${"error" in parsed ? parsed.error : ""}`);
+  assert.equal(parsed.verdict.actions.length, 1);
+  assert.equal(parsed.verdict.actions[0].mandate, "完整指令");
+});
+
+test("parseVerdict keeps trying earlier candidates after a schema failure", () => {
+  const reply = '```json\n{"actions":[{"action":"ignore"}]}\n```\nsecond try:\n```json\n{"actions":[]}\n```';
+  const parsed = parseVerdict(reply);
+  assert.ok(!("error" in parsed));
+  assert.equal(parsed.verdict.actions[0].action, "ignore");
+});
+
+test("parseVerdict rejects verdicts whose values are example placeholders", () => {
+  const dispatch = parseVerdict('```json\n{"actions":[{"action":"dispatch","title":"...","mandate":"..."}]}\n```');
+  assert.ok("error" in dispatch);
+  assert.match(dispatch.error, /placeholder/);
+
+  const steer = parseVerdict('{"actions":[{"action":"steer","ticketId":"tkt_...","text":"hi there for real"}]}');
+  assert.ok("error" in steer);
+  assert.match(steer.error, /placeholder/);
+
+  // 占位块被跳过后,若没有其他候选,错误要同时携带占位与解析两段原因。
+  const lone = parseVerdict('{"actions":[{"action":"reply","reply":"..."}]}');
+  assert.ok("error" in lone);
+  assert.match(lone.error, /placeholder/);
+});
+
+test("placeholder checks accept terse but real values and catch ellipsis-only ones", () => {
+  assert.equal(dispatchMandateIssue("do the job"), null);
+  assert.equal(dispatchMandateIssue("修复登录问题"), null);
+  assert.ok(dispatchMandateIssue("..."));
+  assert.ok(dispatchMandateIssue("。。。"));
+  assert.ok(dispatchMandateIssue(" … . "));
+  assert.equal(verdictPlaceholderIssue({ actions: [{ action: "ignore" }] }), null);
+  assert.equal(
+    verdictPlaceholderIssue({ actions: [{ action: "dispatch", title: "T", mandate: "m" }] }),
+    null,
+  );
+  assert.ok(verdictPlaceholderIssue({ actions: [{ action: "retry", ticketId: "tkt_..." }] }));
 });

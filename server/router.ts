@@ -1,6 +1,6 @@
 import type { PaseoApi, PaseoAgent, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { SuperagentState, Thread, Ticket, Trigger, Decision } from "../shared/model";
-import { newId, truncate, ROUTER_ACTION_LIMIT, type RouterVerdict, RouterVerdictSchema } from "../shared/model";
+import { newId, truncate, verdictPlaceholderIssue, ROUTER_ACTION_LIMIT, type RouterVerdict, RouterVerdictSchema } from "../shared/model";
 
 /**
  * Router 层:一个常驻 Paseo agent(轻量模型),只做语义裁决,不执行任务。
@@ -320,20 +320,73 @@ function threadWindow(state: SuperagentState, threadId: string, currentEvents: T
 }
 
 /**
- * 从 Router 回复中提取最后一个 ```json 块并校验;失败时退回首个平衡对象。
- * Router 会话有记忆,改版后仍可能延续旧的单裁决格式({decision:...}),先归一再校验。
+ * 从文本中按出现顺序提取顶层平衡的 {...} 片段(感知字符串字面量,忽略其中的花括号)。
+ * 模型自我纠正时,最终裁决可能是不带围栏的裸 JSON,且前后还有别的 JSON 块与说明文字,
+ * 只有逐个扫描片段才能把它捞出来(首尾切片法会跨越所有块,永远解析失败)。
+ */
+function balancedJsonSpans(text: string): string[] {
+  const spans: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index++) {
+    const ch = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      if (depth === 0) start = index;
+      depth++;
+    } else if (ch === "}" && depth > 0) {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        spans.push(text.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+  return spans;
+}
+
+/**
+ * 从 Router 回复中提取裁决:围栏 ```json 块从最后往前试(越靠后越可能是修正结果),
+ * 再补充全文里的顶层 {...} 片段(倒序)兜住不带围栏的裸 JSON。
+ * 单个候选解析或校验失败不终止尝试:模型多块自我纠正时,靠前的块可能结构错误、
+ * 靠后的围栏块可能只是照抄示例的占位裁决;通过 schema 但含 "..." 占位值的候选
+ * (verdictPlaceholderIssue)同样跳过。全部候选失败时汇总原因。
  */
 export function parseVerdict(replyText: string): { verdict: RouterVerdict } | { error: string } {
   const fenced = [...replyText.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1]);
-  const candidates = fenced.length > 0 ? fenced.reverse() : [replyText];
+  const candidates = [...fenced.reverse(), ...balancedJsonSpans(replyText).reverse()];
+  const errors: string[] = [];
+  const tried = new Set<string>();
   for (const candidate of candidates) {
+    const key = candidate.trim();
+    if (!key || tried.has(key)) continue;
+    tried.add(key);
     const parsed = tryJson(candidate);
     if (parsed === undefined) continue;
     const result = RouterVerdictSchema.safeParse(normalizeVerdictShape(parsed));
-    if (result.success) return { verdict: result.data };
-    return { error: `verdict schema: ${result.error.message}` };
+    if (result.success) {
+      const placeholder = verdictPlaceholderIssue(result.data);
+      if (placeholder) {
+        errors.push(placeholder);
+        continue;
+      }
+      return { verdict: result.data };
+    }
+    errors.push(`verdict schema: ${truncate(result.error.message, 300)}`);
   }
-  return { error: "no parsable JSON decision block in router reply" };
+  const summary = errors.slice(0, 4).join("; ");
+  return {
+    error: errors.length > 0 ? summary : "no parsable JSON decision block in router reply",
+  };
 }
 
 /** 旧版 {decision:...} 单裁决包成单元素 actions;旧 dispatch 附带的 reply 拆成独立 reply 动作。 */
