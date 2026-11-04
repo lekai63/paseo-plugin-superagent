@@ -1,9 +1,8 @@
-import type { PluginClientContext, PluginScreenProps, PluginSidebarItemProps, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import type { PluginClientContext, PluginScreenProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { ChatScreen } from "./client/chat-screen";
 import type { SidebarTab } from "./client/chat-sidebar";
 import { SuperagentSettingsScreen } from "./client/settings-screen";
-import { ExecutionPanel } from "./client/execution-panel";
 import { superagentDispatchRpc } from "./shared/rpc";
 import { useExecutionAgents, useSuperagentState } from "./client/query";
 import { sidebarWorkerCounts } from "./shared/sidebar-status";
@@ -54,21 +53,6 @@ export default function contribute(client: PluginClientContext) {
   client.addScreen({ id: "main", title: "Superagent", Component: MainScreen });
   client.addScreen({ id: "history", title: "Superagent", Component: HistoryAlias });
   client.addScreen({ id: "status", title: "Superagent", Component: StatusAlias });
-  client.addWorkspacePanel({
-    id: "execution",
-    title: "Superagent 执行视图",
-    icon: "Network",
-    locations: ["workspace", "explorer"],
-    Component: (props: PluginWorkspacePanelProps) => <ExecutionPanel {...props} openChat={openChat} />,
-  });
-  client.addCommandCenterItem({
-    id: "open-execution",
-    title: "Superagent 执行视图",
-    icon: "Network",
-    keywords: ["superagent", "router", "worker", "执行", "监控"],
-    context: "workspace",
-    onSelect({ openPanel }) { openPanel("execution"); },
-  });
   client.addSidebarHeaderItem({
     id: "main",
     title: "Superagent",

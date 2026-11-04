@@ -117,7 +117,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 2. **顶部标签**:同时进行的多段对话以标签并排,点击切换;`+` 开始新对话,发出第一条消息后它成为新标签。标签左侧显示状态:Router 评估或 Worker 执行中为旋转光环,已答复/完成为绿点,出错为红点。关闭标签(×)只是收起,对话仍在右侧栏「对话」里,从那里点开会重新成为标签;在侧栏手动关闭对话时,它的标签也一并关掉(关的是当前对话就切到相邻标签);IM 与 agent 委派产生的对话不会自动成为标签。标签列表与最后查看的对话保存在 daemon 状态里:离开 Superagent 页面或重启 app 后,直接回到最后查看的对话,没有打开的标签时才显示新对话。每个标签的输入框草稿各自保留。首次使用时,在界面里发起、仍进行中且最近 24 小时内有活动的对话(最多 4 个)自动成为标签。
 3. **消息流**:你的消息(含飞书/QQ 等 IM 消息与 agent 委派,标注来源)显示为右侧气泡,Router 答复以 Markdown 正文显示。派发、转向、取消、Worker 汇报、评估失败等编排动作显示为紧凑的可展开行:派发行跟随 Ticket 实时状态并可直接打开 Worker 会话,汇报行带两行预览、展开看完整原文。Router 评估中或 Worker 执行中时,消息流底部显示运行指示与用时。停在底部时自动跟随新消息,向上翻阅时不打断。
 4. **右侧栏**:「任务」展示 Router 状态与当前对话的全部 Worker(未选对话时为所有进行中的 Worker),权限等待/会话异常优先排列,可打开会话、取消直通(运行中)/标记完成(待命)、重试、取消 Ticket,以及重新评估、关闭对话;取消与关闭需要再点一次确认。「对话」列出进行中与已关闭的对话,可新建或打开为标签;进行中的对话可直接关闭:桌面悬停时,行内的更新时间处变为归档按钮(触屏在选中的对话上显示),再点一次确认即关闭(同时关掉它的标签),不必先打开对话;已关闭的对话默认收起,正在查看其中一段时默认展开。「状态」展示概览数字、组件配置、看门狗巡检与 IM 答复投递(失败可从断点补发)。宽屏时侧栏可收起;窄屏与手机上从标题栏按钮以弹层打开。
-5. **执行视图**:工作区标签页或右侧面板仍可添加「Superagent 执行视图」,以 Router → Worker 调用图展示当前工作,默认定位当前 Worker 工作区所属线程,可切换查看全部线程;「对话」「查看结果」跳到对话页的对应对话。命令中心的「Superagent 对话记录」「Superagent 运行状态」打开对话页并定位到侧栏对应标签。
+5. **命令中心**:「Superagent 对话记录」「Superagent 运行状态」打开对话页并定位到侧栏对应标签。
 6. **查看结果**:最新的 Router 答复与 Worker 汇报随线程落盘,线程关闭、Worker 会话被回收后仍在对话里可见;旧数据从保留的裁决/汇报还原。新汇报保存原文,Router 的评估输入仍按原有预算截断。对话页每次读取一个线程最近 120 条触发与裁决,更早的记录不显示。
 7. **侧栏状态**:Superagent 左侧使用跟随 Paseo 主题配色的固定 Network 图标。字样右侧以「蓝点 + 数字」显示运行中的 Worker 数(与 better-paseo「任务」行的计数同一套几何,两行上下对齐;数字随 Paseo 界面字号缩放),蓝点带旋转光环;「绿点 + 数字」显示本轮完成、待命的 Worker 数。任一数量为 0 时隐藏对应的点和数字,两者都为 0 或状态不可用时不显示右侧计数。根据当前 Worker 会话实时更新,已回收的会话不累计到完成数,尚未启动的排队任务不计作运行中的 Worker。系统开启减少动态效果时光环保持静止。
 
@@ -127,7 +127,6 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 - **评估串行**:单个 Router agent 全局串行评估(避免相互打断);高并发线程会排队。
 - **失败退避**:线程连续 3 次评估失败(unparsed/异常)后看门狗不再自动重排,线程徽标显示「评估失败」,需在对话右侧栏「任务」里点「重新评估」手动重试——防止 Router 持续劣化时烧 token 的失控循环。
 - **权限等待**:Worker 的权限请求走 Paseo 原生权限流(app 内批准);等待期间 Ticket 保持运行,不误判完成。
-- **执行视图刷新**:编排快照每 3 秒更新,可见 Worker 与 Router 会话每 5 秒读取,权限/attention 事件触发即时刷新;读取失败明确显示状态不可用。视图表达当前状态和路由关系,不提供完整调用回放或逐条消息传输动画。
 - **外部 Trigger 源**:飞书/QQ 已支持;GitHub/Slack 轮询源是下一扩展点(Paseo Hub 触发器亦可作为上游把事件投给 `superagent.dispatch`)。
 - **裁决解析**:Router 必须回 fenced JSON;解析失败记录 `unparsed` 决策并保留触发供重试,不做模型侧重问。
 - **取消语义**:取消 Ticket 归档 Worker agent,Ticket 独占的 worktree 工作区一并归档(soft delete,可从 History 找回);共享的持久工作区(「默认 workspace」/档位工作区)保留,继续服务 Router 与后续 Ticket。
@@ -141,6 +140,6 @@ npm install
 npm run typecheck
 ```
 
-目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用;execution 提供直通判定与调用图状态推导)、`server/`(store/router/workers/engine)、`client/`(对话页 chat-screen、顶部标签 chat-tab-bar 与其本机副本 chat-tabs-store、消息流 chat-messages、输入框 chat-composer、右侧栏 chat-sidebar、调用图 execution-view 与工作区面板 execution-panel、设置页 settings-screen,以及 ui.tsx 里的按钮/徽标/提示条等小型原语;`shared/chat.ts` 把线程的触发与裁决排成对话)。引擎细节见 `server/engine.ts` 头注。
+目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用;execution 提供直通判定与会话状态推导)、`server/`(store/router/workers/engine)、`client/`(对话页 chat-screen、顶部标签 chat-tab-bar 与其本机副本 chat-tabs-store、消息流 chat-messages、输入框 chat-composer、右侧栏 chat-sidebar、设置页 settings-screen,以及 ui.tsx 里的按钮/徽标/提示条等小型原语;`shared/chat.ts` 把线程的触发与裁决排成对话)。引擎细节见 `server/engine.ts` 头注。
 
 `npm test` 使用 Node.js 24+ 的内置测试运行器与现有 TypeScript 依赖,验证 Worker 续跑、投递失败回退、取消竞态、重启恢复与飞书连接清理;不连接真实 provider 或 IM 服务。

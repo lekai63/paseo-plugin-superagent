@@ -1,8 +1,8 @@
-import type { SuperagentSnapshot, Ticket } from "./model";
+import type { Ticket } from "./model";
 import { SUBSCRIBED_STATUSES } from "./model";
 import type { StatusLabel } from "./labels";
 
-/** 引擎、追加输入框与执行视图共用的直通条件。缺少会话的订阅仍参与计数。 */
+/** 引擎与追加输入框共用的直通条件。缺少会话的订阅仍参与计数。 */
 export function directTicket(tickets: readonly Ticket[]): Ticket | null {
   const subscribed = tickets.filter((ticket) => ticket.subscribed && SUBSCRIBED_STATUSES.includes(ticket.status));
   return subscribed.length === 1 && subscribed[0].workerAgentId ? subscribed[0] : null;
@@ -54,11 +54,6 @@ export function ticketPriority(ticket: Ticket, agent?: ExecutionAgent | null): n
   if (ticket.status === "pending") return 2;
   if (ticket.status === "waiting") return 3;
   return 4;
-}
-
-/** 由 Ticket 的 workspaceId 定位,适用于每个 Worker 独立 worktree。 */
-export function workspaceThreadIds(snapshot: SuperagentSnapshot, workspaceId: string): Set<string> {
-  return new Set(snapshot.tickets.filter((ticket) => ticket.workspaceId === workspaceId).map((ticket) => ticket.threadId));
 }
 
 export function elapsedTime(startedAt: string, now = Date.now()): string {
