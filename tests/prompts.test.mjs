@@ -5,7 +5,38 @@ import { composeWorkerPrompt, taskDirectory } from "../server/workers.ts";
 import { emptyState } from "../shared/model.ts";
 import { MAX_ROUTER_INSTRUCTIONS_CHARS, SETTINGS_DEFAULTS, superagentSettings } from "../shared/settings.ts";
 
-// ACP providers (e.g. zcode-acp) drop systemPrompt, so the role rules must travel in the prompts.
+// ACP providers receive initialization in their first user turn; subsequent turns only carry events.
+
+test("normal Router turns contain each user message once and omit stable instructions and history", () => {
+  const text = "请调研项目登录失败的原因，并整理验证结果。";
+  const thread = { id: "thread", title: text, summary: text };
+  const trigger = { id: "trigger", threadId: "thread", sender: "user", kind: "manual", text, status: "pending" };
+  const state = emptyState();
+  state.triggers.push({ ...trigger, id: "old", status: "evaluated", text: "Previous user request", receivedAt: "2020-01-01" });
+  const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null },
+    includeInstructions: false, includeHistory: false });
+  assert.equal(prompt.split(text).length - 1, 1);
+  assert.doesNotMatch(prompt, /Previous user request|"actions"|Router instructions|Worker profiles|summary:/);
+});
+
+test("a report is not repeated in the current Ticket or in recovery history", () => {
+  const text = "Worker 汇报：验证完成。";
+  const state = emptyState();
+  const trigger = { id: "report", threadId: "thread", sender: "worker:ticket", kind: "report", text, status: "pending" };
+  state.triggers.push(trigger);
+  state.tickets.push({ id: "ticket", threadId: "thread", title: "Task", status: "waiting", report: text });
+  const prompt = composeEvalPrompt({ thread: { id: "thread", title: "Task" }, batch: [trigger], state,
+    worker: { workingDir: "/repo", isolation: "worktree", issue: null }, includeInstructions: false, includeHistory: true });
+  assert.equal(prompt.split(text).length - 1, 1);
+});
+
+test("a distinct task title survives first-thread recovery while a message-derived title is suppressed", () => {
+  const context = { thread: { id: "thread", title: "API 服务", summary: null },
+    batch: [{ id: "trigger", sender: "user", kind: "manual", text: "修复启动问题。", status: "pending" }],
+    state: emptyState(), worker: { workingDir: "/repo", isolation: "worktree", issue: null }, includeInstructions: false };
+  assert.match(composeEvalPrompt(context), /title: API 服务/);
+  assert.doesNotMatch(composeEvalPrompt({ ...context, includeHistory: false }), /title:/);
+});
 
 test("Router preferences support old settings, multiline text and a bounded size", () => {
   assert.equal(SETTINGS_DEFAULTS.routerInstructions, "");
@@ -30,12 +61,12 @@ test("Router preferences enter the eval prompt without changing Worker instructi
   assert.ok(prompt.indexOf(rules) < prompt.indexOf("# Thread:"));
   assert.match(prompt, /keep the decision-only role, configured worker profiles, action limit/);
   assert.match(prompt, /These replace any preferences from earlier evaluations/);
-  assert.match(prompt, /Decide now\. Reply with exactly one fenced/);
+  assert.match(prompt, /Reply with exactly one fenced/);
   assert.equal(composeEvalPrompt({ ...context, routerInstructions: " \n " }), composeEvalPrompt(context));
   assert.doesNotMatch(composeWorkerPrompt({ id: "ticket", title: "test", mandate: "work" }, "/repo", "worktree"), /面向用户使用中文/);
 });
 
-test("every Router eval prompt carries the decision-only rules before the thread", () => {
+test("Router bootstrap carries the decision-only rules before the thread", () => {
   const state = emptyState();
   const thread = {
     id: "thread", key: "manual:k", title: "test", state: "active", summary: null,
@@ -54,7 +85,7 @@ test("every Router eval prompt carries the decision-only rules before the thread
   assert.match(prompt, /If answering would need a lookup, dispatch instead/);
   assert.match(prompt, /\{"actions":\[\.\.\.\]\}/);
   assert.match(prompt, /\{"actions":\[\{"action":"steer","ticketId":"tkt_\.\.\./);
-  assert.ok(prompt.indexOf("You are the Router") < prompt.indexOf("# Thread: test"));
+  assert.ok(prompt.indexOf("You are the Router") < prompt.indexOf("# Thread: thread"));
   assert.match(prompt, /## Worker environment\nbase directory: \/repo\nisolation: worktree/);
   assert.doesNotMatch(prompt, /PROBLEM:/);
 

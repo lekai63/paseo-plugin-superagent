@@ -58,6 +58,8 @@ function fixture(t, status = "running", subscribed = true) {
     verdict: { decision: "reply", reply: "done" },
     isGit: true,
     instructionFiles: [],
+    routerSessionId: null,
+    routerTimeline: async () => ({ entries: [] }),
     /** worktree 创建后工作区 descriptor 报告的实际分支;null 表示未报告(退回请求名)。 */
     workspaceBranch: null,
   };
@@ -66,7 +68,9 @@ function fixture(t, status = "running", subscribed = true) {
   const ref = (id) => {
     if (!handles.has(id)) handles.set(id, {
       id,
-      refresh: async () => ({ agent: { status: id === "router" ? "idle" : "running", archivedAt: null } }),
+      refresh: async () => ({ agent: { status: id === "router" ? "idle" : "running", archivedAt: null,
+        persistence: id.includes("router") && controls.routerSessionId ? { sessionId: controls.routerSessionId } : null } }),
+      current: () => ({ persistence: controls.routerSessionId ? { sessionId: controls.routerSessionId } : null }),
       send: async (text, options) => {
         calls.sends.push({ id, text, options });
         await controls.send(text, options);
@@ -81,7 +85,7 @@ function fixture(t, status = "running", subscribed = true) {
         finishes.push(finish);
         return finish.promise;
       },
-      timeline: { refetch: () => controls.timeline() },
+      timeline: { refetch: () => id.includes("router") ? controls.routerTimeline() : controls.timeline() },
       archive: async () => { calls.archives.push(id); },
     });
     return handles.get(id);
@@ -146,6 +150,156 @@ function pendingTrigger(state) {
     text: "stop", status: "pending", context: false, receivedAt: oldTime,
   });
 }
+
+async function evaluateRouter(f, text = "new event") {
+  f.state.triggers.push({
+    id: `event-${f.state.triggers.length}`, threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
+    text, status: "pending", context: false, receivedAt: new Date().toISOString(),
+  });
+  await f.engine.runEval("thread");
+  return f.calls.prompts.at(-1);
+}
+
+test("ACP Router bootstraps once, then sends only new events without duplicate user text", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.kv.routerAgentId = null;
+  f.values.routerProvider = "zcode-acp/builtin:plan\\GLM";
+  f.controls.verdict = { actions: [{ action: "ignore" }] };
+  const text = "这条用户消息不能在标题里再出现一次。";
+  f.state.threads[0].title = text;
+  f.state.threads[0].summary = text;
+  const first = await evaluateRouter(f, text);
+  assert.equal(f.calls.routerCreates[0].config.systemPrompt, undefined);
+  assert.match(first, /do NOT call any tools/);
+  assert.equal(first.split(text).length - 1, 1);
+  const second = await evaluateRouter(f, "second event");
+  assert.match(second, /second event/);
+  assert.doesNotMatch(second, /Superagent Router instructions|"actions"|## Worker environment|Recent thread history|这条用户消息/);
+  assert.equal(f.calls.routerCreates.length, 1);
+});
+
+test("a new native Router receives its rules as systemPrompt rather than repeating them in user turns", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.kv.routerAgentId = null;
+  f.values.routerInstructions = "用中文回答。";
+  const prompt = await evaluateRouter(f, "first event");
+  const system = f.calls.routerCreates[0].config.systemPrompt;
+  assert.match(system, /do NOT call any tools/);
+  assert.match(system, /用中文回答/);
+  assert.match(system, /"action":"dispatch"/);
+  assert.doesNotMatch(prompt, /Superagent Router instructions|用中文回答|"actions"/);
+  assert.match(prompt, /first event/);
+});
+
+test("configuration changes are sent once and temporary directory issues do not resend static rules", async (t) => {
+  const f = fixture(t, "waiting");
+  await evaluateRouter(f);
+  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
+  f.controls.settingsChanged({ status: "ready", values: { ...f.values, routerInstructions: "报告先写结论。" } });
+  assert.match(await evaluateRouter(f), /报告先写结论/);
+  assert.doesNotMatch(await evaluateRouter(f), /报告先写结论|Superagent Router instructions/);
+  f.controls.isGit = false;
+  const unavailable = await evaluateRouter(f);
+  assert.match(unavailable, /PROBLEM:/);
+  assert.doesNotMatch(unavailable, /Superagent Router instructions/);
+  f.controls.isGit = true;
+  const ready = await evaluateRouter(f);
+  assert.match(ready, /Worker environment: ready/);
+  assert.doesNotMatch(ready, /PROBLEM:|Superagent Router instructions/);
+});
+
+test("restoring the same native session across engine restart reuses the persisted initialization cursor", async (t) => {
+  const f = fixture(t, "waiting");
+  f.controls.routerSessionId = "session-stable";
+  await evaluateRouter(f);
+  Object.assign(f.state, SuperagentStateSchema.parse(JSON.parse(JSON.stringify(f.state))));
+  const restored = new SuperagentEngine(f.engine.store, {
+    subscribe: () => {}, read: async () => ({ status: "ready", values: f.values }),
+  });
+  restored.paseo = f.engine.paseo;
+  restored.workingDirProbe = f.engine.workingDirProbe;
+  t.after(() => restored.stop());
+  await setImmediate();
+  const prompt = await evaluateRouter({ ...f, engine: restored }, "after restart");
+  assert.match(prompt, /after restart/);
+  assert.doesNotMatch(prompt, /Superagent Router instructions|Recent thread history/);
+});
+
+test("native session replacement and observed compaction restore rules and history once", async (t) => {
+  const f = fixture(t, "waiting");
+  f.controls.routerSessionId = "session-one";
+  await evaluateRouter(f, "original event");
+  f.controls.routerSessionId = "session-two";
+  const replaced = await evaluateRouter(f, "session replaced");
+  assert.match(replaced, /Superagent Router instructions/);
+  assert.match(replaced, /original event/);
+  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
+  f.controls.routerTimeline = async () => ({ entries: [{ seqStart: 20, item: { type: "compaction", status: "completed" } }] });
+  assert.match(await evaluateRouter(f), /Superagent Router instructions/);
+  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
+});
+
+test("unseen direct-to-Worker context reaches Router exactly once without replaying old thread history", async (t) => {
+  const f = fixture(t, "waiting");
+  await evaluateRouter(f);
+  f.state.triggers.push({ ...f.state.triggers[0], id: "direct-followup", status: "delivered", text: "追加要求：输出中文报告。" });
+  const next = await evaluateRouter(f, "worker finished");
+  assert.match(next, /already delivered directly to Workers \(do not dispatch again\)/);
+  assert.equal(next.split("追加要求：输出中文报告。").length - 1, 1);
+  assert.doesNotMatch(await evaluateRouter(f), /追加要求|Recent thread history/);
+});
+
+test("a new thread gets recovery context without resending the Router protocol", async (t) => {
+  const f = fixture(t, "waiting");
+  await evaluateRouter(f);
+  f.state.threads.push({ ...f.state.threads[0], id: "thread-other", key: "manual:other", summary: "Other thread summary" });
+  f.state.triggers.push({ ...f.state.triggers[0], id: "other-event", threadId: "thread-other", status: "pending", text: "Other thread request" });
+  await f.engine.runEval("thread-other");
+  const prompt = f.calls.prompts.at(-1);
+  assert.match(prompt, /# Thread: thread-other/);
+  assert.match(prompt, /Other thread summary/);
+  assert.doesNotMatch(prompt, /Superagent Router instructions/);
+});
+
+test("invalid Router output does not mark a bootstrap as successfully applied", async (t) => {
+  const f = fixture(t, "waiting");
+  f.controls.verdict = { invalid: "result" };
+  await evaluateRouter(f);
+  assert.equal(f.state.kv.routerPromptState, undefined);
+  f.controls.verdict = { actions: [{ action: "ignore" }] };
+  assert.match(await evaluateRouter(f), /Superagent Router instructions/);
+});
+
+test("invalid continuation output triggers one context repair for an already initialized Router", async (t) => {
+  const f = fixture(t, "waiting");
+  await evaluateRouter(f);
+  f.controls.verdict = { invalid: true };
+  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
+  f.controls.verdict = { actions: [{ action: "ignore" }] };
+  assert.match(await evaluateRouter(f), /Superagent Router instructions/);
+  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
+});
+
+test("direct context is bounded and older omitted messages do not leak into later evaluations", async (t) => {
+  const f = fixture(t, "waiting");
+  await evaluateRouter(f);
+  for (let i = 0; i < 12; i++) f.state.triggers.push({ ...f.state.triggers[0], id: `direct-${i}`, status: "delivered",
+    text: `context-${i}: ${"x".repeat(2000)}`, receivedAt: `2026-01-01T00:00:${String(i).padStart(2, "0")}Z` });
+  const prompt = await evaluateRouter(f);
+  assert.equal(prompt.match(/id: direct-/g).length, 8);
+  assert.doesNotMatch(prompt, /context-0:/);
+  assert.match(prompt, /context-11:/);
+  assert.doesNotMatch(await evaluateRouter(f), /context-\d+:/);
+});
+
+test("uncertain compaction state causes a conservative bootstrap rather than silently dropping rules", async (t) => {
+  const f = fixture(t, "waiting");
+  await evaluateRouter(f);
+  f.controls.routerTimeline = async () => { throw new Error("timeline unavailable"); };
+  assert.match(await evaluateRouter(f), /Superagent Router instructions/);
+  f.controls.routerTimeline = async () => ({ entries: [] });
+  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
+});
 
 test("IM sends the complete long reply sequentially and persists each acknowledged part", async (t) => {
   const f = fixture(t, "waiting");

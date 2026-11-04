@@ -1,4 +1,5 @@
 import type { PaseoApi } from "@getpaseo/client";
+import { createHash } from "node:crypto";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
 import { directTicket } from "../shared/execution";
@@ -23,7 +24,18 @@ import {
   superagentSettings,
   type SuperagentSettingsValues,
 } from "../shared/settings";
-import { composeEvalPrompt, ensureRouter, newDecision, parseVerdict, readLastAssistantMessage } from "./router";
+import {
+  composeEvalPrompt,
+  composeRouterInstructions,
+  ensureRouter,
+  newDecision,
+  parseVerdict,
+  readLastAssistantMessage,
+  routerCompactionSeq,
+  routerSessionId,
+  routerUsesSystemPrompt,
+  type RouterWorkerEnvironment,
+} from "./router";
 import { harvestReport, launchWorker, retireWorker } from "./workers";
 import { matchWorkerProfile, resolveProviderSelection } from "./providers";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
@@ -139,6 +151,8 @@ export class SuperagentEngine {
   private sendingDeliveries = new Set<string>();
   /** 已提示过的 provider 设置纠正(每个设置值只告警一次)。 */
   private providerNotes = new Set<string>();
+  /** 无原生 session ID 的 provider,至少在本引擎生命周期内复用初始化状态。 */
+  private routerSessionsSeen = new Set<string>();
   /** Worker 基础目录检查(可替换,便于测试)与缓存结果。 */
   workingDirProbe: WorkingDirProbe = nodeWorkingDirProbe;
   private workingDirIssue: string | null = null;
@@ -488,7 +502,20 @@ export class SuperagentEngine {
       throw new Error("working directory is not configured — set it in the Superagent screen");
     }
     if (!routerProvider) throw new Error("no available provider for the router");
-    const router = await ensureRouter(paseo, state, routerProvider, this.settingsValues.workingDir);
+    const worker: RouterWorkerEnvironment = {
+      workingDir: this.settingsValues.workingDir,
+      isolation: this.settingsValues.workerIsolation,
+      issue: await this.refreshWorkingDirIssue(),
+      instructionFiles: await this.sharedInstructionFiles(),
+      defaultWorker: {
+        provider: this.settingsValues.workerProvider.trim() || state.kv.workerProvider || null,
+        description: this.settingsValues.workerDescription,
+      },
+      profiles: this.settingsValues.workerProfiles,
+    };
+    const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions);
+    const configHash = createHash("sha256").update(instructions).digest("hex");
+    const router = await ensureRouter(paseo, state, routerProvider, this.settingsValues.workingDir, instructions);
     if ("error" in router) throw new Error(router.error);
     const routerAgentId = router.agentId;
     if (state.kv.routerAgentId !== routerAgentId || state.kv.routerProvider !== routerProvider) {
@@ -498,24 +525,28 @@ export class SuperagentEngine {
       });
     }
 
-    // 2. 一次 LLM 调用评估整批(Inline & Spill 组装的提示词)。
-    const workerIssue = await this.refreshWorkingDirIssue();
+    // 2. 按原生会话复用规则与已读事件;仅初始化/配置变化/压缩恢复时补齐。
+    const remembered = state.kv.routerPromptState;
+    const compactionSeq = await routerCompactionSeq(router.handle);
+    const sameSession = !router.created && remembered?.agentId === routerAgentId
+      && (!remembered.sessionId || !router.sessionId || remembered.sessionId === router.sessionId)
+      && ((router.sessionId !== null && remembered.sessionId === router.sessionId) || this.routerSessionsSeen.has(routerAgentId));
+    const restoreContext = !sameSession || compactionSeq === null || compactionSeq > (remembered?.compactionSeq ?? 0)
+      || (this.evalFailures.get(threadId) ?? 0) > 0;
+    const unseenContext = state.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered"
+      && (restoreContext || !remembered?.triggerIds.includes(trigger.id)))
+      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+    const contextTriggers = unseenContext.slice(-8);
     const prompt = composeEvalPrompt({
       thread,
       batch,
       state,
       routerInstructions: this.settingsValues.routerInstructions,
-      worker: {
-        workingDir: this.settingsValues.workingDir,
-        isolation: this.settingsValues.workerIsolation,
-        issue: workerIssue,
-        instructionFiles: await this.sharedInstructionFiles(),
-        defaultWorker: {
-          provider: this.settingsValues.workerProvider.trim() || state.kv.workerProvider || null,
-          description: this.settingsValues.workerDescription,
-        },
-        profiles: this.settingsValues.workerProfiles,
-      },
+      worker,
+      includeInstructions: (restoreContext || remembered?.configHash !== configHash)
+        && !(router.created && routerUsesSystemPrompt(routerProvider)),
+      includeHistory: restoreContext || !remembered?.threadIds.includes(threadId),
+      contextTriggers,
     });
     const result = await router.handle.run(prompt, { timeoutMs: ROUTER_EVAL_TIMEOUT_MS });
     const replyText =
@@ -606,7 +637,16 @@ export class SuperagentEngine {
       status: "pending" as const, createdAt: decidedAt, updatedAt: decidedAt,
     } : null;
 
+    this.routerSessionsSeen.add(routerAgentId);
     await this.store.update((next) => {
+      next.kv.routerPromptState = {
+        agentId: routerAgentId, sessionId: routerSessionId(router.handle.current()) ?? router.sessionId, configHash,
+        compactionSeq: Math.max(compactionSeq ?? 0, sameSession ? remembered?.compactionSeq ?? 0 : 0),
+        threadIds: [...new Set([...(restoreContext ? [] : remembered?.threadIds ?? []), threadId])]
+          .filter((id) => next.threads.some((thread) => thread.id === id)),
+        triggerIds: [...new Set([...(restoreContext ? [] : remembered?.triggerIds ?? []), ...triggerIds, ...unseenContext.map((trigger) => trigger.id)])]
+          .filter((id) => next.triggers.some((trigger) => trigger.id === id)),
+      };
       if (delivery) next.imDeliveries.push(delivery);
       next.decisions.push(...decisions);
       next.tickets.push(...createdTickets);

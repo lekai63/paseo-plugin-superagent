@@ -239,6 +239,16 @@ export const ImDeliverySchema = z.object({
 });
 export type ImDelivery = z.infer<typeof ImDeliverySchema>;
 
+/** Router 原生会话已接收的配置与事件游标;不把正文重复塞回后续评估。 */
+const RouterPromptStateSchema = z.object({
+  agentId: z.string(),
+  sessionId: z.string().nullable(),
+  configHash: z.string(),
+  compactionSeq: z.number().int().nonnegative(),
+  threadIds: z.array(z.string()),
+  triggerIds: z.array(z.string()),
+});
+
 /** 整个持久化文件的形状。 */
 export const SuperagentStateSchema = z.object({
   version: z.literal(1),
@@ -246,6 +256,7 @@ export const SuperagentStateSchema = z.object({
     routerAgentId: z.string().nullish(),
     routerProvider: z.string().nullish(),
     workerProvider: z.string().nullish(),
+    routerPromptState: RouterPromptStateSchema.nullish(),
   }),
   threads: z.array(ThreadSchema),
   triggers: z.array(TriggerSchema),
