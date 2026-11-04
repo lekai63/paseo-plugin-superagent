@@ -8,6 +8,8 @@ import { space, toneColor, withAlpha, type Theme } from "./ui";
 
 const MIN_INPUT_HEIGHT = { web: 46, native: 30 } as const;
 const MAX_INPUT_HEIGHT = 200;
+/** 每个标签各自的未发送草稿;切换标签不会把一段对话里写了一半的话带到另一段。 */
+const drafts = new Map<string, string>();
 
 type WebKeyPressEvent = NativeSyntheticEvent<TextInputKeyPressEventData & {
   shiftKey?: boolean;
@@ -25,6 +27,7 @@ export interface ComposerHint {
 /**
  * 对话输入框:停靠在消息流下方,外观对齐 Paseo 的 composer(圆角 16 的卡片、
  * 右下角圆形发送键)。桌面 Web 上 Enter 发送、Shift+Enter 换行,组字中的回车不发送。
+ * 草稿按 draftKey 保存在本次 app 会话里;调用方切换对话时应以 draftKey 作为 key 重新挂载。
  */
 export function ChatComposer({
   theme,
@@ -32,6 +35,7 @@ export function ChatComposer({
   placeholder,
   hint,
   disabledReason,
+  draftKey,
   onSubmit,
 }: {
   theme: Theme;
@@ -40,10 +44,18 @@ export function ChatComposer({
   hint: ComposerHint;
   /** 有值时禁止发送并在提示位说明原因。 */
   disabledReason: string | null;
+  /** 草稿归属(宿主 + 对话);同一 key 再次挂载时恢复未发送的内容。 */
+  draftKey: string;
   /** 返回 false 表示发送失败,输入内容会恢复。 */
   onSubmit(text: string): Promise<boolean>;
 }) {
-  const [text, setText] = useState("");
+  const [text, setTextState] = useState(() => drafts.get(draftKey) ?? "");
+  const setText = (next: string | ((current: string) => string)) => setTextState((current) => {
+    const value = typeof next === "function" ? next(current) : next;
+    if (value) drafts.set(draftKey, value);
+    else drafts.delete(draftKey);
+    return value;
+  });
   const [busy, setBusy] = useState(false);
   const [focused, setFocused] = useState(false);
   const [contentHeight, setContentHeight] = useState(0);

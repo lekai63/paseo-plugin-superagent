@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ChatTabsSchema } from "./chat-tabs";
 
 /**
  * Superagent 领域模型 —— 对齐《Super-agent 设计探索》的事件驱动编排层,
@@ -257,6 +258,8 @@ export const SuperagentStateSchema = z.object({
     routerProvider: z.string().nullish(),
     workerProvider: z.string().nullish(),
     routerPromptState: RouterPromptStateSchema.nullish(),
+    /** 对话页打开着的标签;从未保存过时为空,快照按界面发起的对话给出初始标签。 */
+    chatTabs: ChatTabsSchema.nullish(),
   }),
   threads: z.array(ThreadSchema),
   triggers: z.array(TriggerSchema),
@@ -324,6 +327,8 @@ export const SuperagentSnapshotSchema = z.object({
     /** 当前正在评估的线程;仅运行时状态,不写入持久化文件。 */
     currentEvalThreadId: z.string().nullish(),
   }),
+  /** 对话页顶部标签(已去掉不存在的线程)。 */
+  chatTabs: ChatTabsSchema.nullish(),
 });
 export type SuperagentSnapshot = z.infer<typeof SuperagentSnapshotSchema>;
 

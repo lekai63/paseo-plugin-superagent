@@ -1,0 +1,137 @@
+import { useEffect, useSyncExternalStore } from "react";
+import * as ReactNative from "react-native";
+import { APP_SETTINGS_KEY, LEGACY_SETTINGS_KEY, defaultUiFontSize, resolveUiFontSize } from "../shared/host-font";
+
+/**
+ * 跟随 Paseo 界面字号(Settings → Appearance)。宿主没有给插件字号 API,与 better-paseo 一样
+ * 只读宿主持久化的 app settings:Web/桌面读 localStorage,iOS/Android 经宿主已链接的
+ * RNCAsyncStorage 读同一份 JSON;读不到时用平台默认。从不写入宿主存储。
+ *
+ * 宿主改外观后会给插件新的 theme,此时(以及窗口重新获得焦点、其他窗口改了设置时)
+ * 重新读一次;读取节流到 500ms,并在触发后补读一次,覆盖宿主异步写入稍晚落地的情况。
+ */
+
+type MultiGet = (keys: string[], callback: (errors?: unknown, result?: [string, string | null][]) => void) => void;
+
+const PLATFORM = ReactNative.Platform.OS;
+const RECHECK_MS = 500;
+const TRAILING_MS = 600;
+
+let uiFontSize = defaultUiFontSize(PLATFORM);
+let checkedAt = -Infinity;
+let nativeInflight = false;
+let trailing: ReturnType<typeof setTimeout> | null = null;
+const listeners = new Set<() => void>();
+
+function webStorage(): Pick<Storage, "getItem"> | null {
+  try {
+    const storage = (globalThis as { localStorage?: Storage }).localStorage;
+    return storage && typeof storage.getItem === "function" ? storage : null;
+  } catch {
+    return null;
+  }
+}
+
+function readWeb(storage: Pick<Storage, "getItem">, key: string): string | null {
+  try {
+    return storage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function nativeMultiGet(): MultiGet | null {
+  if (PLATFORM !== "ios" && PLATFORM !== "android") return null;
+  const rn = ReactNative as unknown as {
+    TurboModuleRegistry?: { get?: (name: string) => { multiGet?: MultiGet } | null };
+    NativeModules?: { RNCAsyncStorage?: { multiGet?: MultiGet } };
+  };
+  try {
+    const turbo = rn.TurboModuleRegistry?.get?.("RNCAsyncStorage");
+    if (typeof turbo?.multiGet === "function") return turbo.multiGet.bind(turbo);
+  } catch {
+    // 新架构下模块未注册时 get 可能抛错,退回旧桥接。
+  }
+  const legacy = rn.NativeModules?.RNCAsyncStorage;
+  return typeof legacy?.multiGet === "function" ? legacy.multiGet.bind(legacy) : null;
+}
+
+function readNative(multiGet: MultiGet, key: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      multiGet([key], (_errors, result) => {
+        const value = result?.[0]?.[1];
+        resolve(typeof value === "string" ? value : null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function accept(next: number) {
+  if (next === uiFontSize) return;
+  uiFontSize = next;
+  for (const listener of [...listeners]) listener();
+}
+
+function check(now = Date.now()) {
+  if (now - checkedAt < RECHECK_MS) return;
+  checkedAt = now;
+  const storage = webStorage();
+  if (storage) {
+    accept(resolveUiFontSize(readWeb(storage, APP_SETTINGS_KEY), readWeb(storage, LEGACY_SETTINGS_KEY), PLATFORM));
+    return;
+  }
+  const multiGet = nativeMultiGet();
+  if (!multiGet || nativeInflight) return;
+  nativeInflight = true;
+  void Promise.all([readNative(multiGet, APP_SETTINGS_KEY), readNative(multiGet, LEGACY_SETTINGS_KEY)])
+    .then(([current, legacy]) => accept(resolveUiFontSize(current, legacy, PLATFORM)))
+    .catch(() => {})
+    .finally(() => { nativeInflight = false; });
+}
+
+function trigger() {
+  check();
+  if (trailing !== null) return;
+  trailing = setTimeout(() => {
+    trailing = null;
+    check();
+  }, TRAILING_MS);
+}
+
+function onStorage(event: Event) {
+  const key = (event as StorageEvent).key;
+  if (key === null || key === APP_SETTINGS_KEY || key === LEGACY_SETTINGS_KEY) trigger();
+}
+
+function subscribe(listener: () => void) {
+  listeners.add(listener);
+  const target = globalThis as Partial<Pick<Window, "addEventListener" | "removeEventListener">>;
+  if (listeners.size === 1 && typeof target.addEventListener === "function") {
+    target.addEventListener("focus", trigger);
+    target.addEventListener("storage", onStorage);
+  }
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0 && typeof target.removeEventListener === "function") {
+      target.removeEventListener("focus", trigger);
+      target.removeEventListener("storage", onStorage);
+      if (trailing !== null) clearTimeout(trailing);
+      trailing = null;
+    }
+  };
+}
+
+function snapshot() {
+  check();
+  return uiFontSize;
+}
+
+/** 用户当前的 Paseo 界面字号(默认 Web 14、iOS/Android 15);传入宿主 theme,外观变更时重读。 */
+export function useHostUiFontSize(hostTheme: unknown): number {
+  const value = useSyncExternalStore(subscribe, snapshot, snapshot);
+  useEffect(() => { trigger(); }, [hostTheme]);
+  return value;
+}

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { defineRpc } from "@getpaseo/plugin";
 import { SuperagentSnapshotSchema } from "./model";
+import { ChatTabsSchema } from "./chat-tabs";
 
 /**
  * 插件 RPC 契约。客户端经 `useRpc` 调用;server/handlers.ts 实现同名 handler。
@@ -77,5 +78,12 @@ export const superagentCloseThreadRpc = defineRpc({
 export const superagentUnsubscribeRpc = defineRpc({
   name: "superagent.unsubscribe",
   input: z.object({ threadId: z.string(), ticketId: z.string() }),
+  output: OkSchema,
+});
+
+/** 对话页的标签列表与最后查看的对话;daemon 落盘,离开页面或重启 app 后恢复。 */
+export const superagentSaveChatTabsRpc = defineRpc({
+  name: "superagent.save_chat_tabs",
+  input: ChatTabsSchema,
   output: OkSchema,
 });

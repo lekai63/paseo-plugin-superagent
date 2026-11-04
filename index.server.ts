@@ -8,6 +8,7 @@ import {
   createForceEvalHandler,
   createRetryTicketHandler,
   createRetryImDeliveryHandler,
+  createSaveChatTabsHandler,
   createStateHandler,
   createUnsubscribeHandler,
 } from "./server/handlers";
@@ -25,6 +26,7 @@ import {
   superagentForceEvalRpc,
   superagentRetryTicketRpc,
   superagentRetryImDeliveryRpc,
+  superagentSaveChatTabsRpc,
   superagentStateRpc,
   superagentUnsubscribeRpc,
 } from "./shared/rpc";
@@ -58,6 +60,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(superagentRetryImDeliveryRpc, withPrime(createRetryImDeliveryHandler(engine)));
   server.handle(superagentCloseThreadRpc, withPrime(createCloseThreadHandler(engine)));
   server.handle(superagentUnsubscribeRpc, withPrime(createUnsubscribeHandler(engine)));
+  server.handle(superagentSaveChatTabsRpc, withPrime(createSaveChatTabsHandler(engine)));
 
   // agent 委派入口:插件自持的本地 MCP endpoint(superagent_dispatch 工具),
   // 经 session_open 注入给所有普通 agent。通道独立于宿主 "Paseo tools" 开关。

@@ -8,6 +8,7 @@ import {
   superagentForceEvalRpc,
   superagentRetryTicketRpc,
   superagentRetryImDeliveryRpc,
+  superagentSaveChatTabsRpc,
   superagentStateRpc,
   superagentUnsubscribeRpc,
 } from "../shared/rpc";
@@ -102,6 +103,20 @@ export function createUnsubscribeHandler(engine: SuperagentEngine) {
   ) => {
     try {
       await engine.unsubscribe(input.threadId, input.ticketId);
+      return { ok: true, error: null };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+  };
+}
+
+export function createSaveChatTabsHandler(engine: SuperagentEngine) {
+  return async (
+    input: RpcInput<typeof superagentSaveChatTabsRpc>,
+    _context: PluginHandlerContext,
+  ) => {
+    try {
+      await engine.saveChatTabs(input);
       return { ok: true, error: null };
     } catch (error) {
       return { ok: false, error: errorMessage(error) };

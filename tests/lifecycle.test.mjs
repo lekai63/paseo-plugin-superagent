@@ -442,6 +442,20 @@ test("steering an already running worker keeps its deadline and existing watcher
   assert.equal(f.calls.sends[0].options.activeTurnBehavior, "steer");
 });
 
+test("chat tabs start from UI conversations, then restore exactly what the screen saved", async (t) => {
+  const f = fixture(t);
+  f.state.triggers.push({
+    id: "first", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
+    text: "hi", status: "evaluated", context: false, receivedAt: oldTime,
+  });
+  assert.deepEqual(f.engine.snapshot().chatTabs, { open: ["thread"], last: "thread" });
+  await f.engine.saveChatTabs({ open: ["thread", "gone"], last: "gone" });
+  assert.deepEqual(f.state.kv.chatTabs, { open: ["thread"], last: null }, "unknown threads are not persisted");
+  await f.engine.saveChatTabs({ open: [], last: null });
+  assert.deepEqual(f.engine.snapshot().chatTabs, { open: [], last: null }, "closing every tab is not undone by the defaults");
+  assert.deepEqual(SuperagentStateSchema.parse(JSON.parse(JSON.stringify(f.state))).kv.chatTabs, { open: [], last: null });
+});
+
 test("the snapshot identifies the evaluating thread and clears it when evaluation settles", async (t) => {
   const f = fixture(t);
   const finish = deferred();

@@ -4,6 +4,7 @@ import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
 import { directTicket } from "../shared/execution";
 import { recentResults, threadResult } from "../shared/results";
+import { defaultChatTabs, pruneChatTabs, type ChatTabs } from "../shared/chat-tabs";
 import {
   newId,
   truncate,
@@ -1411,7 +1412,23 @@ export class SuperagentEngine {
         evalInFlight: this.evalInFlight,
         currentEvalThreadId: this.currentEvalThread,
       },
+      chatTabs: this.chatTabs(),
     };
+  }
+
+  /** 对话页标签:保存过就用保存的(去掉已清理的线程),否则取界面发起且进行中的对话。 */
+  chatTabs(): ChatTabs {
+    const state = this.store.get();
+    const saved = state.kv.chatTabs;
+    if (!saved) return defaultChatTabs(state.threads, state.triggers);
+    return pruneChatTabs(saved, new Set(state.threads.map((thread) => thread.id)));
+  }
+
+  async saveChatTabs(tabs: ChatTabs): Promise<void> {
+    await this.store.ready;
+    await this.store.update((next) => {
+      next.kv = { ...next.kv, chatTabs: pruneChatTabs(tabs, new Set(next.threads.map((thread) => thread.id))) };
+    });
   }
 
   // ------------------------------------------------------------- helpers

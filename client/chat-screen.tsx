@@ -5,10 +5,13 @@ import { useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, Loading, Modal, ScrollView, useToast } from "@getpaseo/plugin/client/ui";
 import type { SuperagentSnapshot } from "../shared/model";
 import { buildChatEntries } from "../shared/chat";
+import { closeChatTab, entryChatTab, openChatTab } from "../shared/chat-tabs";
 import { directTicket } from "../shared/execution";
 import { markdownPreview, relativeTime, threadStatus } from "../shared/labels";
 import { superagentDispatchRpc } from "../shared/rpc";
 import { ChatComposer, type ComposerHint } from "./chat-composer";
+import { ChatTabBar } from "./chat-tab-bar";
+import { useChatTabs } from "./chat-tabs-store";
 import { CHAT_MAX_WIDTH, ChatMessages, type WorkingState } from "./chat-messages";
 import { SIDEBAR_WIDTH, SidebarContent, SidebarTabs, type SidebarTab } from "./chat-sidebar";
 import { STATE_QUERY_KEY, useSuperagentState } from "./query";
@@ -17,7 +20,8 @@ import { Button, Notice, StatusBadge, fontSize, radius, space, type Theme } from
 /**
  * 主界面:像在 Paseo 项目里和 agent 对话一样和 Superagent 对话。
  * 左侧是当前对话(一个线程)的消息流与输入框,右侧栏放 Router/Worker、对话列表与运行状态;
- * 窄屏时右侧栏收进弹层。
+ * 窄屏时右侧栏收进弹层。同时进行的多段对话以顶部标签切换;不带线程打开页面时
+ * 直接回到最后查看的对话,没有打开着的对话才显示新对话。
  */
 
 export interface ChatScreenProps extends PluginScreenProps {
@@ -30,7 +34,6 @@ export interface ChatScreenProps extends PluginScreenProps {
 const DOCK_MIN_WIDTH = 800;
 /** 快照里每类记录的上限(与 engine.snapshot 一致),达到时提示只显示了最近的记录。 */
 const RECORD_LIMIT = 120;
-const HEADER_HEIGHT = 44;
 
 interface PendingMessage {
   text: string;
@@ -44,9 +47,14 @@ function panelParam(value: string | undefined): SidebarTab | null {
 
 export function ChatScreen(props: ChatScreenProps) {
   const { theme, layout, host, params, navigation, openSettings } = props;
-  const [threadId, setThreadId] = useState<string | null>(params.threadId || null);
+  const list = useSuperagentState(host.id, { includeClosed: true, omitRecords: true });
+  const { tabs, update: updateTabs } = useChatTabs(host.id, list.data?.chatTabs, Boolean(list.data), list.isError);
+  // undefined:标签还没读到,稍后进入最后查看的对话;null:新对话。
+  const [selected, setSelected] = useState<string | null | undefined>(() => params.threadId || (tabs ? entryChatTab(tabs) : undefined));
+  const threadId = selected ?? null;
+  const deciding = selected === undefined;
   const requestedPanel = panelParam(params.panel) ?? props.defaultPanel ?? null;
-  const [tab, setTab] = useState<SidebarTab>(requestedPanel ?? (params.threadId ? "tasks" : "threads"));
+  const [tab, setTab] = useState<SidebarTab>(requestedPanel ?? (selected ? "tasks" : "threads"));
   const [width, setWidth] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sheetOpen, setSheetOpen] = useState(Boolean(requestedPanel) && layout.compact);
@@ -54,10 +62,20 @@ export function ChatScreen(props: ChatScreenProps) {
   const docked = !layout.compact && width >= DOCK_MIN_WIDTH;
 
   useEffect(() => {
-    if (params.threadId) setThreadId(params.threadId);
+    if (params.threadId) setSelected(params.threadId);
   }, [params.threadId]);
+  useEffect(() => {
+    if (selected !== undefined || !tabs) return;
+    const entry = entryChatTab(tabs);
+    setSelected(entry);
+    if (!requestedPanel) setTab(entry ? "tasks" : "threads");
+  }, [selected, tabs, requestedPanel]);
+  // 当前对话加入标签栏,并记为最后查看:离开页面再回来、或重启 app 后回到这里。
+  const tabsReady = tabs !== null;
+  useEffect(() => {
+    if (tabsReady && selected) updateTabs((current) => openChatTab(current, selected));
+  }, [tabsReady, selected, updateTabs]);
 
-  const list = useSuperagentState(host.id, { includeClosed: true, omitRecords: true });
   const detail = useSuperagentState(host.id, threadId ? { includeClosed: true, threadId } : { includeClosed: true }, Boolean(threadId));
   const snapshot = list.data;
   const detailData = threadId ? detail.data : undefined;
@@ -99,8 +117,11 @@ export function ChatScreen(props: ChatScreenProps) {
     try {
       const result = await dispatch({ task: text, ...(target ? { threadId: target } : {}) });
       setPending({ text, threadId: result.threadId, triggerId: result.triggerId });
-      // 新对话发出后进入它;发送期间已切到别的对话就不打扰。
-      if (!target) setThreadId((current) => (current === target ? result.threadId : current));
+      // 新对话发出后成为标签并进入它;发送期间已切到别的对话就只加标签,不打扰。
+      if (!target) {
+        updateTabs((current) => openChatTab(current, result.threadId, false));
+        setSelected((current) => (current === null ? result.threadId : current));
+      }
       void queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
       return true;
     } catch (error) {
@@ -111,8 +132,22 @@ export function ChatScreen(props: ChatScreenProps) {
   };
 
   const selectThread = (id: string | null) => {
-    setThreadId(id);
+    setSelected(id);
     setSheetOpen(false);
+  };
+  /** 关闭标签(不关闭对话):关的是当前标签就切到相邻标签,没有标签时回到新对话。 */
+  const closeTab = (id: string | null) => {
+    if (id === null) {
+      setSelected(tabs ? entryChatTab(tabs) : null);
+      return;
+    }
+    let next: string | null = threadId;
+    updateTabs((current) => {
+      const result = closeChatTab(current, id, threadId);
+      next = result.next;
+      return result.tabs;
+    });
+    setSelected(next);
   };
 
   const direct = thread && thread.state !== "closed" ? directTicket(tickets) : null;
@@ -121,7 +156,8 @@ export function ChatScreen(props: ChatScreenProps) {
   else if (thread?.state === "closed") hint = { icon: "RotateCcw", label: "对话已关闭,发送后重新打开" };
   else if (direct) hint = { icon: "CornerDownRight", label: `直通 Worker · ${direct.title}` };
   let disabledReason: string | null = null;
-  if (!threadId) {
+  if (deciding) disabledReason = "正在读取对话";
+  else if (!threadId) {
     if (!snapshot) disabledReason = list.isError ? "状态不可用,请先重试" : "正在读取配置";
     else if (!snapshot.configured) disabledReason = "先在设置里填写工作目录";
     else if (snapshot.workingDirIssue) disabledReason = "工作目录不可用,Worker 暂时无法启动";
@@ -131,35 +167,26 @@ export function ChatScreen(props: ChatScreenProps) {
   const sidebarProps = {
     tab, onTab: setTab, snapshot, threadId, onSelectThread: selectThread, theme, hostId: host.id, navigation, openSettings,
   };
-  const status = thread ? threadStatus(thread, tickets, thread.lastDecision ? [thread.lastDecision] : []) : null;
   const notFound = Boolean(threadId && detailData && !thread);
 
   return (
     <View style={{ flex: 1, flexDirection: "row", backgroundColor: theme.colors.surface0 }}
       onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
       <KeyboardAvoidingView style={{ flex: 1, minWidth: 0 }} behavior={layout.platform === "ios" ? "padding" : undefined}>
-        <View style={{ height: HEADER_HEIGHT, flexDirection: "row", alignItems: "center", gap: space.sm,
-          paddingHorizontal: layout.compact ? space.md : space.lg, borderBottomWidth: 1, borderBottomColor: theme.colors.border }}>
-          <Icon name={threadId ? "MessageSquare" : "SquarePen"} size={14} color={theme.colors.foregroundMuted} />
-          <Text numberOfLines={1} style={{ flexShrink: 1, color: theme.colors.foreground, fontSize: fontSize.base, fontWeight: "500" }}>
-            {thread?.title ?? (threadId ? "对话" : "新对话")}
-          </Text>
-          {status ? <StatusBadge theme={theme} {...status} /> : null}
-          <View style={{ flex: 1 }} />
-          {threadId ? (
-            <Button theme={theme} variant="ghost" size="xs" icon="SquarePen" label={layout.compact ? undefined : "新对话"}
-              accessibilityLabel="新对话" onPress={() => selectThread(null)} />
-          ) : null}
-          {docked ? (
-            sidebarOpen ? null : (
-              <Button theme={theme} variant="ghost" size="xs" icon="PanelRightOpen" accessibilityLabel="显示侧栏"
-                onPress={() => setSidebarOpen(true)} />
-            )
-          ) : (
-            <Button theme={theme} variant="ghost" size="xs" icon="PanelRight" accessibilityLabel="任务、对话与状态"
-              onPress={() => setSheetOpen(true)} />
-          )}
-        </View>
+        {deciding ? (
+          <View style={{ height: 44, borderBottomWidth: 1, borderBottomColor: theme.colors.border }} />
+        ) : (
+          <ChatTabBar tabIds={tabs?.open ?? []} activeId={threadId} snapshot={snapshot} theme={theme} compact={layout.compact}
+            onSelect={selectThread} onClose={closeTab} trailing={docked ? (
+              sidebarOpen ? null : (
+                <Button theme={theme} variant="ghost" size="xs" icon="PanelRightOpen" accessibilityLabel="显示侧栏"
+                  onPress={() => setSidebarOpen(true)} />
+              )
+            ) : (
+              <Button theme={theme} variant="ghost" size="xs" icon="PanelRight" accessibilityLabel="任务、对话与状态"
+                onPress={() => setSheetOpen(true)} />
+            )} />
+        )}
 
         {activeQuery.isError ? (
           <View style={{ paddingHorizontal: space.lg, paddingTop: space.md, alignItems: "center" }}>
@@ -173,7 +200,7 @@ export function ChatScreen(props: ChatScreenProps) {
           </View>
         ) : null}
 
-        {threadId && !detailData && !pendingText && !detail.isError ? (
+        {deciding || (threadId && !detailData && !pendingText && !detail.isError) ? (
           <View style={{ flex: 1 }}><Loading /></View>
         ) : (
           <ChatMessages
@@ -187,7 +214,7 @@ export function ChatScreen(props: ChatScreenProps) {
             navigation={navigation}
             compact={layout.compact}
             empty={notFound ? (
-              <NotFound theme={theme} onNew={() => selectThread(null)} />
+              <NotFound theme={theme} onClose={() => closeTab(threadId)} />
             ) : threadId ? null : (
               <Welcome snapshot={snapshot} theme={theme} openSettings={openSettings} onSelectThread={selectThread} />
             )}
@@ -195,6 +222,8 @@ export function ChatScreen(props: ChatScreenProps) {
         )}
 
         <ChatComposer
+          key={`${host.id}:${threadId ?? "new"}`}
+          draftKey={`${host.id}:${threadId ?? "new"}`}
           theme={theme}
           layout={layout}
           placeholder={threadId ? "继续对话…" : "描述要交给 Superagent 的任务…"}
@@ -301,11 +330,11 @@ function RecentThread({ thread, snapshot, theme, onPress }: {
   );
 }
 
-function NotFound({ theme, onNew }: { theme: Theme; onNew(): void }) {
+function NotFound({ theme, onClose }: { theme: Theme; onClose(): void }) {
   return (
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: space.md }}>
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.base }}>找不到这段对话,它可能已被清理。</Text>
-      <Button theme={theme} variant="outline" size="xs" icon="SquarePen" label="新对话" onPress={onNew} />
+      <Button theme={theme} variant="outline" size="xs" icon="X" label="关闭此标签" onPress={onClose} />
     </View>
   );
 }
