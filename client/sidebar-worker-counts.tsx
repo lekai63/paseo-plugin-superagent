@@ -25,7 +25,7 @@ export function SidebarWorkerCounts({ counts, theme }: { counts: { running: numb
           : <View style={{ width: STATUS_BOX, height: STATUS_BOX, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
             <View style={{ width: DONE_DOT, height: DONE_DOT, borderRadius: DONE_DOT / 2, backgroundColor: color }} />
           </View>}
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: countSize, fontVariant: ["tabular-nums"] }}>{counts[kind]}</Text>
+        <Text style={{ color: theme.colors.foregroundMuted, fontSize: countSize }}>{counts[kind]}</Text>
       </View>;
     })}
   </View>;

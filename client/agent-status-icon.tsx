@@ -42,10 +42,10 @@ export function RunningStatusRing({ color, size = 16 }: { color: string; size?: 
       animation.startTime = 0;
       return () => animation.cancel();
     }
-    rotation.setValue(0);
-    const loop = Animated.loop(Animated.timing(rotation, { toValue: 1, duration: 900, easing: (value) => Math.floor(value * 12) / 12, useNativeDriver: true, isInteraction: false }));
-    loop.start();
-    return () => loop.stop();
+    // 判别实验(iOS 闪退排查):原生端先停用 Animated 循环,画静止圆弧。
+    // 若闪退消失,则问题锁定在 useNativeDriver 动画链路;确认后再换安全实现。
+    rotation.setValue(0.25);
+    return undefined;
   }, [reduced, rotation]);
   const mark = statusMarkSize(size);
   const scale = mark / 12;
