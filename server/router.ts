@@ -1,4 +1,4 @@
-import type { PaseoApi, PaseoAgent, PaseoAgentHandle } from "@getpaseo/client";
+import type { PaseoApi, PaseoAgent, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { SuperagentState, Thread, Ticket, Trigger, Decision } from "../shared/model";
 import { newId, truncate, ROUTER_ACTION_LIMIT, type RouterVerdict, RouterVerdictSchema } from "../shared/model";
 
@@ -34,7 +34,8 @@ const ROUTER_RULES = [
   "  never merge unrelated asks into one Worker. \"title\" is a short task title; \"mandate\" is",
   "  the complete, self-contained instruction for the Worker (context, repo, constraints,",
   "  definition of done). Workers start in the worker base directory described under",
-  '  "Worker environment" — that is the only repository they get a workspace for. Files inside',
+  '  "Worker environment" (a profile with its own base directory runs there instead) — that',
+  "  is the only repository they get a workspace for. Files inside",
   "  it: describe them repo-relatively (e.g. greet.js at the repo root); do NOT instruct edits",
   "  at absolute paths of the base checkout. Paths outside it are NOT part of the worker's",
   "  workspace: refer to them by absolute path and never assume they are the worker's",
@@ -88,6 +89,8 @@ export interface RouterWorkerProfile {
   name: string;
   provider: string;
   description: string;
+  /** 档位专属基础目录;空/缺省 = 用 Worker environment 的默认基础目录。 */
+  workingDir?: string;
 }
 
 export interface RouterWorkerEnvironment {
@@ -110,14 +113,22 @@ function workerProfileLines({ defaultWorker, profiles = [] }: RouterWorkerEnviro
   if (profiles.length === 0) return [];
   const model = (provider: string | null | undefined) => provider?.trim() || "auto-selected";
   const purpose = (description: string | undefined) => truncate(description?.trim() || DEFAULT_WORKER_PURPOSE, 300);
+  const base = (workingDir: string | null | undefined) => {
+    const dir = workingDir?.trim();
+    return dir ? `; base directory ${dir}` : "";
+  };
   return [
     "",
     "## Worker profiles",
     "Each dispatch runs on one worker profile. Set \"profile\" to the name whose purpose fits the task;",
     "omit it to use \"default\". Fan-out dispatches may use different profiles. Only the names below",
     "exist; when the human asks for a specific profile or model, honor it if it is listed here.",
+    "A profile that lists its own base directory runs there instead of the default base directory",
+    "above: for those workers, treat that directory as their repository.",
     `- default (${model(defaultWorker?.provider)}): ${purpose(defaultWorker?.description)}`,
-    ...profiles.map((profile) => `- ${profile.name} (${model(profile.provider)}): ${purpose(profile.description)}`),
+    ...profiles.map(
+      (profile) => `- ${profile.name} (${model(profile.provider)}${base(profile.workingDir)}): ${purpose(profile.description)}`,
+    ),
   ];
 }
 
@@ -382,13 +393,14 @@ export function newDecision(
 
 /**
  * 确保 Router agent 存在且可用:kv 记住的 id 还活着就直接复用(会话即记忆),
- * 丢失/归档则重建。返回 null 表示 provider/目录尚未就绪。
+ * 丢失/归档则经 ensureWorkspace 取得默认 workspace 并在其中重建。
+ * 返回 error 表示 provider 尚未就绪。
  */
 export async function ensureRouter(
   paseo: PaseoApi,
   state: SuperagentState,
   provider: string,
-  workingDir: string,
+  ensureWorkspace: () => Promise<PaseoWorkspaceHandle>,
   instructions: string,
 ): Promise<{ handle: PaseoAgentHandle; agentId: string; created: boolean; sessionId: string | null } | { error: string }> {
   const remembered = state.kv.routerAgentId;
@@ -404,24 +416,21 @@ export async function ensureRouter(
     }
   }
   if (!provider) return { error: "router provider is not configured" };
-  if (!workingDir) return { error: "working directory is not configured" };
   let handle: PaseoAgentHandle;
   try {
-    handle = await paseo.agents.create({
+    const workspace = await ensureWorkspace();
+    handle = await workspace.agents.create({
       config: {
         provider,
         ...(routerUsesSystemPrompt(provider) ? { systemPrompt: instructions } : {}),
       },
-      cwd: workingDir,
       title: "Superagent Router",
       labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE },
     });
   } catch (error) {
-    // provider 侧的失败往往只有 "Internal error",补上 provider/目录便于定位。
+    // provider 侧的失败往往只有 "Internal error",补上 provider 便于定位。
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`router agent creation failed (provider "${provider}", cwd ${workingDir}): ${message}`, {
-      cause: error,
-    });
+    throw new Error(`router agent creation failed (provider "${provider}"): ${message}`, { cause: error });
   }
   return { handle, agentId: handle.id, created: true, sessionId: routerSessionId(handle.current()) };
 }

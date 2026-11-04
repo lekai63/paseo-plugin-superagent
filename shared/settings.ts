@@ -27,6 +27,9 @@ export const MAX_ROUTER_INSTRUCTIONS_CHARS = 12000;
 export const WORKER_PROFILE_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,23}$/;
 export const WORKER_PROFILE_NAME_HINT = "小写字母开头,只含小写字母、数字、- 和 _,最长 24 个字符";
 
+/** 共享隔离下 Router 与默认 Worker 合用的持久工作区标题;按「标题 + 目录」找回或新建。 */
+export const DEFAULT_WORKSPACE_TITLE = "默认 workspace";
+
 export const WorkerProfileSchema = z.object({
   /** Router 在 dispatch 里填写的档位名。 */
   name: z
@@ -38,6 +41,8 @@ export const WorkerProfileSchema = z.object({
   provider: z.string().trim().min(1, "需要填写 provider").max(120),
   /** 用途说明:原样写进 Router 提示词,是 Router 选档位的唯一依据。 */
   description: z.string().trim().min(1, "需要写明用途,Router 靠它选择档位").max(300),
+  /** 该档位 Worker 的专属基础目录(绝对路径);留空用全局 workingDir。 */
+  workingDir: z.string().trim().max(1024).default(""),
 });
 export type WorkerProfile = z.infer<typeof WorkerProfileSchema>;
 
@@ -66,7 +71,7 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 6,
+  version: 7,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
@@ -147,7 +152,8 @@ export const superagentSettings = defineSettings({
   /**
    * v1/v2 → v3:新字段由 schema 默认值补齐;v3 → v4:新增 agentToolProviders 同理;
    * v4 → v5:新增 workerDescription/workerProfiles 同理(无档位 = 与旧版一致的单一 Worker);
-   * v5 → v6:新增 routerInstructions,留空沿用内置编排规则。
+   * v5 → v6:新增 routerInstructions,留空沿用内置编排规则;
+   * v6 → v7:档位新增 workingDir(留空 = 全局 workingDir),旧档位由默认值补齐。
    */
   migrate: (values) => values,
 });

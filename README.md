@@ -3,7 +3,8 @@
 Paseo 的 Router/Worker 双层编排插件。按《Super-agent 设计探索》的架构思路,在 Paseo 原语之上实现事件驱动的 super-agent 编排层,**不依赖 DeepSeek Harness**:
 
 - **常驻 Router agent**(轻量模型)统一评估触发事件,只裁决、不执行;
-- **Worker agent**(强模型)按 Ticket 在隔离 worktree 工作区执行,parent 挂在 Router 名下,在 app 的 Subagents track 可见、可随时人工介入;
+- **Worker agent**(强模型)按 Ticket 执行:worktree 隔离时每个 Ticket 一个独立 worktree 工作区;共享目录隔离时 Router 与默认 Worker 合用同一个「默认 workspace」(按工作目录创建、跨重启复用),parent 挂在 Router 名下,在 app 的 Subagents track 可见、可随时人工介入;
+- **Worker 档位**:除默认 Worker 外可配置具名档位(不同模型/用途),每个档位还可指定自己的工作目录,让该档位的 Worker 在别的仓库或目录里工作;
 - **订阅直通**:线程恰有一个活跃订阅 Ticket 时,后续事件绕过 Router 程序直通其 Worker(零 LLM);存在多个订阅 Worker 时交 Router 选择目标;
 - **批处理**:同一批窗口内的触发合并进一次 Router LLM 调用;
 - **看门狗**:每 15 秒对账——错过完成、卡死启动、运行超时、评估重排、待执行动作补执行,进程重启后自恢复;
@@ -56,13 +57,13 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 | 设置 | 说明 |
 |---|---|
-| 工作目录 | 绝对路径。Router 的 cwd,也是所有 Worker 的基础目录(**必填**)。`worktree` 隔离时必须位于 git 仓库内,否则对话页与设置页都会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式。所有 Worker 都只在这一个目录(或其 worktree)里工作 |
+| 工作目录 | 绝对路径,默认的基础目录(**必填**)。共享目录隔离时,Router 与默认 Worker 合用按此目录创建的持久工作区「默认 workspace」(同一目录只建一个,id 记在插件状态里跨重启复用;被归档会按标题+目录找回或重建);独立 worktree 隔离时它是每个 Ticket 切 worktree 的基准仓库。`worktree` 隔离时必须位于 git 仓库内,否则对话页与设置页都会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式 |
 | Router provider/model | 留空自动选用宿主可用默认(claude → codex → opencode → 任意)。model id 以 `paseo provider models <provider>` 列出的为准(如 `zcode-acp/builtin:bigmodel-coding-plan\GLM-5.3-Flash`,单个反斜杠);填错时 Router 评估会报出可用 id |
 | Router 自定义规则 | 设置页「Router 规则」直接填写,支持多行,最多 12000 字符,配置字段为 `routerInstructions`。用于答复语言、分派偏好和汇报格式,留空使用默认规则。配置变化后在下一次评估补发一次,之后复用,无需重建 Router 会话,也不依赖 provider 读取 `AGENTS.md`/`ROUTER.md`;不改变 Worker 的项目规则。自定义规则补充内置编排约束,Router 仍只做裁决并按 JSON actions 输出 |
 | IM 单条消息上限 | 默认 600,可设 100–4000 字符,沿用配置字段 `imReplyMaxChars`。超长答复按段落/换行优先拆分为多条,添加 `[1/N]` 序号(计入上限)后顺序发送,正文完整保留;普通 emoji 按字素边界拆分。发送前保存全部分段,每段确认成功后记录进度;失败暂停,在对话页右侧栏「状态 → IM 答复投递」从失败段补发。重启恢复未完成的发送,已确认的段不重发。远端已接收但回执丢失或落盘前崩溃时,该段仍可能重复,通道未提供统一的恰好一次投递保证 |
 | Worker provider/model | 同上,建议配最强模型。配置了 Worker 档位时它是**默认 Worker**,可另填一句用途说明 |
-| Worker 档位 | 可选。默认 Worker 之外的具名档位(名字 + provider/model + 用途说明),如 `code → codex/…`「写码、修 bug、跑测试」。Router 的 dispatch 用 `"profile":"<名字>"` 按用途为每个任务选档位;省略或名字不存在时用默认 Worker(后者记入裁决)。Router 只能用到这里列出的模型,触发文本无法把 Worker 引向任意 provider。Ticket 记录所选档位与实际模型:retry 沿用档位、按该档位当前设置的模型启动;档位被删除后改用默认 Worker。不配置档位时行为与单一 Worker 完全一致 |
-| Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared`(直接在工作目录里干活,不需要 git。工作目录根下有 `AGENTS.md`/`CLAUDE.md` 时,Worker 按其中的归档规则放产出并完成要求的登记;没有规则时,每个 Ticket 的产出放进专属子目录 `tasks/<本地日期>-<标题>-<id 尾号>/`。Router 与 Worker 的提示词都会说明) |
+| Worker 档位 | 可选。默认 Worker 之外的具名档位(名字 + provider/model + 用途说明 + 可选专属工作目录),如 `code → codex/…`「写码、修 bug、跑测试」。Router 的 dispatch 用 `"profile":"<名字>"` 按用途为每个任务选档位;省略或名字不存在时用默认 Worker(后者记入裁决)。Router 只能用到这里列出的模型,触发文本无法把 Worker 引向任意 provider。档位的专属工作目录必须是绝对路径、可以和全局工作目录不同:worktree 隔离时该档位从自己的目录切 worktree,共享目录隔离时该目录有一个以档位名命名的持久工作区(与「默认 workspace」同一套复用机制)。Ticket 记录所选档位与实际模型:retry 沿用档位、按该档位当前设置的模型与目录启动;档位被删除后改用默认 Worker。不配置档位时行为与单一 Worker 完全一致 |
+| Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared`(直接在基础目录里干活,不需要 git。Router 与默认 Worker 同住「默认 workspace」;工作目录根下有 `AGENTS.md`/`CLAUDE.md` 时,Worker 按其中的归档规则放产出并完成要求的登记;没有规则时,每个 Ticket 的产出放进专属子目录 `tasks/<本地日期>-<标题>-<id 尾号>/`。Router 与 Worker 的提示词都会说明)。取消/关闭 Ticket 只归档 Worker 会话;Ticket 独占的 worktree 工作区一并归档,共享的持久工作区保留 |
 | Worker 超时 / 失败重试次数 / 批处理窗口 / 单条消息上限 | 引擎调参(设置页「执行」分组,超出范围会就地提示) |
 | 注入委派 MCP | 开启后所有普通 agent 的会话注入 `superagent_dispatch` 工具。走**插件自持的本地 MCP server**(`127.0.0.1` 随机端口 + 随机密钥路径),不受宿主 "Paseo tools"(`mcp.injectIntoAgents`)开关影响 |
 | 注入 provider | 允许注入上述 MCP 的 provider,逗号分隔(如 `codex,claude`);留空 = claude,codex,opencode,omp,copilot。不支持 MCP server 的 provider(如 pi、ACP 系)注入会导致会话启动失败,默认排除 |
@@ -129,7 +130,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 - **执行视图刷新**:编排快照每 3 秒更新,可见 Worker 与 Router 会话每 5 秒读取,权限/attention 事件触发即时刷新;读取失败明确显示状态不可用。视图表达当前状态和路由关系,不提供完整调用回放或逐条消息传输动画。
 - **外部 Trigger 源**:飞书/QQ 已支持;GitHub/Slack 轮询源是下一扩展点(Paseo Hub 触发器亦可作为上游把事件投给 `superagent.dispatch`)。
 - **裁决解析**:Router 必须回 fenced JSON;解析失败记录 `unparsed` 决策并保留触发供重试,不做模型侧重问。
-- **取消语义**:取消 Ticket 归档 Worker agent 及其 worktree 工作区(soft delete,可从 History 找回)。
+- **取消语义**:取消 Ticket 归档 Worker agent,Ticket 独占的 worktree 工作区一并归档(soft delete,可从 History 找回);共享的持久工作区(「默认 workspace」/档位工作区)保留,继续服务 Router 与后续 Ticket。
 - **委派 MCP 通道**:`superagent_dispatch` 经插件自持 MCP server 注入(不走 daemon 的插件 agent tools 目录,因此宿主关闭 "Paseo tools" 不影响委派)。代价:插件重载后端口与密钥轮换,已打开会话中的旧 URL 在下次 session_open 刷新前调用会报连接错误;不支持 MCP server 的 provider 默认不注入(可用"注入 provider"设置覆盖)。
 - **未实现**:投机执行、多对多订阅(当前为线程内单 Worker 直通)、跨主机派发(可经 CLI `--host` 自行组合)。
 

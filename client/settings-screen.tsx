@@ -57,7 +57,7 @@ function toForm(values: Values): FormValues {
 }
 
 function stripProfileKeys(rows: ProfileRow[]): WorkerProfile[] {
-  return rows.map(({ name, provider, description }) => ({ name, provider, description }));
+  return rows.map(({ name, provider, description, workingDir }) => ({ name, provider, description, workingDir }));
 }
 
 /** 草稿比较用的序列化:去掉档位行的本地 key。 */
@@ -84,6 +84,13 @@ function parseForm(form: FormValues): { values: Values | null; errors: FormError
   }
   const workingDir = form.workingDir.trim();
   if (workingDir && !isAbsolutePath(workingDir)) errors.workingDir = "需要绝对路径,例如 /home/me/project";
+  // 档位专属目录:留空合法(用全局工作目录),填写时必须是绝对路径。
+  form.workerProfiles.forEach((row, index) => {
+    const dir = row.workingDir.trim();
+    if (dir && !isAbsolutePath(dir)) {
+      profileErrors[index] = { ...profileErrors[index], workingDir: "需要绝对路径,留空使用上方的工作目录" };
+    }
+  });
 
   const parsed = superagentSettings.schema.safeParse(raw);
   if (!parsed.success) {
@@ -101,7 +108,7 @@ function parseForm(form: FormValues): { values: Values | null; errors: FormError
       if (key && !errors[key]) errors[key] = message;
     }
   }
-  const valid = parsed.success && Object.keys(errors).length === 0;
+  const valid = parsed.success && Object.keys(errors).length === 0 && countProfileErrors(profileErrors) === 0;
   return { values: valid ? parsed.data : null, errors, profileErrors };
 }
 
@@ -183,7 +190,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
     const key = `new-${nextProfileKey.current}`;
     setForm((current) => ({
       ...current,
-      workerProfiles: [...current.workerProfiles, { key, name: "", provider: "", description: "" }],
+      workerProfiles: [...current.workerProfiles, { key, name: "", provider: "", description: "", workingDir: "" }],
     }));
   }, []);
   const removeProfile = useCallback((key: string) => {
@@ -218,7 +225,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
     <View key={formKey}>
       <SettingsSection
         title="工作目录"
-        info="Worker 的基础目录,同时用作 Router 会话的启动目录。Router 的自定义规则在下方直接填写。"
+        info="默认的基础目录:Router 与默认 Worker 共用它。共享目录隔离时,两者都住在按此目录创建的「默认 workspace」里;独立 worktree 隔离时,每个 Ticket 从它切出独立分支。Router 的自定义规则在下方直接填写。"
       >
         <SettingsCard>
           <TextField
@@ -316,7 +323,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
 
       <SettingsSection
         title="Worker 档位"
-        info="让不同类型的任务跑在不同模型上。Router 派发时按用途说明为每个任务选一个档位;没有选、或选了不存在的名字时用默认 Worker。Router 只能使用这里列出的模型。"
+        info="让不同类型的任务跑在不同模型上。Router 派发时按用途说明为每个任务选一个档位;没有选、或选了不存在的名字时用默认 Worker。Router 只能使用这里列出的模型。档位可另填专属工作目录,让该档位的 Worker 在别的仓库或目录里工作。"
       >
         {form.workerProfiles.map((row, index) => (
           <ProfileCard
@@ -445,6 +452,15 @@ function ProfileCard({
         onChangeText={(value) => onChange(row.key, "provider", value)}
         disabled={disabled}
         error={errors.provider ?? null}
+      />
+      <SettingsInput
+        label="工作目录(可选)"
+        hint="该档位 Worker 的专属基础目录,可与上方的工作目录不同;留空使用它。共享目录隔离时以其档位名单独建工作区"
+        placeholder="留空使用上方的工作目录"
+        initialValue={row.workingDir}
+        onChangeText={(value) => onChange(row.key, "workingDir", value)}
+        disabled={disabled}
+        error={errors.workingDir ?? null}
       />
       <SettingsInput
         label="用途"

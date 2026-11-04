@@ -44,16 +44,18 @@ function fixture(t, status = "running", subscribed = true) {
   state.tickets.push({
     id: "ticket", threadId: "thread", title: "test", mandate: "do the work", status,
     workerAgentId: hasWorker ? "worker" : null, workspaceId: hasWorker ? "workspace" : null,
+    ownsWorkspace: hasWorker ? true : null,
     startedAt: oldTime, attempts: status === "pending" ? 0 : 1, subscribed,
     report: null, lastError: null, createdAt: oldTime, updatedAt: oldTime,
   });
   const calls = {
-    sends: [], watches: [], archives: [], workspaceArchives: [], creates: 0, evals: [],
+    sends: [], watches: [], archives: [], workspaceArchives: [], creates: 0, workspaceCreateOptions: [], evals: [],
     routerCreates: [], workerCreates: [], prompts: [],
   };
   const controls = {
     send: async () => {},
     createAgent: async () => ({ id: "new-worker" }),
+    createRouterAgent: async () => ref("new-router"),
     timeline: async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: "work completed" } }] }),
     verdict: { decision: "reply", reply: "done" },
     isGit: true,
@@ -90,6 +92,32 @@ function fixture(t, status = "running", subscribed = true) {
     });
     return handles.get(id);
   };
+  // 伪 daemon 的 workspace 登记:创建/找回的工作区按 id 保存 descriptor,ref(id) 拿到的
+  // 句柄可 refresh/archive;engine 用它复用「默认 workspace」与档位共享工作区。
+  const daemonWorkspaces = new Map();
+  const workspaceHandles = new Map();
+  const workspaceHandle = (id) => {
+    if (!workspaceHandles.has(id)) workspaceHandles.set(id, {
+      id,
+      current: () => daemonWorkspaces.get(id) ?? null,
+      refresh: async () => daemonWorkspaces.get(id) ?? null,
+      agents: {
+        create: async (options) => {
+          if (options.labels?.["superagent.role"] === "router") {
+            calls.routerCreates.push(options);
+            return controls.createRouterAgent(options);
+          }
+          calls.workerCreates.push(options);
+          return controls.createAgent(options);
+        },
+      },
+      archive: async () => {
+        calls.workspaceArchives.push(id);
+        daemonWorkspaces.delete(id);
+      },
+    });
+    return workspaceHandles.get(id);
+  };
   const paseo = {
     agents: {
       ref,
@@ -103,23 +131,21 @@ function fixture(t, status = "running", subscribed = true) {
       snapshot: async () => ({ entries: PROVIDER_ENTRIES }),
     },
     workspaces: {
-      create: async () => {
+      create: async (options) => {
         calls.creates++;
-        const descriptor = { gitRuntime: { currentBranch: controls.workspaceBranch } };
-        return {
-          id: "new-workspace",
-          current: () => descriptor,
-          refresh: async () => descriptor,
-          agents: {
-            create: (options) => {
-              calls.workerCreates.push(options);
-              return controls.createAgent(options);
-            },
-          },
-          archive: async () => { calls.workspaceArchives.push("new-workspace"); },
-        };
+        calls.workspaceCreateOptions.push(options);
+        const id = calls.creates === 1 ? "new-workspace" : `new-workspace-${calls.creates}`;
+        daemonWorkspaces.set(id, {
+          id,
+          name: options.title ?? null,
+          workspaceDirectory: options.source?.path ?? "/mock/repo",
+          archivingAt: null,
+          gitRuntime: { currentBranch: controls.workspaceBranch },
+        });
+        return workspaceHandle(id);
       },
-      ref: (id) => ({ archive: async () => { calls.workspaceArchives.push(id); } }),
+      list: async () => ({ entries: [...daemonWorkspaces.values()] }),
+      ref: (id) => workspaceHandle(id),
     },
   };
   const store = {
@@ -141,7 +167,7 @@ function fixture(t, status = "running", subscribed = true) {
   engine.primed = true;
   engine.scheduleEval = (id) => { calls.evals.push(id); };
   t.after(() => engine.stop());
-  return { engine, state, calls, controls, finishes, ref, values, ticket: state.tickets[0] };
+  return { engine, state, calls, controls, finishes, ref, values, ticket: state.tickets[0], daemonWorkspaces };
 }
 
 function pendingTrigger(state) {
@@ -947,10 +973,10 @@ test("Router creation failures name the provider", async (t) => {
   f.state.kv.routerAgentId = null;
   f.values.routerProvider = "zcode-acp/builtin:plan\\GLM";
   pendingTrigger(f.state);
-  f.engine.paseo.agents.create = async () => { throw new Error("Internal error"); };
+  f.controls.createRouterAgent = async () => { throw new Error("Internal error"); };
   await assert.rejects(
     f.engine.runEval("thread"),
-    /router agent creation failed \(provider "zcode-acp\/builtin:plan\\GLM", cwd \/mock\/repo\): Internal error/,
+    /router agent creation failed \(provider "zcode-acp\/builtin:plan\\GLM"\): Internal error/,
   );
 });
 
@@ -1113,4 +1139,81 @@ test("the snapshot exposes the configured worker profiles", async (t) => {
   assert.deepEqual(f.engine.snapshot().workerProfiles, []);
   f.values.workerProfiles = WORKER_PROFILES;
   assert.deepEqual(f.engine.snapshot().workerProfiles.map((profile) => profile.name), ["glm", "flash"]);
+});
+
+test("the Router is created inside the shared 默认 workspace, which is remembered and reused", async (t) => {
+  const f = fixture(t);
+  f.state.kv.routerAgentId = null;
+  f.controls.verdict = { actions: [{ action: "ignore" }] };
+  await evaluateRouter(f);
+  assert.equal(f.calls.creates, 1, "exactly one shared workspace is created for the Router");
+  assert.equal(f.daemonWorkspaces.get("new-workspace").name, "默认 workspace");
+  assert.equal(f.daemonWorkspaces.get("new-workspace").workspaceDirectory, "/mock/repo");
+  assert.equal(f.calls.routerCreates.length, 1);
+  assert.equal(f.calls.routerCreates[0].cwd, undefined, "the workspace, not the engine, supplies the cwd");
+  assert.equal(f.state.kv.sharedWorkspaces["/mock/repo"], "new-workspace");
+
+  // 引擎重启(缓存清空)后 Router 丢失:登记过的 workspace 直接复用,不再新建。
+  f.state.kv.routerAgentId = null;
+  const restarted = new SuperagentEngine(f.engine.store, {
+    subscribe: () => {}, read: async () => ({ status: "ready", values: f.values }),
+  });
+  restarted.paseo = f.engine.paseo;
+  restarted.workingDirProbe = f.engine.workingDirProbe;
+  restarted.primed = true;
+  t.after(() => restarted.stop());
+  await setImmediate();
+  pendingTrigger(f.state);
+  await restarted.runEval("thread");
+  assert.equal(f.calls.creates, 1, "the remembered 默认 workspace is reused after a restart");
+  assert.equal(f.calls.routerCreates.length, 2);
+});
+
+test("shared workers join the 默认 workspace and retiring them never archives it", async (t) => {
+  const f = fixture(t, "pending");
+  f.values.workerIsolation = "shared";
+  await f.engine.startTicket("ticket");
+  assert.equal(f.ticket.workspaceId, "new-workspace");
+  assert.equal(f.ticket.ownsWorkspace, false);
+  assert.equal(f.daemonWorkspaces.get("new-workspace").name, "默认 workspace");
+  await f.engine.cancelTicket("ticket");
+  assert.deepEqual(f.calls.archives, ["new-worker"]);
+  assert.deepEqual(f.calls.workspaceArchives, [], "the shared workspace is not ticket-owned and survives");
+  assert.ok(f.daemonWorkspaces.has("new-workspace"));
+});
+
+test("a worktree profile with its own working directory branches from that directory", async (t) => {
+  const f = fixture(t, "pending");
+  f.values.workerProfiles = [{ ...WORKER_PROFILES[0], workingDir: "/other/repo" }];
+  Object.assign(f.ticket, { profile: "glm" });
+  await f.engine.startTicket("ticket");
+  assert.equal(f.ticket.ownsWorkspace, true);
+  assert.deepEqual(
+    f.calls.workspaceCreateOptions[0].source,
+    { kind: "worktree", cwd: "/other/repo", action: "branch-off", branchName: "superagent/test-ticket" },
+    "the worktree branches off the profile's own directory",
+  );
+  const prompt = f.calls.workerCreates[0].prompt;
+  assert.match(prompt, /ISOLATED worktree workspace: a fresh copy of the repository at \/other\/repo/);
+});
+
+test("a shared profile directory gets one persistent workspace named after the profile", async (t) => {
+  const f = fixture(t, "completed");
+  f.values.workerIsolation = "shared";
+  f.values.workerProfiles = [{ ...WORKER_PROFILES[0], workingDir: "/other/repo" }];
+  pendingTrigger(f.state);
+  f.controls.verdict = {
+    actions: [
+      { action: "dispatch", title: "One", mandate: "first", profile: "glm" },
+      { action: "dispatch", title: "Two", mandate: "second", profile: "glm" },
+    ],
+  };
+  await f.engine.runEval("thread");
+  await until(() => f.state.tickets.filter((ticket) => ticket.status === "running").length === 2);
+  assert.equal(f.calls.creates, 1, "both tickets share one persistent workspace for the profile directory");
+  assert.equal(f.daemonWorkspaces.get("new-workspace").name, "glm");
+  assert.equal(f.daemonWorkspaces.get("new-workspace").workspaceDirectory, "/other/repo");
+  const launched = f.state.tickets.filter((ticket) => ticket.title !== "test");
+  assert.deepEqual(launched.map((ticket) => ticket.workspaceId), ["new-workspace", "new-workspace"]);
+  assert.deepEqual(launched.map((ticket) => ticket.ownsWorkspace), [false, false]);
 });

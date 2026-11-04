@@ -1,5 +1,6 @@
-import type { PaseoApi } from "@getpaseo/client";
+import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
 import { directTicket } from "../shared/execution";
@@ -21,6 +22,7 @@ import {
 } from "../shared/model";
 import {
   DEFAULT_WORKER_PROFILE,
+  DEFAULT_WORKSPACE_TITLE,
   SETTINGS_DEFAULTS,
   superagentSettings,
   type SuperagentSettingsValues,
@@ -37,8 +39,9 @@ import {
   routerUsesSystemPrompt,
   type RouterWorkerEnvironment,
 } from "./router";
-import { harvestReport, launchWorker, retireWorker } from "./workers";
+import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
 import { matchWorkerProfile, resolveProviderSelection } from "./providers";
+import { ensureSharedWorkspace } from "./workspace";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 import { splitImReply } from "./im-replies";
 
@@ -158,6 +161,9 @@ export class SuperagentEngine {
   workingDirProbe: WorkingDirProbe = nodeWorkingDirProbe;
   private workingDirIssue: string | null = null;
   private workingDirCheck: { key: string; at: number } | null = null;
+  /** 共享工作区句柄缓存(dir+title → handle),命中时避免重复扫描/新建;串行链防并发重复建。 */
+  private sharedWorkspaceCache = new Map<string, PaseoWorkspaceHandle>();
+  private workspaceChain: Promise<unknown> = Promise.resolve();
   private lastWatchdogAt: string | null = null;
   private lastWatchdogNote: string | null = null;
   private replySink: ReplySink | null = null;
@@ -507,7 +513,7 @@ export class SuperagentEngine {
       workingDir: this.settingsValues.workingDir,
       isolation: this.settingsValues.workerIsolation,
       issue: await this.refreshWorkingDirIssue(),
-      instructionFiles: await this.sharedInstructionFiles(),
+      instructionFiles: await this.instructionFilesFor(this.settingsValues.workingDir),
       defaultWorker: {
         provider: this.settingsValues.workerProvider.trim() || state.kv.workerProvider || null,
         description: this.settingsValues.workerDescription,
@@ -516,7 +522,14 @@ export class SuperagentEngine {
     };
     const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions);
     const configHash = createHash("sha256").update(instructions).digest("hex");
-    const router = await ensureRouter(paseo, state, routerProvider, this.settingsValues.workingDir, instructions);
+    // Router 落在默认 workspace 里;惰性获取——Router 存活时零开销,重建时才查找/新建。
+    const router = await ensureRouter(
+      paseo,
+      state,
+      routerProvider,
+      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, DEFAULT_WORKSPACE_TITLE),
+      instructions,
+    );
     if ("error" in router) throw new Error(router.error);
     const routerAgentId = router.agentId;
     if (state.kv.routerAgentId !== routerAgentId || state.kv.routerProvider !== routerProvider) {
@@ -600,6 +613,7 @@ export class SuperagentEngine {
           status: "pending",
           workerAgentId: null,
           workspaceId: null,
+          ownsWorkspace: null,
           branchName: null,
           profile: choice.profile,
           provider: null,
@@ -968,16 +982,25 @@ export class SuperagentEngine {
     const current = state.tickets.find((t) => t.id === ticketId);
     if (!current || current.status !== "launching" || current.attempts !== attempt || current.startedAt !== now) return;
     try {
-      // 基础目录不可用时带着目录与隔离方式失败,Router 收到的汇报能指明确切原因。
-      const workingDirIssue = await this.refreshWorkingDirIssue();
+      // 基础目录(档位专属目录优先)不可用时带着目录与隔离方式失败,Router 收到的汇报能指明确切原因。
+      const { dir: workingDir, custom } = this.ticketWorkingDir(current.profile);
+      const workingDirIssue = await this.inspectDir(workingDir);
       if (workingDirIssue) throw new Error(workingDirIssue);
+      const env: WorkerLaunchEnv = {
+        workingDir,
+        isolation: this.settingsValues.workerIsolation,
+        instructionFiles: await this.instructionFilesFor(workingDir),
+        sharedWorkspace:
+          this.settingsValues.workerIsolation === "shared"
+            ? await this.sharedWorkspaceFor(workingDir, custom && current.profile ? current.profile : DEFAULT_WORKSPACE_TITLE)
+            : null,
+      };
       const launch = await launchWorker(
         paseo,
-        this.settingsValues,
         workerProvider,
         current,
         state.kv.routerAgentId ?? null,
-        await this.sharedInstructionFiles(),
+        env,
       );
       let accepted = false;
       await this.store.update((next) => {
@@ -988,6 +1011,7 @@ export class SuperagentEngine {
         ) return;
         target.workerAgentId = launch.agentId;
         target.workspaceId = launch.workspaceId;
+        target.ownsWorkspace = launch.ownsWorkspace;
         target.branchName = launch.branchName;
         target.status = "running";
         target.updatedAt = new Date().toISOString();
@@ -996,7 +1020,11 @@ export class SuperagentEngine {
       if (accepted) {
         this.watchTicket(ticketId);
       } else {
-        await retireWorker(paseo, { ...current, workerAgentId: launch.agentId, workspaceId: launch.workspaceId }, true);
+        await retireWorker(
+          paseo,
+          { ...current, workerAgentId: launch.agentId, workspaceId: launch.workspaceId, ownsWorkspace: launch.ownsWorkspace },
+          true,
+        );
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1383,7 +1411,9 @@ export class SuperagentEngine {
       routerAgentId: state.kv.routerAgentId ?? null,
       routerProvider: state.kv.routerProvider || settings.routerProvider || null,
       workerProvider: state.kv.workerProvider || settings.workerProvider || null,
-      workerProfiles: settings.workerProfiles.map(({ name, provider, description }) => ({ name, provider, description })),
+      workerProfiles: settings.workerProfiles.map(({ name, provider, description, workingDir }) => ({
+        name, provider, description, workingDir: workingDir ?? "",
+      })),
       threads,
       recentResults: recentResults(state, options.threadId),
       tickets: state.tickets
@@ -1433,10 +1463,60 @@ export class SuperagentEngine {
 
   // ------------------------------------------------------------- helpers
 
-  /** shared 隔离时工作目录自带的项目说明文件;worktree 隔离时仓库内的说明随 worktree 一起检出,无需提示。 */
-  private async sharedInstructionFiles(): Promise<string[]> {
+  /** shared 隔离时基础目录自带的项目说明文件;worktree 隔离时仓库内的说明随 worktree 一起检出,无需提示。 */
+  private async instructionFilesFor(dir: string): Promise<string[]> {
     if (this.settingsValues.workerIsolation !== "shared") return [];
-    return findInstructionFiles(this.settingsValues.workingDir, this.workingDirProbe).catch(() => []);
+    return findInstructionFiles(dir, this.workingDirProbe).catch(() => []);
+  }
+
+  /** Ticket 的基础目录:档位配置了专属目录且不同于全局目录时用它,否则用全局 workingDir。 */
+  private ticketWorkingDir(profileName: string | null | undefined): { dir: string; custom: boolean } {
+    const profile = profileName
+      ? this.settingsValues.workerProfiles.find((candidate) => candidate.name === profileName)
+      : undefined;
+    const customDir = profile?.workingDir?.trim();
+    const defaultDir = this.settingsValues.workingDir.trim();
+    if (customDir && resolve(customDir) !== resolve(defaultDir)) return { dir: customDir, custom: true };
+    return { dir: defaultDir, custom: false };
+  }
+
+  /** 基础目录可用性:全局目录走缓存(快照同读),档位专属目录每次直接检查。 */
+  private async inspectDir(dir: string): Promise<string | null> {
+    if (resolve(dir) === resolve(this.settingsValues.workingDir)) return this.refreshWorkingDirIssue();
+    return inspectWorkingDir(dir, this.settingsValues.workerIsolation, this.workingDirProbe).catch((error) => {
+      console.error("[superagent] working directory check failed", error);
+      return null;
+    });
+  }
+
+  /**
+   * 共享隔离的持久工作区:全局目录命名「默认 workspace」,档位专属目录以档位名命名;
+   * kv 登记(目录 → id)+ 内存缓存;句柄失效(被归档/目录不符)时按标题找回或重建。
+   * 串行链防止并发启动的 Ticket 为同一目录重复建区。
+   */
+  private sharedWorkspaceFor(dir: string, title: string): Promise<PaseoWorkspaceHandle> {
+    const key = resolve(dir);
+    const ensure = this.workspaceChain.then(async () => {
+      const cached = this.sharedWorkspaceCache.get(key);
+      if (cached) {
+        const descriptor = await cached.refresh().catch(() => null);
+        if (descriptor && !descriptor.archivingAt) return cached;
+        this.sharedWorkspaceCache.delete(key);
+      }
+      const remembered = this.store.get().kv.sharedWorkspaces?.[key];
+      const { handle } = await ensureSharedWorkspace(this.requirePaseo(), remembered, dir, title);
+      this.sharedWorkspaceCache.set(key, handle);
+      if (remembered !== handle.id) {
+        await this.store.update((next) => {
+          next.kv.sharedWorkspaces = { ...next.kv.sharedWorkspaces, [key]: handle.id };
+        });
+      }
+      return handle;
+    });
+    this.workspaceChain = ensure.catch((error) => {
+      console.error("[superagent] shared workspace ensure failed", error);
+    });
+    return ensure;
   }
 
   private workingDirKey(): string {

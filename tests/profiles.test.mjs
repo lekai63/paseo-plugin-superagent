@@ -74,6 +74,35 @@ test("the Router prompt lists worker profiles only when some are configured", ()
   assert.match(unresolved, /- default \(auto-selected\): general/);
 });
 
+test("a profile with its own working directory is listed with it; others stay on the base directory", () => {
+  const state = emptyState();
+  const prompt = composeEvalPrompt({
+    thread, batch: [trigger], state,
+    worker: {
+      workingDir: "/repo", isolation: "worktree", issue: null,
+      defaultWorker: { provider: "codex/gpt", description: "general" },
+      profiles: [
+        { ...PROFILES[0], workingDir: "/srv/other" },
+        { ...PROFILES[1], workingDir: "  " },
+      ],
+    },
+  });
+  assert.match(prompt, /- code \(codex\/gpt; base directory \/srv\/other\): write and fix code, run tests/);
+  assert.match(prompt, /- research \(zcode-acp\/builtin:plan\\GLM\): Chinese reports and research/);
+  assert.match(prompt, /A profile that lists its own base directory runs there instead of the default base directory/);
+});
+
+test("v6 profiles without a working directory parse with an empty default", () => {
+  const parsed = superagentSettings.schema.parse({
+    workerProfiles: [{ name: "code", provider: "codex/gpt", description: "write code" }],
+  });
+  assert.equal(parsed.workerProfiles[0].workingDir, "");
+  const explicit = superagentSettings.schema.parse({
+    workerProfiles: [{ name: "code", provider: "codex/gpt", description: "write code", workingDir: " /srv/other " }],
+  });
+  assert.equal(explicit.workerProfiles[0].workingDir, "/srv/other");
+});
+
 test("ticket lines name a non-default profile so the Router can steer and retry knowingly", () => {
   const state = emptyState();
   const ticket = (id, status, profile) => ({

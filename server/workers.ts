@@ -1,13 +1,14 @@
 import { join } from "node:path";
-import type { PaseoApi } from "@getpaseo/client";
-import type { SuperagentSettingsValues } from "../shared/settings";
-import { slugify, type Ticket } from "../shared/model";
+import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
+import type { Ticket } from "../shared/model";
+import { slugify } from "../shared/model";
 import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 
 /**
  * Worker 层:每个 Ticket 一个独立隔离的 Paseo agent。
- * worktree 隔离时每个 Ticket 一个独立工作区;parent 指向 Router,
- * 因此全部 Worker 出现在 Router 会话的 Subagents track 里,可随时人工介入。
+ * worktree 隔离时每个 Ticket 一个独立 worktree 工作区;shared 隔离时 Worker 与
+ * Router 一起落在该目录的持久共享工作区里。parent 指向 Router,因此全部 Worker
+ * 出现在 Router 会话的 Subagents track 里,可随时人工介入。
  */
 
 /**
@@ -94,6 +95,19 @@ export interface WorkerLaunch {
   workspaceId: string | null;
   /** worktree 隔离的 Worker 实际分支名(创建后读回);shared 隔离没有分支。 */
   branchName: string | null;
+  /** Ticket 是否独占该工作区:worktree = true;shared 的持久工作区 = false,回收时不得归档。 */
+  ownsWorkspace: boolean;
+}
+
+/** Ticket 的执行环境:引擎按档位解析基础目录后传入,launchWorker 不再读全局设置。 */
+export interface WorkerLaunchEnv {
+  /** 该 Ticket 的基础目录(档位专属目录已覆盖全局 workingDir)。 */
+  workingDir: string;
+  isolation: "worktree" | "shared";
+  /** 基础目录根下的项目说明文件(shared 隔离时其归档规则优先)。 */
+  instructionFiles: string[];
+  /** shared 隔离时 Worker 落座的持久共享工作区;worktree 隔离为 null。 */
+  sharedWorkspace: PaseoWorkspaceHandle | null;
 }
 
 type WorkspaceHandle = Awaited<ReturnType<PaseoApi["workspaces"]["create"]>>;
@@ -113,46 +127,49 @@ async function resolveActualBranch(workspace: WorkspaceHandle, requested: string
 }
 
 /**
- * 为 Ticket 启动 Worker:先建工作区(worktree/shared),再在其中创建 agent。
- * provider 由引擎按 Ticket 的档位解析后传入(不同 Ticket 可以跑在不同模型上)。
+ * 为 Ticket 启动 Worker:worktree 隔离先建 Ticket 专属工作区;shared 隔离直接在
+ * 该目录的共享工作区里建 agent。provider 由引擎按 Ticket 的档位解析后传入
+ * (不同 Ticket 可以跑在不同模型上)。
  */
 export async function launchWorker(
   paseo: PaseoApi,
-  settings: SuperagentSettingsValues,
   provider: string,
   ticket: Ticket,
   routerAgentId: string | null,
-  instructionFiles: string[] = [],
+  env: WorkerLaunchEnv,
 ): Promise<WorkerLaunch> {
   if (!provider) throw new Error("worker provider is not configured");
-  if (!settings.workingDir) throw new Error("working directory is not configured");
+  if (!env.workingDir) throw new Error("working directory is not configured");
 
   const branchName =
-    settings.workerIsolation === "worktree"
+    env.isolation === "worktree"
       ? `superagent/${slugify(ticket.title, 24)}-${ticket.id.slice(-6)}`
       : null;
   let workspace: WorkspaceHandle;
+  let ownsWorkspace: boolean;
   try {
-    workspace =
-      settings.workerIsolation === "worktree" && branchName
-        ? await paseo.workspaces.create({
-            title: ticket.title,
-            source: {
-              kind: "worktree",
-              cwd: settings.workingDir,
-              action: "branch-off",
-              branchName,
-            },
-          })
-        : await paseo.workspaces.create({
-            title: ticket.title,
-            source: { kind: "directory", path: settings.workingDir },
-          });
+    if (env.isolation === "worktree" && branchName) {
+      workspace = await paseo.workspaces.create({
+        title: ticket.title,
+        source: {
+          kind: "worktree",
+          cwd: env.workingDir,
+          action: "branch-off",
+          branchName,
+        },
+      });
+      ownsWorkspace = true;
+    } else if (env.sharedWorkspace) {
+      workspace = env.sharedWorkspace;
+      ownsWorkspace = false;
+    } else {
+      throw new Error("shared isolation requires a shared workspace");
+    }
   } catch (error) {
     // daemon 的报错不带路径(如 "Create worktree requires a git repository"),补上基础目录与隔离方式。
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `worker workspace creation failed (base ${settings.workingDir}, isolation ${settings.workerIsolation}): ${message}`,
+      `worker workspace creation failed (base ${env.workingDir}, isolation ${env.isolation}): ${message}`,
       { cause: error },
     );
   }
@@ -164,18 +181,20 @@ export async function launchWorker(
         systemPrompt: WORKER_SYSTEM_PROMPT,
       },
       title: ticket.title,
-      prompt: composeWorkerPrompt(ticket, settings.workingDir, settings.workerIsolation, instructionFiles),
+      prompt: composeWorkerPrompt(ticket, env.workingDir, env.isolation, env.instructionFiles),
       labels: { [TICKET_LABEL]: ticket.id },
       ...(routerAgentId ? { parent: routerAgentId } : {}),
     });
     const actualBranch = branchName ? await resolveActualBranch(workspace, branchName) : null;
-    return { agentId: agent.id, workspaceId: workspace.id, branchName: actualBranch };
+    return { agentId: agent.id, workspaceId: workspace.id, branchName: actualBranch, ownsWorkspace };
   } catch (error) {
-    // Agent 创建失败时还没有可落盘的 Worker ID,先回收已创建的工作区。
-    try {
-      await workspace.archive();
-    } catch (cleanupError) {
-      console.error("[superagent] failed launch workspace archive failed", cleanupError);
+    // Agent 创建失败时还没有可落盘的 Worker ID;Ticket 专属的工作区先回收,共享工作区保留。
+    if (ownsWorkspace) {
+      try {
+        await workspace.archive();
+      } catch (cleanupError) {
+        console.error("[superagent] failed launch workspace archive failed", cleanupError);
+      }
     }
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`worker agent creation failed (provider "${provider}"): ${message}`, { cause: error });
@@ -212,7 +231,7 @@ export async function harvestReport(paseo: PaseoApi, agentId: string): Promise<s
   }
 }
 
-/** 停掉一个 Worker(soft):归档 agent;worktree 工作区一并归档。 */
+/** 停掉一个 Worker(soft):归档 agent;仅 Ticket 独占的工作区(worktree)一并归档。 */
 export async function retireWorker(
   paseo: PaseoApi,
   ticket: Ticket,
@@ -225,7 +244,8 @@ export async function retireWorker(
       console.error("[superagent] worker archive failed", error);
     }
   }
-  if (includeWorkspace && ticket.workspaceId) {
+  // 共享工作区(默认 workspace / 档位工作区)由多个 Ticket 与 Router 共用,永不归档。
+  if (includeWorkspace && ticket.workspaceId && ticket.ownsWorkspace) {
     try {
       await paseo.workspaces.ref(ticket.workspaceId).archive();
     } catch (error) {

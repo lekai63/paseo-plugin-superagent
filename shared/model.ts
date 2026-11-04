@@ -109,6 +109,11 @@ export const TicketSchema = z.object({
   status: z.enum(TICKET_STATUSES),
   workerAgentId: z.string().nullish(),
   workspaceId: z.string().nullish(),
+  /**
+   * 该 Ticket 是否独占 workspaceId 指向的工作区(worktree 隔离 = true;共享隔离的
+   * 持久工作区 = false,回收 Ticket 时不得归档)。旧票据为 null,按 false 处理。
+   */
+  ownsWorkspace: z.boolean().nullish(),
   /** worktree 隔离的 Worker 分支名(评估提示词与 UI 由此告知人去哪审查);shared 隔离为空。 */
   branchName: z.string().nullish(),
   /** Router 为该 Ticket 选的 Worker 档位;空 = 默认 Worker。retry 沿用此档位。 */
@@ -260,6 +265,8 @@ export const SuperagentStateSchema = z.object({
     routerProvider: z.string().nullish(),
     workerProvider: z.string().nullish(),
     routerPromptState: RouterPromptStateSchema.nullish(),
+    /** 共享隔离的持久工作区登记:绝对路径(已 resolve)→ workspace id,跨重启复用。 */
+    sharedWorkspaces: z.record(z.string(), z.string()).nullish(),
     /** 对话页打开着的标签;从未保存过时为空,快照按界面发起的对话给出初始标签。 */
     chatTabs: ChatTabsSchema.nullish(),
   }),
@@ -296,7 +303,11 @@ export const SuperagentSnapshotSchema = z.object({
   routerProvider: z.string().nullish(),
   workerProvider: z.string().nullish(),
   /** 默认 Worker 之外的具名档位(设置原样,UI 展示用)。 */
-  workerProfiles: z.array(z.object({ name: z.string(), provider: z.string(), description: z.string() })),
+  workerProfiles: z.array(z.object({
+    name: z.string(), provider: z.string(), description: z.string(),
+    /** 档位专属基础目录;空 = 用全局 workingDir。 */
+    workingDir: z.string().default(""),
+  })),
   threads: z.array(
     ThreadSchema.extend({
       pendingTriggers: z.number().int(),
