@@ -664,15 +664,50 @@ test("closing a thread retires unsubscribed workers", async (t) => {
   assert.deepEqual(f.calls.workspaceArchives, ["workspace"]);
 });
 
-test("Router stop retires every active worker, including unsubscribed and launching tickets", async (t) => {
+test("closing a thread also retires the leftover worker of a finished ticket", async (t) => {
+  const f = fixture(t, "completed");
+  await f.engine.closeThread("thread");
+  assert.equal(f.ticket.status, "completed", "terminal statuses are not rewritten by closing");
+  assert.equal(f.state.threads[0].state, "closed");
+  assert.deepEqual(f.calls.archives, ["worker"]);
+  assert.deepEqual(f.calls.workspaceArchives, ["workspace"]);
+});
+
+test("canceling a finished ticket keeps its status and retires the leftover worker", async (t) => {
+  const f = fixture(t, "completed");
+  await f.engine.cancelTicket("ticket");
+  assert.equal(f.ticket.status, "completed");
+  assert.deepEqual(f.calls.archives, ["worker"]);
+  assert.deepEqual(f.calls.workspaceArchives, ["workspace"]);
+});
+
+test("canceling a failed ticket keeps its status and retires the leftover worker", async (t) => {
+  const f = fixture(t, "failed");
+  await f.engine.cancelTicket("ticket");
+  assert.equal(f.ticket.status, "failed");
+  assert.deepEqual(f.calls.archives, ["worker"]);
+  assert.deepEqual(f.calls.workspaceArchives, ["workspace"]);
+});
+
+test("retry retires the previous worker and workspace before relaunching", async (t) => {
+  const f = fixture(t, "failed");
+  await f.engine.retryTicket("ticket");
+  await until(() => f.ticket.status === "running");
+  assert.equal(f.ticket.workerAgentId, "new-worker");
+  assert.equal(f.calls.creates, 1, "the relaunched worker gets a fresh workspace");
+  assert.deepEqual(f.calls.archives, ["worker"], "the previous worker is archived, not orphaned");
+  assert.deepEqual(f.calls.workspaceArchives, ["workspace"]);
+});
+
+test("Router stop retires every worker on the thread, including unsubscribed, launching, and finished tickets", async (t) => {
   const f = fixture(t, "running", false);
   f.state.tickets.push({ ...f.ticket, id: "launching", status: "launching", workerAgentId: "starting-worker", workspaceId: "starting-workspace" });
   f.state.tickets.push({ ...f.ticket, id: "completed", status: "completed", workerAgentId: "finished-worker" });
   pendingTrigger(f.state);
   f.controls.verdict = { decision: "stop" };
   await f.engine.runEval("thread");
-  assert.deepEqual(f.calls.archives.sort(), ["starting-worker", "worker"]);
-  assert.deepEqual(f.calls.workspaceArchives.sort(), ["starting-workspace", "workspace"]);
+  assert.deepEqual(f.calls.archives.sort(), ["finished-worker", "starting-worker", "worker"]);
+  assert.deepEqual(f.calls.workspaceArchives.sort(), ["starting-workspace", "workspace", "workspace"]);
   assert.deepEqual(f.state.tickets.map((ticket) => ticket.status), ["canceled", "canceled", "completed"]);
 });
 

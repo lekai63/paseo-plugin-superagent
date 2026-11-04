@@ -372,12 +372,6 @@ export class SuperagentEngine {
     );
   }
 
-  private activeTickets(state: SuperagentState, threadId: string): Ticket[] {
-    return state.tickets.filter(
-      (t) => t.threadId === threadId && !["completed", "failed", "canceled"].includes(t.status),
-    );
-  }
-
   /** 订阅直通投递:直接发进唯一订阅 Ticket 的 Worker 会话(运行中则 steer),零 LLM。 */
   private async deliverDirect(trigger: Trigger, ticket: Ticket): Promise<boolean> {
     if (!ticket.workerAgentId) return false;
@@ -907,11 +901,7 @@ export class SuperagentEngine {
     if (record.kind === "cancel") {
       const ticket = this.store.get().tickets.find((t) => t.id === record.ticketId);
       if (!ticket || ticket.threadId !== record.threadId) return { ok: true };
-      if (["completed", "failed", "canceled"].includes(ticket.status)) {
-        // 上次执行中断:票据已标取消但 Worker 可能尚未回收,补回收。
-        if (ticket.workerAgentId) await retireWorker(paseo, ticket, true);
-        return { ok: true };
-      }
+      // 终态票据的补回收已并入 cancelTicket,RPC 与动作重放两条路径行为一致。
       await this.cancelTicket(ticket.id);
       return { ok: true };
     }
@@ -925,20 +915,13 @@ export class SuperagentEngine {
       // 已被重置过(上次执行中断):pending 票据由看门狗接手启动。
       return { ok: true };
     }
-    // stop:快照仍活跃的 Worker,落盘关闭线程,再逐一回收。执行中断后重跑时线程已
-    // 关闭,改为回收已取消但仍持有 Worker 的票据(其中就包括上次没来得及回收的)。
+    // stop:快照所有仍持有 Worker 的票据(含终态遗留——线程结束即整段收口),落盘关闭
+    // 线程,再逐一回收。重跑时对已归档 agent 的再次归档幂等无害,无需区分上次执行
+    // 是否已把线程关闭。
     const state = this.store.get();
     const thread = state.threads.find((t) => t.id === record.threadId);
     if (!thread) return { ok: true };
-    const alreadyClosed = thread.state === "closed";
-    const retiring = state.tickets.filter(
-      (t) =>
-        t.threadId === record.threadId &&
-        t.workerAgentId &&
-        (alreadyClosed
-          ? t.status === "canceled"
-          : !["completed", "failed", "canceled"].includes(t.status)),
-    );
+    const retiring = state.tickets.filter((t) => t.threadId === record.threadId && t.workerAgentId);
     await this.markThreadClosed(record.threadId);
     for (const ticket of retiring) await retireWorker(paseo, ticket, true);
     return { ok: true };
@@ -1321,7 +1304,12 @@ export class SuperagentEngine {
     const state = this.store.get();
     const ticket = state.tickets.find((t) => t.id === ticketId);
     if (!ticket) throw new Error("ticket not found");
-    const active = !["completed", "failed", "canceled"].includes(ticket.status);
+    // 终态票据不改写状态(completed/failed 的语义保留,汇报与错误原因不丢),补回收
+    // 遗留的 Worker 与工作区即可;也因此 settle 与 cancel 竞态时终态不会被覆盖。
+    if (["completed", "failed", "canceled"].includes(ticket.status)) {
+      if (ticket.workerAgentId) await retireWorker(paseo, ticket, true);
+      return;
+    }
     await this.store.update((next) => {
       const target = next.tickets.find((t) => t.id === ticketId);
       if (!target) return;
@@ -1329,10 +1317,11 @@ export class SuperagentEngine {
       target.subscribed = false;
       target.updatedAt = new Date().toISOString();
     });
-    if (active) await retireWorker(paseo, ticket, true);
+    await retireWorker(paseo, ticket, true);
   }
 
   async retryTicket(ticketId: string): Promise<void> {
+    const paseo = this.requirePaseo();
     const state = this.store.get();
     const ticket = state.tickets.find((t) => t.id === ticketId);
     if (!ticket) throw new Error("ticket not found");
@@ -1349,15 +1338,18 @@ export class SuperagentEngine {
       target.subscribed = true;
       target.updatedAt = new Date().toISOString();
     });
+    // 旧 Worker 与其独占工作区随重试作废:先落盘重置再回收,旧实例不会被新票据引用。
+    if (ticket.workerAgentId) await retireWorker(paseo, ticket, true);
     await this.startTicket(ticketId);
   }
 
   async closeThread(threadId: string): Promise<void> {
     const paseo = this.requirePaseo();
     const state = this.store.get();
-    const active = this.activeTickets(state, threadId);
+    // 关闭线程即整段收口:所有仍持有 Worker 的票据(含终态遗留)一并回收。
+    const retiring = state.tickets.filter((t) => t.threadId === threadId && t.workerAgentId);
     await this.markThreadClosed(threadId);
-    for (const ticket of active) await retireWorker(paseo, ticket, true);
+    for (const ticket of retiring) await retireWorker(paseo, ticket, true);
   }
 
   /** 关闭线程的落盘部分:线程关闭、活跃票据取消、pending 触发消费。 */

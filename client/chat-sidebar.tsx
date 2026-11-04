@@ -271,6 +271,10 @@ function TicketItem({ ticket, observation, direct, threadTitle, readOnly, theme,
           <Button theme={theme} size="xs" variant="ghost" icon="RotateCcw" label="重试"
             onPress={() => void run("已重新派发", () => retryTicket({ ticketId: ticket.id }))} />
         ) : null}
+        {terminal && !readOnly && workerId ? (
+          <ConfirmButton theme={theme} size="xs" icon="Trash2" label="清理" confirmLabel="确认清理(归档会话与工作区)"
+            onConfirm={() => void run("已清理遗留会话", () => cancelTicket({ ticketId: ticket.id }))} />
+        ) : null}
         {terminal || readOnly ? null : (
           <ConfirmButton theme={theme} size="xs" label="取消" confirmLabel="确认取消"
             onConfirm={() => void run("已取消 Ticket", () => cancelTicket({ ticketId: ticket.id }))} />
