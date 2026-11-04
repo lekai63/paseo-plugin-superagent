@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { KeyboardAvoidingView, Pressable, Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
@@ -63,6 +63,19 @@ export function ChatScreen(props: ChatScreenProps) {
   const [sheetOpen, setSheetOpen] = useState(Boolean(requestedPanel) && layout.compact);
   const [pending, setPending] = useState<PendingMessage | null>(null);
   const docked = !layout.compact && width >= DOCK_MIN_WIDTH;
+
+  // 键盘避让要以窗口为参照:KeyboardAvoidingView 只知道自己在父容器里的位置,而宿主把
+  // 插件放在自己的页头之下,不补上这段距离(页头 + 安全区)避让高度就会少算一截。
+  const rootRef = useRef<View>(null);
+  const [keyboardOffset, setKeyboardOffset] = useState(0);
+  const measureOffset = useCallback(() => {
+    rootRef.current?.measureInWindow((_x, y) => {
+      setKeyboardOffset((current) => (y >= 0 && current !== y ? y : current));
+    });
+  }, []);
+  useEffect(() => {
+    measureOffset();
+  }, [measureOffset]);
 
   useEffect(() => {
     if (params.threadId) setSelected(params.threadId);
@@ -178,9 +191,20 @@ export function ChatScreen(props: ChatScreenProps) {
   const notFound = Boolean(threadId && detailData && !thread);
 
   return (
-    <View style={{ flex: 1, flexDirection: "row", backgroundColor: theme.colors.surface0 }}
-      onLayout={(event) => setWidth(event.nativeEvent.layout.width)}>
-      <KeyboardAvoidingView style={{ flex: 1, minWidth: 0 }} behavior={layout.platform === "ios" ? "padding" : undefined}>
+    <View
+      ref={rootRef}
+      style={{ flex: 1, flexDirection: "row", backgroundColor: theme.colors.surface0 }}
+      onLayout={(event) => {
+        setWidth(event.nativeEvent.layout.width);
+        measureOffset();
+      }}
+    >
+      {/* Android 上宿主开了 edge-to-edge(窗口不再随键盘缩放),同样要靠 padding 抬升;web 交给浏览器。 */}
+      <KeyboardAvoidingView
+        style={{ flex: 1, minWidth: 0 }}
+        behavior={layout.platform === "web" ? undefined : "padding"}
+        keyboardVerticalOffset={keyboardOffset}
+      >
         {deciding ? (
           <View style={{ height: 44, borderBottomWidth: 1, borderBottomColor: theme.colors.border }} />
         ) : (
