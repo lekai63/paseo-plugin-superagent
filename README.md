@@ -145,3 +145,34 @@ npm run typecheck
 目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用;execution 提供直通判定与会话状态推导)、`server/`(store/router/workers/engine)、`client/`(对话页 chat-screen、顶部标签 chat-tab-bar 与其本机副本 chat-tabs-store、消息流 chat-messages、输入框 chat-composer、右侧栏 chat-sidebar、设置页 settings-screen,以及 ui.tsx 里的按钮/徽标/提示条等小型原语;`shared/chat.ts` 把线程的触发与裁决排成对话)。引擎细节见 `server/engine.ts` 头注。
 
 `npm test` 使用 Node.js 24+ 的内置测试运行器与现有 TypeScript 依赖,验证 Worker 续跑、投递失败回退、取消竞态、重启恢复与飞书连接清理;不连接真实 provider 或 IM 服务。
+
+### iOS 闪退排查:避免整包导入 React Native
+
+本插件曾出现启用后 iOS 连接 daemon 即闪退、Web 正常、禁用插件后恢复的故障。将 React Native 整包导入改为按需导入后,已在 Paseo 0.15.0 的 iOS 客户端确认解决。
+
+触发点是 `client/host-font-scale.ts` 中的命名空间导入:
+
+```ts
+// 避免:会生成复制 React Native 全部导出的互操作代码。
+import * as ReactNative from "react-native";
+```
+
+Paseo 0.15.0 的插件编译器为兼容 Hermes,会把 esbuild 的 `get: () => from[key]` 改为 `value: from[key]`。原本延迟读取的导出因此变成立即读取。React Native 通过 getter 延迟初始化模块,整包复制会提前加载插件未使用的 `PushNotificationIOS`、`DevMenu` 等模块;某个模块缺少原生实现时,初始化异常可能被 Metro 上报为 fatal error,导致整个 iOS app 退出。Web 不走相同的原生模块初始化路径,因此仅验证 Web 无法发现此问题。
+
+修复方式是只导入实际使用的模块,避免生成整包复制代码:
+
+```ts
+import { NativeModules, Platform, TurboModuleRegistry } from "react-native";
+
+const platform = Platform.OS;
+```
+
+该问题发生在插件 bundle 加载阶段,早于组件渲染和业务函数调用,函数内部的 `try/catch` 覆盖不到导入阶段。也应避免通过对象展开或遍历整个 React Native 导出对象再次触发全部 getter。原生存储访问只在 iOS/Android 分支执行,模块不可用时保留平台默认字号;浏览器 API 集中在 `client/web.ts`,每个入口先判断 `Platform.OS === "web"`。
+
+回归测试 `tests/client-loading.test.mjs` 按上述编译规则生成 bundle,为未使用的原生模块设置抛错 getter,验证插件加载和注册不会访问它们,并覆盖 iOS/Android/Web 字号读取及异常回退:
+
+```bash
+node --import ./tests/register-typescript.mjs --test tests/client-loading.test.mjs
+```
+
+排查同类故障时,先检查实际下发 bundle 的导入代码与原生模块初始化路径,再结合 iOS 真机验证;只通过 TypeScript 检查或 Web 测试不足以确认跨端兼容。
