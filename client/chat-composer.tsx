@@ -4,6 +4,7 @@ import type { PluginHostProps } from "@getpaseo/plugin/client";
 import { Icon, TextInput } from "@getpaseo/plugin/client/ui";
 import type { Tone } from "../shared/labels";
 import { CHAT_FONT, CHAT_MAX_WIDTH } from "./chat-messages";
+import { readWebSendShortcut } from "./web";
 import { space, toneColor, withAlpha, type Theme } from "./ui";
 
 const MIN_INPUT_HEIGHT = { web: 46, native: 30 } as const;
@@ -13,6 +14,8 @@ const drafts = new Map<string, string>();
 
 type WebKeyPressEvent = NativeSyntheticEvent<TextInputKeyPressEventData & {
   shiftKey?: boolean;
+  metaKey?: boolean;
+  ctrlKey?: boolean;
   /** 输入法组字中(中文/日文等)按下的回车只确认候选词,不能发送。 */
   isComposing?: boolean;
   keyCode?: number;
@@ -26,8 +29,10 @@ export interface ComposerHint {
 
 /**
  * 对话输入框:停靠在消息流下方,外观对齐 Paseo 的 composer(圆角 16 的卡片、
- * 右下角圆形发送键)。桌面 Web 上 Enter 发送、Shift+Enter 换行,组字中的回车不发送。
- * 草稿按 draftKey 保存在本次 app 会话里;调用方切换对话时应以 draftKey 作为 key 重新挂载。
+ * 右下角圆形发送键)。桌面 Web 的发送键跟随 Paseo 全局设置(Settings → General 的
+ * sendShortcut):默认 Enter 发送、Shift+Enter 换行;设为 Cmd/Ctrl+Enter 后裸 Enter 换行。
+ * 组字中的回车不发送。草稿按 draftKey 保存在本次 app 会话里;调用方切换对话时应以
+ * draftKey 作为 key 重新挂载。
  */
 export function ChatComposer({
   theme,
@@ -80,7 +85,12 @@ export function ChatComposer({
 
   const onKeyPress = (event: WebKeyPressEvent) => {
     const native = event.nativeEvent;
-    if (native.key !== "Enter" || native.shiftKey || native.isComposing || native.keyCode === 229) return;
+    if (native.key !== "Enter" || native.isComposing || native.keyCode === 229) return;
+    // 与宿主 composer 的 resolveMessageInputEnterAction 一致:Shift+Enter 总是换行;
+    // 发送键跟随宿主全局设置,每次按键现读,改设置后立即生效。
+    if (native.shiftKey) return;
+    const sendKey = readWebSendShortcut();
+    if (sendKey === "mod-enter" && !native.metaKey && !native.ctrlKey) return;
     event.preventDefault();
     void send();
   };

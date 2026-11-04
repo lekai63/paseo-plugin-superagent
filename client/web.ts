@@ -1,5 +1,6 @@
 import { Platform } from "react-native";
 import { APP_SETTINGS_KEY, LEGACY_SETTINGS_KEY, resolveUiFontSize } from "../shared/host-font";
+import { DEFAULT_SEND_SHORTCUT, resolveHostSendShortcut, type HostSendShortcut } from "../shared/host-send-shortcut";
 
 interface StorageEvent {
   key: string | null;
@@ -32,6 +33,24 @@ export function readWebUiFontSize(): number | null {
     return resolveUiFontSize(read(APP_SETTINGS_KEY), read(LEGACY_SETTINGS_KEY), "web");
   } catch {
     return null;
+  }
+}
+
+/**
+ * 宿主的发送快捷键设置(Settings → General)。每次按键时现读,用户在宿主里改设置后
+ * 无需重挂载立即生效;读不到时按宿主默认 Enter 发送。
+ */
+export function readWebSendShortcut(): HostSendShortcut {
+  if (Platform.OS !== "web") return DEFAULT_SEND_SHORTCUT;
+  try {
+    const storage = browser.localStorage;
+    if (!storage || typeof storage.getItem !== "function") return DEFAULT_SEND_SHORTCUT;
+    const read = (key: string) => {
+      try { return storage.getItem(key); } catch { return null; }
+    };
+    return resolveHostSendShortcut(read(APP_SETTINGS_KEY), read(LEGACY_SETTINGS_KEY));
+  } catch {
+    return DEFAULT_SEND_SHORTCUT;
   }
 }
 
