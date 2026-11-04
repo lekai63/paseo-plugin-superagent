@@ -332,46 +332,59 @@ function ThreadsTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme 
   );
 }
 
+/** 对话行首行高度,以及悬停时覆盖在时间处的按钮高度(Button xs)。 */
+const THREAD_LINE_HEIGHT = 20;
+const THREAD_ACTION_SIZE = 28;
+
 function ThreadRow({ thread, tickets, selected, theme, onPress, onClose }: {
   thread: Thread;
   tickets: Ticket[];
   selected: boolean;
   theme: Theme;
   onPress(): void;
-  /** 给出时行尾有「关闭对话」(再点一次确认),不必先打开对话再去「任务」里关。 */
+  /** 给出时可在时间处关闭对话(再点一次确认),不必先打开对话再去「任务」里关。 */
   onClose?: () => void;
 }) {
   const [hovered, setHovered] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [armed, setArmed] = useState(false);
+  const [armedWidth, setArmedWidth] = useState(0);
   const own = tickets.filter((ticket) => ticket.threadId === thread.id);
   const status = threadStatus(thread, own, thread.lastDecision ? [thread.lastDecision] : []);
   const preview = thread.latestResult ? markdownPreview(thread.latestResult.text).replace(/\s+/g, " ").trim() : thread.summary ?? "";
   // 关闭对话会取消它所有未结束的 Ticket(含待命的 Worker),确认文案里说清楚。
   const workers = own.filter((ticket) => !TERMINAL_TICKET_STATUSES.includes(ticket.status)).length;
-  // 触屏没有悬停:一直显示;桌面在悬停、选中或已上膛时显示,隐藏时仍占位,避免标题宽度跳动。
-  const showClose = Boolean(onClose) && (Platform.OS !== "web" || hovered || selected || armed);
+  // 桌面悬停时,时间处换成归档按钮;触屏没有悬停,改为在选中的对话上显示。上膛期间一直显示。
+  const showAction = Boolean(onClose) && (armed || (Platform.OS === "web" ? hovered : selected));
+  // 按钮是行按钮的兄弟节点(web 不能嵌套按钮),绝对定位盖在时间上;时间只隐藏不移除,
+  // 宽度不变,标题不跳。确认文案更宽时按实测宽度给时间处留位,标题随之让开。
+  const actionWidth = armed ? armedWidth : THREAD_ACTION_SIZE;
   return (
     <View onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}
-      style={{ flexDirection: "row", alignItems: "center", gap: space.xs, paddingRight: onClose ? space.xs : 0, borderRadius: radius.lg,
+      style={{ borderRadius: radius.lg,
         backgroundColor: selected ? theme.colors.surface2 : pressed || hovered ? theme.colors.surface1 : "transparent" }}>
       <Pressable accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={`${thread.title},${status.label}`}
         onPress={onPress} onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
-        style={{ flex: 1, minWidth: 0, gap: 2, paddingLeft: space.sm, paddingRight: onClose ? 0 : space.sm, paddingVertical: space.sm }}>
+        style={{ gap: 2, paddingHorizontal: space.sm, paddingVertical: space.sm }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
           <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: toneColor(status.tone, theme) }} />
-          <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: fontSize.base }}>{thread.title}</Text>
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{relativeTime(thread.updatedAt)}</Text>
+          <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: fontSize.base,
+            lineHeight: THREAD_LINE_HEIGHT }}>{thread.title}</Text>
+          <View style={{ minWidth: showAction ? actionWidth : 0, alignItems: "flex-end" }}>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm, opacity: showAction ? 0 : 1 }}>
+              {relativeTime(thread.updatedAt)}
+            </Text>
+          </View>
         </View>
         <Text numberOfLines={1} style={{ marginLeft: 6 + space.sm, color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
           {status.label}{preview ? ` · ${preview}` : ""}
         </Text>
       </Pressable>
-      {onClose ? (
-        <View accessibilityElementsHidden={!showClose} importantForAccessibility={showClose ? "auto" : "no-hide-descendants"}
-          style={{ flexShrink: 0, opacity: showClose ? 1 : 0, pointerEvents: showClose ? "auto" : "none" }}>
+      {onClose && showAction ? (
+        <View onLayout={armed ? (event) => setArmedWidth(event.nativeEvent.layout.width) : undefined}
+          style={{ position: "absolute", right: space.sm, top: space.sm + (THREAD_LINE_HEIGHT - THREAD_ACTION_SIZE) / 2 }}>
           <ConfirmButton theme={theme} size="xs" variant="ghost" icon="Archive" accessibilityLabel={`关闭对话 ${thread.title}`}
-            confirmLabel={workers ? `关闭并取消 ${workers} 个 Worker` : "确认关闭"} disabled={!showClose}
+            confirmLabel={workers ? `关闭并取消 ${workers} 个 Worker` : "确认关闭"}
             onArmedChange={setArmed} onConfirm={onClose} />
         </View>
       ) : null}
