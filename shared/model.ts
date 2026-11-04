@@ -296,6 +296,8 @@ export const SuperagentSnapshotSchema = z.object({
     ThreadSchema.extend({
       pendingTriggers: z.number().int(),
       ticketCounts: z.record(z.string(), z.number().int()),
+      /** 最近一次裁决:线程列表不带裁决记录时也能推导「评估失败」「已答复」。 */
+      lastDecision: z.object({ outcome: z.enum(DECISION_OUTCOMES), createdAt: z.string() }).nullish(),
     }),
   ),
   tickets: z.array(TicketSchema),

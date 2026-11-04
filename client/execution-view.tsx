@@ -15,7 +15,8 @@ interface ExecutionViewProps {
   navigation: PluginScreenProps["navigation"];
   compact: boolean;
   workspaceId?: string;
-  onDetails(input?: { threadId?: string; ticketId?: string }): void;
+  /** 打开对话页:带线程时进入该对话,否则打开对话列表。 */
+  onDetails(input?: { threadId?: string }): void;
 }
 
 function observationStatus(observation?: AgentObservation): StatusLabel {
@@ -24,7 +25,7 @@ function observationStatus(observation?: AgentObservation): StatusLabel {
   return agentStatus(observation.agent);
 }
 
-/** 一个 Router 连接当前 Worker,终态记录和消息通过详情进入历史页。 */
+/** 一个 Router 连接当前 Worker,终态记录和消息在对话页查看。 */
 export function ExecutionView({ snapshot, theme, hostId, navigation, compact, workspaceId, onDetails }: ExecutionViewProps) {
   const [showAllThreads, setShowAllThreads] = useState(false);
   const [width, setWidth] = useState(0);
@@ -61,7 +62,7 @@ export function ExecutionView({ snapshot, theme, hostId, navigation, compact, wo
           {running} 执行中 · {waiting} 待命 · {pending.reduce((sum, thread) => sum + thread.pendingTriggers, 0)} 待评估
         </Text>
         {failed ? <Button theme={theme} variant="ghost" size="xs" icon="CircleAlert" label={`${failed} 个失败任务`} danger onPress={() => onDetails()} /> : null}
-        {workspaceId ? <Button theme={theme} variant="ghost" size="xs" icon="History" label="历史消息" onPress={() => onDetails()} /> : null}
+        {workspaceId ? <Button theme={theme} variant="ghost" size="xs" icon="MessagesSquare" label="全部对话" onPress={() => onDetails()} /> : null}
       </View>
       <Card theme={theme} style={{ padding: space.lg }}>
         <View style={{ flexDirection: narrow ? "column" : "row", gap: space.md }}>
@@ -99,13 +100,13 @@ export function ExecutionView({ snapshot, theme, hostId, navigation, compact, wo
                 {workspaceId && !showAllThreads ? "当前工作区没有活跃 Worker" : pending.length ? "Router 正在处理待评估任务" : "暂无活跃 Worker"}
               </Text>
               <Button theme={theme} variant="ghost" size="xs"
-                label={workspaceId && !showAllThreads ? "查看全部线程" : "查看历史消息"}
+                label={workspaceId && !showAllThreads ? "查看全部线程" : "打开对话列表"}
                 onPress={() => workspaceId && !showAllThreads ? setShowAllThreads(true) : onDetails()} />
             </View> : ordered.map((ticket) => <View key={ticket.id} style={{ width: workerWidth }}>
               <WorkerNode ticket={ticket} threadTitle={threads.find((thread) => thread.id === ticket.threadId)?.title ?? ""}
                 observation={ticket.workerAgentId ? agents[ticket.workerAgentId] : undefined}
                 direct={directIds.has(ticket.id)} theme={theme} navigation={navigation}
-                onDetails={() => onDetails({ threadId: ticket.threadId, ticketId: ticket.id })} />
+                onDetails={() => onDetails({ threadId: ticket.threadId })} />
             </View>)}
           </View>
         </View>
@@ -115,7 +116,7 @@ export function ExecutionView({ snapshot, theme, hostId, navigation, compact, wo
             <Text numberOfLines={1} style={{ flex: 1, color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
               {thread.id === snapshot.engine.currentEvalThreadId ? "评估中" : "等待评估"} · {thread.title} · {thread.pendingTriggers} 条
             </Text>
-            <Button theme={theme} variant="ghost" size="xs" label="详情" accessibilityLabel={`${thread.title}消息详情`} onPress={() => onDetails({ threadId: thread.id })} />
+            <Button theme={theme} variant="ghost" size="xs" label="对话" accessibilityLabel={`打开对话:${thread.title}`} onPress={() => onDetails({ threadId: thread.id })} />
           </View>)}
         </View> : null}
         {result ? <View style={{ marginTop: space.md, paddingTop: space.md, borderTopWidth: 1, borderTopColor: theme.colors.border, gap: space.xs }}>
@@ -125,9 +126,7 @@ export function ExecutionView({ snapshot, theme, hostId, navigation, compact, wo
               {result.kind === "router_reply" ? "Router 最新答复" : "Worker 最新汇报"}
             </Text>
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{relativeTime(result.createdAt)}</Text>
-            <Button theme={theme} variant="outline" size="xs" label="查看结果" onPress={() => onDetails({
-              threadId: result.threadId, ...(result.ticketIds.length === 1 ? { ticketId: result.ticketIds[0] } : {}),
-            })} />
+            <Button theme={theme} variant="outline" size="xs" label="查看结果" onPress={() => onDetails({ threadId: result.threadId })} />
           </View>
           <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{result.title}</Text>
           <Text numberOfLines={2} style={{ color: theme.colors.foreground, fontSize: fontSize.base, lineHeight: 20 }}>{markdownPreview(result.text).replace(/\s+/g, " ").trim()}</Text>
@@ -175,7 +174,7 @@ function WorkerNode({ ticket, threadTitle, observation, direct, theme, navigatio
         <Text numberOfLines={1} style={{ flex: 1, paddingLeft: space.xs, color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
           {active && ticket.startedAt ? `启动至今 ${elapsedTime(ticket.startedAt)}` : ""}
         </Text>
-        <Button theme={theme} label="详情" accessibilityLabel={`${ticket.title}详情`} size="xs" variant="ghost" onPress={onDetails} />
+        <Button theme={theme} label="对话" accessibilityLabel={`打开对话:${ticket.title}`} size="xs" variant="ghost" onPress={onDetails} />
       </View>
     </View>
   );

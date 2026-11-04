@@ -1,10 +1,9 @@
 import type { PluginClientContext, PluginScreenProps, PluginSidebarItemProps, PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
-import { SuperagentScreen } from "./client/screen";
+import { ChatScreen } from "./client/chat-screen";
+import type { SidebarTab } from "./client/chat-sidebar";
 import { SuperagentSettingsScreen } from "./client/settings-screen";
 import { ExecutionPanel } from "./client/execution-panel";
-import { HistoryScreen } from "./client/history-screen";
-import { StatusScreen } from "./client/status-screen";
 import { superagentDispatchRpc } from "./shared/rpc";
 import { useExecutionAgents, useSuperagentState } from "./client/query";
 import { sidebarWorkerCounts } from "./shared/sidebar-status";
@@ -34,39 +33,33 @@ function SuperagentSidebarItem({ currentScreen, openScreen, host, theme }: Plugi
 
 export default function contribute(client: PluginClientContext) {
   const openSettings = () => client.openSettings(SETTINGS_SCREEN_ID);
-  const openMain = () => client.openScreen({ screenId: "main" });
-  const openStatus = () => client.openScreen({ screenId: "status" });
-  const openHistory = (input: { threadId?: string; ticketId?: string } = {}) => client.openScreen({
-    screenId: "history",
-    params: { ...(input.threadId ? { threadId: input.threadId } : {}), ...(input.ticketId ? { ticketId: input.ticketId } : {}) },
+  /** 打开对话页:带线程时进入该对话,否则打开侧栏的指定标签(默认对话列表)。 */
+  const openChat = (input: { threadId?: string; panel?: SidebarTab } = {}) => client.openScreen({
+    screenId: "main",
+    params: input.threadId ? { threadId: input.threadId } : { panel: input.panel ?? "threads" },
   });
 
-  // 主界面需要跳到设置页,而 openSettings 只在 client 上下文里有:在这里绑定一次。
+  // 对话页需要跳到设置页,而 openSettings 只在 client 上下文里有:在这里绑定一次。
   function MainScreen(props: PluginScreenProps) {
-    return <SuperagentScreen {...props} openSettings={openSettings} openHistory={openHistory} openStatus={openStatus} />;
+    return <ChatScreen {...props} openSettings={openSettings} />;
+  }
+  // 旧版的「历史消息」「运行状态」页已并入对话页右侧栏;保留路由,打开时直接定位到对应标签。
+  function HistoryAlias(props: PluginScreenProps) {
+    return <ChatScreen {...props} openSettings={openSettings} defaultPanel="threads" />;
+  }
+  function StatusAlias(props: PluginScreenProps) {
+    return <ChatScreen {...props} openSettings={openSettings} defaultPanel="status" />;
   }
 
-  client.addScreen({
-    id: "main",
-    title: "Superagent",
-    Component: MainScreen,
-  });
-  client.addScreen({
-    id: "history",
-    title: "Superagent 历史消息",
-    Component: (props) => <HistoryScreen {...props} openMain={openMain} openHistory={openHistory} />,
-  });
-  client.addScreen({
-    id: "status",
-    title: "Superagent 运行状态",
-    Component: (props) => <StatusScreen {...props} openMain={openMain} openSettings={openSettings} />,
-  });
+  client.addScreen({ id: "main", title: "Superagent", Component: MainScreen });
+  client.addScreen({ id: "history", title: "Superagent", Component: HistoryAlias });
+  client.addScreen({ id: "status", title: "Superagent", Component: StatusAlias });
   client.addWorkspacePanel({
     id: "execution",
     title: "Superagent 执行视图",
     icon: "Network",
     locations: ["workspace", "explorer"],
-    Component: (props: PluginWorkspacePanelProps) => <ExecutionPanel {...props} openHistory={openHistory} />,
+    Component: (props: PluginWorkspacePanelProps) => <ExecutionPanel {...props} openChat={openChat} />,
   });
   client.addCommandCenterItem({
     id: "open-execution",
@@ -83,11 +76,11 @@ export default function contribute(client: PluginClientContext) {
   });
   client.addCommandCenterItem({
     id: "open-history",
-    title: "Superagent 历史消息",
-    icon: "History",
-    keywords: ["superagent", "历史", "消息", "线程"],
+    title: "Superagent 对话记录",
+    icon: "MessagesSquare",
+    keywords: ["superagent", "历史", "消息", "线程", "对话"],
     context: "global",
-    onSelect: () => openHistory(),
+    onSelect: () => openChat({ panel: "threads" }),
   });
   client.addCommandCenterItem({
     id: "open-status",
@@ -95,9 +88,9 @@ export default function contribute(client: PluginClientContext) {
     icon: "Activity",
     keywords: ["superagent", "状态", "watchdog"],
     context: "global",
-    onSelect: openStatus,
+    onSelect: () => openChat({ panel: "status" }),
   });
-  // 配置放在 Settings → Plugins → Superagent,主界面只保留操作与监控。
+  // 配置放在 Settings → Plugins → Superagent,对话页只保留对话、操作与监控。
   client.addSettingsScreen({
     id: SETTINGS_SCREEN_ID,
     title: "Superagent",

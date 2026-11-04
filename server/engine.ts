@@ -1350,7 +1350,7 @@ export class SuperagentEngine {
 
   // ------------------------------------------------------------- snapshot
 
-  snapshot(options: { includeClosed?: boolean; threadId?: string } = {}): SuperagentSnapshot {
+  snapshot(options: { includeClosed?: boolean; threadId?: string; omitRecords?: boolean } = {}): SuperagentSnapshot {
     const state = this.store.get();
     const settings = this.settingsValues;
     const threads = state.threads
@@ -1363,9 +1363,12 @@ export class SuperagentEngine {
         for (const ticket of tickets) {
           ticketCounts[ticket.status] = (ticketCounts[ticket.status] ?? 0) + 1;
         }
+        const lastDecision = state.decisions.reduce<Decision | null>((latest, decision) =>
+          decision.threadId === thread.id && (!latest || decision.createdAt >= latest.createdAt) ? decision : latest, null);
         return {
           ...thread,
           latestResult: threadResult(thread, state),
+          lastDecision: lastDecision ? { outcome: lastDecision.outcome, createdAt: lastDecision.createdAt } : null,
           pendingTriggers: state.triggers.filter(
             (t) => t.threadId === thread.id && t.status === "pending",
           ).length,
@@ -1385,11 +1388,11 @@ export class SuperagentEngine {
       tickets: state.tickets
         .filter((t) => threads.some((th) => th.id === t.threadId))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
-      triggers: state.triggers
+      triggers: options.omitRecords ? [] : state.triggers
         .filter((t) => threads.some((th) => th.id === t.threadId))
         .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
         .slice(0, 120),
-      decisions: state.decisions
+      decisions: options.omitRecords ? [] : state.decisions
         .filter((d) => threads.some((th) => th.id === d.threadId))
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
         .slice(0, 120),

@@ -15,8 +15,6 @@ export type Theme = PluginHostProps["theme"];
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24 } as const;
 export const radius = { md: 6, lg: 8, full: 999 } as const;
 export const fontSize = { sm: 12, base: 14, stat: 20 } as const;
-/** 主界面的居中内容列宽度:宽屏下保持行长可读。 */
-export const MAX_CONTENT_WIDTH = 880;
 
 export function toneColor(tone: Tone, theme: Theme): string {
   switch (tone) {
@@ -353,8 +351,4 @@ export function ExpandableText({
       {toggle}
     </View>
   );
-}
-
-export function Divider({ theme }: { theme: Theme }) {
-  return <View style={{ height: 1, backgroundColor: theme.colors.border }} />;
 }

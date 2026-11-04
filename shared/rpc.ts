@@ -42,8 +42,10 @@ export const superagentStateRpc = defineRpc({
   name: "superagent.state",
   input: z.object({
     includeClosed: z.boolean().optional(),
-    /** 详情页只读取当前线程的消息,避免被其他线程占用最近记录窗口。 */
+    /** 对话页只读取当前线程的消息,避免被其他线程占用最近记录窗口。 */
     threadId: z.string().optional(),
+    /** 线程列表只需要线程与 Ticket:不带触发与裁决正文,减轻轮询负担。 */
+    omitRecords: z.boolean().optional(),
   }),
   output: SuperagentSnapshotSchema,
 });

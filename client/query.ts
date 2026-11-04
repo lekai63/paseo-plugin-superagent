@@ -9,12 +9,13 @@ import type { ExecutionAgent } from "../shared/execution";
 /** 操作后按此前缀失效;具体快照再按宿主隔离。 */
 export const STATE_QUERY_KEY = ["superagent", "state"] as const;
 
-export function useSuperagentState(hostId: string, input: RpcInput<typeof superagentStateRpc> = {}) {
+export function useSuperagentState(hostId: string, input: RpcInput<typeof superagentStateRpc> = {}, enabled = true) {
   const fetchState = useRpc(superagentStateRpc);
   return useQuery({
     queryKey: [...STATE_QUERY_KEY, hostId, input],
     queryFn: () => fetchState(input),
     refetchInterval: 3000,
+    enabled,
   });
 }
 

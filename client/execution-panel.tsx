@@ -6,7 +6,7 @@ import { useSuperagentState } from "./query";
 import { Button, Notice, space } from "./ui";
 
 export function ExecutionPanel(props: PluginWorkspacePanelProps & {
-  openHistory(input?: { threadId?: string; ticketId?: string }): void;
+  openChat(input?: { threadId?: string }): void;
 }) {
   const query = useSuperagentState(props.host.id);
   if (query.isPending) return <Loading />;
@@ -18,7 +18,7 @@ export function ExecutionPanel(props: PluginWorkspacePanelProps & {
       </Notice> : null}
       <View>
         {query.data ? <ExecutionView snapshot={query.data} theme={props.theme} hostId={props.host.id} navigation={props.navigation}
-          compact={props.layout.compact} workspaceId={props.workspaceId} onDetails={props.openHistory} /> : null}
+          compact={props.layout.compact} workspaceId={props.workspaceId} onDetails={props.openChat} /> : null}
       </View>
     </ScrollView>
   );

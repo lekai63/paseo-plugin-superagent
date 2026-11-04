@@ -33,24 +33,6 @@ export function outcomeLabel(outcome: Decision["outcome"]): string {
   }
 }
 
-export function outcomeTone(outcome: Decision["outcome"]): Tone {
-  switch (outcome) {
-    case "dispatch":
-    case "steer":
-    case "retry":
-    case "reply":
-      return "default";
-    case "cancel":
-    case "stop":
-      return "warning";
-    case "ignore":
-      return "muted";
-    case "unparsed":
-    case "error":
-      return "danger";
-  }
-}
-
 export function ticketStatusLabel(status: Ticket["status"]): string {
   switch (status) {
     case "pending":
@@ -81,21 +63,6 @@ export function ticketStatusTone(status: Ticket["status"]): Tone {
       return "danger";
     default:
       return "muted";
-  }
-}
-
-export function triggerStatusLabel(status: Trigger["status"]): string {
-  switch (status) {
-    case "pending":
-      return "待评估";
-    case "filtered":
-      return "已过滤";
-    case "evaluated":
-      return "已评估";
-    case "delivered":
-      return "已直通";
-    case "failed":
-      return "失败";
   }
 }
 

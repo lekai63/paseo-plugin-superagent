@@ -52,14 +52,14 @@ paseo plugin install /absolute/path/to/paseo-plugin-superagent
 paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 ```
 
-侧栏出现 **Superagent** 入口。配置在 **Settings → Plugins → Superagent**(主界面未配置时会提示并一键跳转;Command Center 搜「Superagent 设置」也能打开)。所有修改先进草稿,点「保存」统一生效,输入有误会在对应行标红:
+侧栏出现 **Superagent** 入口。配置在 **Settings → Plugins → Superagent**(对话页未配置时会提示并一键跳转;Command Center 搜「Superagent 设置」也能打开)。所有修改先进草稿,点「保存」统一生效,输入有误会在对应行标红:
 
 | 设置 | 说明 |
 |---|---|
-| 工作目录 | 绝对路径。Router 的 cwd,也是所有 Worker 的基础目录(**必填**)。`worktree` 隔离时必须位于 git 仓库内,否则主界面与设置页都会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式。所有 Worker 都只在这一个目录(或其 worktree)里工作 |
+| 工作目录 | 绝对路径。Router 的 cwd,也是所有 Worker 的基础目录(**必填**)。`worktree` 隔离时必须位于 git 仓库内,否则对话页与设置页都会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式。所有 Worker 都只在这一个目录(或其 worktree)里工作 |
 | Router provider/model | 留空自动选用宿主可用默认(claude → codex → opencode → 任意)。model id 以 `paseo provider models <provider>` 列出的为准(如 `zcode-acp/builtin:bigmodel-coding-plan\GLM-5.3-Flash`,单个反斜杠);填错时 Router 评估会报出可用 id |
 | Router 自定义规则 | 设置页「Router 规则」直接填写,支持多行,最多 12000 字符,配置字段为 `routerInstructions`。用于答复语言、分派偏好和汇报格式,留空使用默认规则。配置变化后在下一次评估补发一次,之后复用,无需重建 Router 会话,也不依赖 provider 读取 `AGENTS.md`/`ROUTER.md`;不改变 Worker 的项目规则。自定义规则补充内置编排约束,Router 仍只做裁决并按 JSON actions 输出 |
-| IM 单条消息上限 | 默认 600,可设 100–4000 字符,沿用配置字段 `imReplyMaxChars`。超长答复按段落/换行优先拆分为多条,添加 `[1/N]` 序号(计入上限)后顺序发送,正文完整保留;普通 emoji 按字素边界拆分。发送前保存全部分段,每段确认成功后记录进度;失败暂停,在「运行状态 → IM 答复投递」从失败段补发。重启恢复未完成的发送,已确认的段不重发。远端已接收但回执丢失或落盘前崩溃时,该段仍可能重复,通道未提供统一的恰好一次投递保证 |
+| IM 单条消息上限 | 默认 600,可设 100–4000 字符,沿用配置字段 `imReplyMaxChars`。超长答复按段落/换行优先拆分为多条,添加 `[1/N]` 序号(计入上限)后顺序发送,正文完整保留;普通 emoji 按字素边界拆分。发送前保存全部分段,每段确认成功后记录进度;失败暂停,在对话页右侧栏「状态 → IM 答复投递」从失败段补发。重启恢复未完成的发送,已确认的段不重发。远端已接收但回执丢失或落盘前崩溃时,该段仍可能重复,通道未提供统一的恰好一次投递保证 |
 | Worker provider/model | 同上,建议配最强模型。配置了 Worker 档位时它是**默认 Worker**,可另填一句用途说明 |
 | Worker 档位 | 可选。默认 Worker 之外的具名档位(名字 + provider/model + 用途说明),如 `code → codex/…`「写码、修 bug、跑测试」。Router 的 dispatch 用 `"profile":"<名字>"` 按用途为每个任务选档位;省略或名字不存在时用默认 Worker(后者记入裁决)。Router 只能用到这里列出的模型,触发文本无法把 Worker 引向任意 provider。Ticket 记录所选档位与实际模型:retry 沿用档位、按该档位当前设置的模型启动;档位被删除后改用默认 Worker。不配置档位时行为与单一 Worker 完全一致 |
 | Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared`(直接在工作目录里干活,不需要 git。工作目录根下有 `AGENTS.md`/`CLAUDE.md` 时,Worker 按其中的归档规则放产出并完成要求的登记;没有规则时,每个 Ticket 的产出放进专属子目录 `tasks/<本地日期>-<标题>-<id 尾号>/`。Router 与 Worker 的提示词都会说明) |
@@ -110,18 +110,20 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 ## 使用
 
-1. **派发**:「新任务」始终位于主界面最前面;也可在任意 agent 会话里 `/superagent 修复登录页的 CORS 问题并补测试`。
-2. **观察**:主界面主要展示一个 Router 连接当前 Worker 的调用图。Worker 节点仅保留任务名、所属线程、模型、运行状态与直通标识;权限等待/会话异常优先排列,已完成、失败与取消的任务进入历史页面。点击 Worker 节点打开会话,「详情」进入对应线程。工作区标签页或右侧面板仍可添加「Superagent 执行视图」,默认定位当前 Worker 工作区所属线程,可切换查看全部线程;窄面板自动采用纵向布局。
-3. **历史与状态**:顶部「历史消息」打开独立页面,集中查看线程消息、Router 裁决、完整汇报和已关闭线程;选定线程后单独读取其最近记录。「运行状态」独立展示概览数字、组件配置与看门狗巡检。两页均提供返回主界面的入口,命令中心也有同名命令。
-4. **追加与干预**:在线程详情底部追加消息——恰好一个活跃订阅且已有会话的 Worker 时直通它,否则交给 Router。详情页保留取消/重试 Ticket、取消直通(运行中)/标记完成(待命)、重新评估、关闭线程等操作。取消与关闭需要再点一次确认。
-5. **查看结果**:调用图下方保留一条紧凑的「Router 最新答复」摘要,线程关闭、Worker 会话被回收后仍可查看。「查看结果」直接进入该线程,优先展示 Router 答复,下方任务保留 Worker 原始汇报。Router 尚未答复时先展示已保存的 Worker 汇报。最新结果随线程落盘,不依赖会话和活动窗口;旧数据从保留的裁决/汇报还原。新汇报保存原文,Router 的评估输入仍按原有预算截断。
+主界面是一个对话页,用法和在 Paseo 项目里与 agent 对话一样:左边是对话,右侧栏放对话之外的信息。
+
+1. **对话**:在底部输入框描述任务即开始一段新对话(一个线程),Router 评估后直接答复,或派发 Worker 执行;继续在同一对话里发消息即追加到该线程。桌面端 Enter 发送、Shift+Enter 换行,输入法组字中的回车不会发送。输入框下方实时提示这条消息的去向:新对话、交给 Router,或在恰好一个活跃订阅且已有会话的 Worker 时「直通 Worker」;已关闭的对话发消息会重新打开。也可在任意 agent 会话里 `/superagent 修复登录页的 CORS 问题并补测试`。
+2. **消息流**:你的消息(含飞书/QQ 等 IM 消息与 agent 委派,标注来源)显示为右侧气泡,Router 答复以 Markdown 正文显示。派发、转向、取消、Worker 汇报、评估失败等编排动作显示为紧凑的可展开行:派发行跟随 Ticket 实时状态并可直接打开 Worker 会话,汇报行带两行预览、展开看完整原文。Router 评估中或 Worker 执行中时,消息流底部显示运行指示与用时。停在底部时自动跟随新消息,向上翻阅时不打断。
+3. **右侧栏**:「任务」展示 Router 状态与当前对话的全部 Worker(未选对话时为所有进行中的 Worker),权限等待/会话异常优先排列,可打开会话、取消直通(运行中)/标记完成(待命)、重试、取消 Ticket,以及重新评估、关闭对话;取消与关闭需要再点一次确认。「对话」列出进行中与已关闭的对话,可新建或切换。「状态」展示概览数字、组件配置、看门狗巡检与 IM 答复投递(失败可从断点补发)。宽屏时侧栏可收起;窄屏与手机上从标题栏按钮以弹层打开。
+4. **执行视图**:工作区标签页或右侧面板仍可添加「Superagent 执行视图」,以 Router → Worker 调用图展示当前工作,默认定位当前 Worker 工作区所属线程,可切换查看全部线程;「对话」「查看结果」跳到对话页的对应对话。命令中心的「Superagent 对话记录」「Superagent 运行状态」打开对话页并定位到侧栏对应标签。
+5. **查看结果**:最新的 Router 答复与 Worker 汇报随线程落盘,线程关闭、Worker 会话被回收后仍在对话里可见;旧数据从保留的裁决/汇报还原。新汇报保存原文,Router 的评估输入仍按原有预算截断。对话页每次读取一个线程最近 120 条触发与裁决,更早的记录不显示。
 6. **侧栏状态**:Superagent 左侧使用跟随 Paseo 主题配色的固定 Network 图标。字样右侧以「蓝点 + 数字」显示运行中的 Worker 数,蓝点带旋转光环;「绿点 + 数字」显示本轮完成、待命的 Worker 数。任一数量为 0 时隐藏对应的点和数字,两者都为 0 或状态不可用时不显示右侧计数。根据当前 Worker 会话实时更新,已回收的会话不累计到完成数,尚未启动的排队任务不计作运行中的 Worker。系统开启减少动态效果时光环保持静止。
 
 ## 设计取舍与限制
 
 - **Router 会话即记忆**:按 agent ID、原生 session ID、配置摘要及已读事件保存初始化游标,同一可恢复会话跨插件重启继续复用。会话重建、配置变化、检测到压缩、上下文状态无法确认或裁决格式失效时补齐规则;新会话/新线程按存根恢复上下文。未提供原生会话 ID 的 provider 在引擎重启后保守初始化一次。减少的是重复新增的提示词,历史上下文仍可能参与模型输入与计费,实际取决于 provider 的缓存和计费方式。
 - **评估串行**:单个 Router agent 全局串行评估(避免相互打断);高并发线程会排队。
-- **失败退避**:线程连续 3 次评估失败(unparsed/异常)后看门狗不再自动重排,线程徽标显示「评估失败」,需在线程卡片点「重新评估」手动重试——防止 Router 持续劣化时烧 token 的失控循环。
+- **失败退避**:线程连续 3 次评估失败(unparsed/异常)后看门狗不再自动重排,线程徽标显示「评估失败」,需在对话右侧栏「任务」里点「重新评估」手动重试——防止 Router 持续劣化时烧 token 的失控循环。
 - **权限等待**:Worker 的权限请求走 Paseo 原生权限流(app 内批准);等待期间 Ticket 保持运行,不误判完成。
 - **执行视图刷新**:编排快照每 3 秒更新,可见 Worker 与 Router 会话每 5 秒读取,权限/attention 事件触发即时刷新;读取失败明确显示状态不可用。视图表达当前状态和路由关系,不提供完整调用回放或逐条消息传输动画。
 - **外部 Trigger 源**:飞书/QQ 已支持;GitHub/Slack 轮询源是下一扩展点(Paseo Hub 触发器亦可作为上游把事件投给 `superagent.dispatch`)。
@@ -137,6 +139,6 @@ npm install
 npm run typecheck
 ```
 
-目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用;execution 提供直通判定与调用图状态推导)、`server/`(store/router/workers/engine)、`client/`(主界面 screen、历史页 history-screen、运行状态页 status-screen、调用图 execution-view 与工作区面板 execution-panel、设置页 settings-screen、新任务 dispatch-card、线程 thread-card,以及 ui.tsx 里的按钮/徽标/提示条等小型原语)。引擎细节见 `server/engine.ts` 头注。
+目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用;execution 提供直通判定与调用图状态推导)、`server/`(store/router/workers/engine)、`client/`(对话页 chat-screen、消息流 chat-messages、输入框 chat-composer、右侧栏 chat-sidebar、调用图 execution-view 与工作区面板 execution-panel、设置页 settings-screen,以及 ui.tsx 里的按钮/徽标/提示条等小型原语;`shared/chat.ts` 把线程的触发与裁决排成对话)。引擎细节见 `server/engine.ts` 头注。
 
 `npm test` 使用 Node.js 24+ 的内置测试运行器与现有 TypeScript 依赖,验证 Worker 续跑、投递失败回退、取消竞态、重启恢复与飞书连接清理;不连接真实 provider 或 IM 服务。
