@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
-import { directTicket } from "../shared/execution";
+import { directTickets } from "../shared/execution";
 import { recentResults, threadResult } from "../shared/results";
 import { defaultChatTabs, pruneChatTabs, type ChatTabs } from "../shared/chat-tabs";
 import {
@@ -293,10 +293,10 @@ export class SuperagentEngine {
     const threadKey = thread.key;
     const threadId = thread.id;
 
-    // 订阅直通:恰好一个活跃订阅 Ticket 时后续事件直通其 Worker(Worker 汇报除外)。
-    // 多个订阅 Worker 意见不一时交给 Router 选择目标,不能默认发给第一个。
+    // 订阅直通(fan-out):活跃订阅且有会话的 Worker 全部收到本条消息;
+    // 一个可用会话都没有(无订阅,或订阅仍在启动)才交 Router 评估。
     const subscribed = this.subscribedTickets(this.store.get(), threadId);
-    const direct = directTicket(subscribed);
+    const direct = subscribed.filter((ticket) => ticket.workerAgentId);
 
     const trigger: Trigger = {
       id: triggerId,
@@ -322,7 +322,7 @@ export class SuperagentEngine {
       if (target) target.updatedAt = now;
     });
 
-    if (direct) {
+    if (direct.length > 0) {
       const directDelivered = await this.deliverDirect(trigger, direct);
       if (directDelivered) return { threadId, triggerId, directDelivered, note: null };
     }
@@ -377,27 +377,35 @@ export class SuperagentEngine {
     );
   }
 
-  /** 订阅直通投递:直接发进唯一订阅 Ticket 的 Worker 会话(运行中则 steer),零 LLM。 */
-  private async deliverDirect(trigger: Trigger, ticket: Ticket): Promise<boolean> {
-    if (!ticket.workerAgentId) return false;
+  /**
+   * 订阅直通投递(fan-out):直接发进全部活跃订阅 Worker 的会话(运行中则 steer),零 LLM。
+   * 任一投递成功即视为已直通(触发标记 delivered,note 记录全部命中目标);
+   * 全部失败才退回评估路径,失败原因逐个留备注。
+   */
+  private async deliverDirect(trigger: Trigger, tickets: Ticket[]): Promise<boolean> {
     const prefix = trigger.context ? "[context] " : "";
-    const outcome = await this.sendToWorker(ticket.id, `${prefix}${trigger.text}`, "steer");
-    if (outcome.ok) {
+    const delivered: string[] = [];
+    const failures: string[] = [];
+    for (const ticket of tickets) {
+      const outcome = await this.sendToWorker(ticket.id, `${prefix}${trigger.text}`, "steer");
+      if (outcome.ok) delivered.push(ticket.id);
+      else failures.push(`${ticket.id}: ${truncate(outcome.error, 120)}`);
+    }
+    if (delivered.length > 0) {
       await this.store.update((next) => {
         const target = next.triggers.find((t) => t.id === trigger.id);
         if (target) {
           target.status = "delivered";
-          target.note = `direct → worker of ${ticket.id}`;
+          target.note = `direct → workers of ${delivered.join(", ")}`;
         }
       });
       return true;
     }
-    // 直通失败退回评估路径。
     await this.store.update((next) => {
       const target = next.triggers.find((t) => t.id === trigger.id);
       if (target) {
         target.status = "pending";
-        target.note = `direct delivery failed: ${truncate(outcome.error, 200)}`;
+        target.note = `direct delivery failed: ${failures.join("; ") || "no subscriber has a live session"}`;
       }
     });
     return false;
@@ -452,11 +460,22 @@ export class SuperagentEngine {
 
   // ------------------------------------------------------------ eval loop
 
-  /** 批窗口:窗口内同线程触发合并进一次评估(文章的批处理设计)。 */
+  /**
+   * 批窗口:窗口内同线程触发合并进一次评估(文章的批处理设计)。
+   * 窗口一经武装不再被后续触发重置——持续到来的消息只会加入本次批次,
+   * 不会把评估点无限推迟(有界合并);显式 delayMs(如 0 = 立即)仍会替换定时器。
+   */
   private scheduleEval(threadId: string, delayMs?: number): void {
-    const delay = delayMs ?? this.settingsValues.evalBatchMs;
-    const existing = this.batchTimers.get(threadId);
-    if (existing) clearTimeout(existing);
+    if (delayMs !== undefined) {
+      const existing = this.batchTimers.get(threadId);
+      if (existing) clearTimeout(existing);
+      this.armEval(threadId, delayMs);
+      return;
+    }
+    if (!this.batchTimers.has(threadId)) this.armEval(threadId, this.settingsValues.evalBatchMs);
+  }
+
+  private armEval(threadId: string, delay: number): void {
     const timer = setTimeout(() => {
       this.batchTimers.delete(threadId);
       this.evalQueued.add(threadId);

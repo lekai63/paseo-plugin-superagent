@@ -853,16 +853,32 @@ test("a steer before stop is delivered before the thread closes", async (t) => {
   assert.equal(f.state.pendingActions.length, 0);
 });
 
-test("follow-ups on a thread with several subscribed tickets go through the Router", async (t) => {
+test("follow-ups on a thread with several subscribed tickets fan out to every worker", async (t) => {
   const f = fixture(t);
   f.state.tickets.push({
     ...f.ticket, id: "ticket2", workerAgentId: "worker2", workspaceId: "workspace2",
   });
-  const result = await f.engine.dispatch({ threadId: "thread", task: "cancel the second task" });
-  assert.equal(result.directDelivered, false);
-  assert.deepEqual(f.calls.evals, ["thread"]);
-  assert.equal(f.state.triggers[0].status, "pending");
-  assert.deepEqual(f.calls.sends, []);
+  const result = await f.engine.dispatch({ threadId: "thread", task: "group follow-up" });
+  assert.equal(result.directDelivered, true);
+  assert.deepEqual(f.calls.sends.map((send) => send.id), ["worker", "worker2"]);
+  assert.ok(f.calls.sends.every((send) => send.text.includes("group follow-up")));
+  assert.equal(f.state.triggers[0].status, "delivered");
+  assert.match(f.state.triggers[0].note, /direct → workers of ticket, ticket2/);
+  assert.deepEqual(f.calls.evals, [], "no Router LLM call for the fan-out delivery");
+});
+
+test("a fan-out where one worker fails still delivers and records only the successes", async (t) => {
+  const f = fixture(t);
+  f.state.tickets.push({
+    ...f.ticket, id: "ticket2", workerAgentId: "worker2", workspaceId: "workspace2",
+  });
+  // 失败注入:仅第二个 Worker 的会话发送报错。
+  f.ref("worker2").send = async () => { throw new Error("worker2 offline"); };
+  const result = await f.engine.dispatch({ threadId: "thread", task: "partial fan-out" });
+  assert.equal(result.directDelivered, true);
+  assert.equal(f.state.triggers[0].status, "delivered");
+  assert.match(f.state.triggers[0].note, /direct → workers of ticket$/);
+  assert.deepEqual(f.calls.evals, []);
 });
 
 test("a renamed worktree branch is read back from the created workspace", async (t) => {
@@ -1441,4 +1457,22 @@ test("worker reports truncated in the trigger text keep a recall pointer to the 
   await f.engine.enqueueReport("thread", f.ticket, "short one");
   const short = f.state.triggers.filter((trigger) => trigger.kind === "report").at(-1);
   assert.doesNotMatch(short.text, /report truncated/);
+});
+
+test("the eval batch window is armed once and not reset by later triggers", async (t) => {
+  const f = fixture(t, "waiting");
+  f.values.evalBatchMs = 120;
+  // fixture 把实例的 scheduleEval 换成了记录桩,这里测真实实现。
+  const schedule = SuperagentEngine.prototype.scheduleEval;
+  schedule.call(f.engine, "thread");
+  const armed = f.engine.batchTimers.get("thread");
+  assert.ok(armed, "window armed");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  schedule.call(f.engine, "thread");
+  assert.equal(f.engine.batchTimers.get("thread"), armed, "later triggers do not reset the armed window");
+  // 显式延时(0 = 立即)仍然替换定时器:handback/forceEval 需要插队。
+  schedule.call(f.engine, "thread", 0);
+  assert.notEqual(f.engine.batchTimers.get("thread"), armed);
+  // 触发后定时器清空(线程无 pending 触发,runEval 立即返回)。
+  await until(() => !f.engine.batchTimers.has("thread"));
 });

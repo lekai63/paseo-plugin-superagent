@@ -1,21 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { agentStatus, currentTickets, directTicket, elapsedTime, ticketPriority } from "../shared/execution.ts";
+import { agentStatus, currentTickets, directTickets, elapsedTime, ticketPriority } from "../shared/execution.ts";
 
 const ticket = (id, extra = {}) => ({ id, threadId: "thread", status: "running", subscribed: true, workerAgentId: `worker-${id}`, ...extra });
 
-test("direct delivery requires exactly one active subscription, including subscriptions with a missing session", () => {
+test("direct delivery fans out to every active subscription that has a session", () => {
   const running = ticket("one");
-  assert.equal(directTicket([running]), running);
-  assert.equal(directTicket([ticket("waiting", { status: "waiting" })])?.id, "waiting");
-  assert.equal(directTicket([]), null);
-  assert.equal(directTicket([ticket("missing", { workerAgentId: null })]), null);
-  assert.equal(directTicket([running, ticket("two")]), null);
-  assert.equal(directTicket([running, ticket("missing", { workerAgentId: null })]), null);
+  assert.deepEqual(directTickets([running]).map((entry) => entry.id), ["one"]);
+  assert.deepEqual(directTickets([ticket("waiting", { status: "waiting" })]).map((entry) => entry.id), ["waiting"]);
+  assert.deepEqual(directTickets([]), []);
+  // 缺会话的订阅不参与直通(等 Router 评估),也不会挡住其他订阅。
+  assert.deepEqual(directTickets([ticket("missing", { workerAgentId: null })]), []);
+  assert.deepEqual(directTickets([running, ticket("missing", { workerAgentId: null })]).map((entry) => entry.id), ["one"]);
+  // 多个有会话的订阅 → 全部直通(fan-out)。
+  assert.deepEqual(directTickets([running, ticket("two")]).map((entry) => entry.id), ["one", "two"]);
   for (const status of ["pending", "launching", "completed", "failed", "canceled"]) {
-    assert.equal(directTicket([running, ticket(status, { status })]), running);
+    assert.deepEqual(directTickets([running, ticket(status, { status })]).map((entry) => entry.id), ["one"]);
   }
-  assert.equal(directTicket([running, ticket("unsubscribed", { subscribed: false })]), running);
+  assert.deepEqual(directTickets([running, ticket("unsubscribed", { subscribed: false })]).map((entry) => entry.id), ["one"]);
 });
 
 test("session permission and provider errors remain distinct from Ticket lifecycle", () => {

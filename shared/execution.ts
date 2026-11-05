@@ -2,10 +2,12 @@ import type { Ticket } from "./model";
 import { SUBSCRIBED_STATUSES } from "./model";
 import type { StatusLabel } from "./labels";
 
-/** 引擎与追加输入框共用的直通条件。缺少会话的订阅仍参与计数。 */
-export function directTicket(tickets: readonly Ticket[]): Ticket | null {
-  const subscribed = tickets.filter((ticket) => ticket.subscribed && SUBSCRIBED_STATUSES.includes(ticket.status));
-  return subscribed.length === 1 && subscribed[0].workerAgentId ? subscribed[0] : null;
+/**
+ * 直通目标:全部仍有会话的活跃订阅票。≥1 即 fan-out 直通(每个订阅 Worker 都收到),
+ * 一个都没有(无订阅,或订阅尚无会话)才交 Router 评估;引擎与追加输入框共用此判定。
+ */
+export function directTickets(tickets: readonly Ticket[]): Ticket[] {
+  return tickets.filter((ticket) => ticket.subscribed && SUBSCRIBED_STATUSES.includes(ticket.status) && ticket.workerAgentId);
 }
 
 /** 仅描述会话,不从 idle 推断 Ticket 完成。 */

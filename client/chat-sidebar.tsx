@@ -5,7 +5,7 @@ import { useRpc, useSettings, type PluginScreenProps } from "@getpaseo/plugin/cl
 import { Icon, useToast } from "@getpaseo/plugin/client/ui";
 import type { SuperagentSnapshot, Ticket } from "../shared/model";
 import { SUBSCRIBED_STATUSES, TERMINAL_TICKET_STATUSES } from "../shared/model";
-import { agentStatus, currentTickets, directTicket, elapsedTime, ticketPriority } from "../shared/execution";
+import { agentStatus, currentTickets, directTickets, elapsedTime, ticketPriority } from "../shared/execution";
 import {
   ACTIVE_TICKET_STATUSES,
   clockTime,
@@ -147,7 +147,7 @@ function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, h
   const observe = (ticket: Ticket) => (ticket.workerAgentId ? agents[ticket.workerAgentId] : undefined);
   const ordered = [...tickets].sort((a, b) => ticketPriority(a, observe(a)?.agent) - ticketPriority(b, observe(b)?.agent)
     || b.createdAt.localeCompare(a.createdAt));
-  const direct = thread ? directTicket(tickets) : null;
+  const directs = thread ? directTickets(tickets) : [];
   return (
     <>
       <RouterCard snapshot={snapshot} observation={snapshot.routerAgentId ? agents[snapshot.routerAgentId] : undefined}
@@ -159,7 +159,7 @@ function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, h
             {thread ? "Router 还没有为这段对话派发 Worker。" : "暂无进行中的 Worker。选择一段对话查看它的全部任务。"}
           </Text>
         ) : ordered.map((ticket) => (
-          <TicketItem key={ticket.id} ticket={ticket} observation={observe(ticket)} direct={direct?.id === ticket.id}
+          <TicketItem key={ticket.id} ticket={ticket} observation={observe(ticket)} direct={directs.some((direct) => direct.id === ticket.id)}
             threadTitle={thread ? null : snapshot.threads.find((item) => item.id === ticket.threadId)?.title ?? null}
             readOnly={thread?.state === "closed"} theme={theme} navigation={navigation}
             onOpenThread={thread ? undefined : () => onSelectThread(ticket.threadId)} />

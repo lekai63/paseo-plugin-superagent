@@ -6,7 +6,7 @@ import { Icon, Loading, Modal, ScrollView, useToast } from "@getpaseo/plugin/cli
 import type { SuperagentSnapshot } from "../shared/model";
 import { buildChatEntries } from "../shared/chat";
 import { closeChatTab, entryChatTab, openChatTab } from "../shared/chat-tabs";
-import { directTicket } from "../shared/execution";
+import { directTickets } from "../shared/execution";
 import { markdownPreview, relativeTime, threadStatus } from "../shared/labels";
 import { superagentDispatchRpc } from "../shared/rpc";
 import { ChatComposer, type ComposerHint } from "./chat-composer";
@@ -170,11 +170,12 @@ export function ChatScreen(props: ChatScreenProps) {
     setSelected(next);
   };
 
-  const direct = thread && thread.state !== "closed" ? directTicket(tickets) : null;
+  const directs = thread && thread.state !== "closed" ? directTickets(tickets) : [];
   let hint: ComposerHint = { icon: "Route", label: "交给 Router 评估" };
   if (!threadId) hint = { icon: "Sparkles", label: "新对话 · Router 评估后答复或派发 Worker" };
   else if (thread?.state === "closed") hint = { icon: "RotateCcw", label: "对话已关闭,发送后重新打开" };
-  else if (direct) hint = { icon: "CornerDownRight", label: `直通 Worker · ${direct.title}` };
+  else if (directs.length === 1) hint = { icon: "CornerDownRight", label: `直通 Worker · ${directs[0].title}` };
+  else if (directs.length > 1) hint = { icon: "CornerDownRight", label: `直通 ${directs.length} 个订阅 Worker` };
   let disabledReason: string | null = null;
   if (deciding) disabledReason = "正在读取对话";
   else if (!threadId) {
