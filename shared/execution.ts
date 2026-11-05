@@ -2,12 +2,24 @@ import type { Ticket } from "./model";
 import { SUBSCRIBED_STATUSES } from "./model";
 import type { StatusLabel } from "./labels";
 
+/** Ticket 额外订阅的线程(旧状态与测试替身可能没有该字段)。 */
+export function followsOf(ticket: Pick<Ticket, "follows">): string[] {
+  return ticket.follows ?? [];
+}
+
+/** Ticket 是否订阅了某个线程:本线程看 subscribed,其他线程看 follows(多对多)。 */
+export function subscribesTo(ticket: Pick<Ticket, "threadId" | "subscribed" | "follows">, threadId: string): boolean {
+  return ticket.threadId === threadId ? ticket.subscribed : followsOf(ticket).includes(threadId);
+}
+
 /**
  * 直通目标:全部仍有会话的活跃订阅票。≥1 即 fan-out 直通(每个订阅 Worker 都收到),
  * 一个都没有(无订阅,或订阅尚无会话)才交 Router 评估;引擎与追加输入框共用此判定。
+ * 给出 threadId 时按该线程判定订阅(含跟随该线程的其他线程票据)。
  */
-export function directTickets(tickets: readonly Ticket[]): Ticket[] {
-  return tickets.filter((ticket) => ticket.subscribed && SUBSCRIBED_STATUSES.includes(ticket.status) && ticket.workerAgentId);
+export function directTickets(tickets: readonly Ticket[], threadId?: string): Ticket[] {
+  return tickets.filter((ticket) => (threadId ? subscribesTo(ticket, threadId) : ticket.subscribed)
+    && SUBSCRIBED_STATUSES.includes(ticket.status) && ticket.workerAgentId);
 }
 
 /** 仅描述会话,不从 idle 推断 Ticket 完成。 */

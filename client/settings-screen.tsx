@@ -11,7 +11,7 @@ import {
   SettingsSwitch,
   TextInput,
 } from "@getpaseo/plugin/client/ui";
-import type { SuperagentSnapshot } from "../shared/model";
+import { MAX_SPECULATIVE_TICKETS, type SuperagentSnapshot } from "../shared/model";
 import {
   MAX_WORKER_PROFILES,
   MAX_ROUTER_INSTRUCTIONS_CHARS,
@@ -28,7 +28,7 @@ import { fontSize, radius, space } from "./ui";
 
 /**
  * Settings → Plugins → Superagent。宿主负责标题栏、返回、滚动与居中栏宽;
- * 这里只按主题分节:工作目录 → 模型 → Router 规则 → Worker 档位 → 执行 → 委派 → IM 触发源 → 保存。
+ * 这里只按主题分节:工作目录 → 模型 → Router 规则 → Worker 档位 → 执行 → 主动与巡检 → 委派 → IM 触发源 → 保存。
  *
  * 所有修改先进草稿,统一保存(规则用于下一次评估,IM 配置变更会重连)。
  * 数值字段在草稿里是字符串,便于边输入边校验。
@@ -356,6 +356,27 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
           <TextField {...field} name="maxTicketAttempts" label="失败重试次数" hint="Ticket 失败后自动重试的上限,0 表示不重试" />
           <TextField {...field} name="evalBatchMs" label="批处理窗口(毫秒)" hint="窗口内同一线程的多条消息合并成一次 Router 评估" />
           <TextField {...field} name="triggerMaxChars" label="单条消息上限(字符)" hint="超出部分会被截断" />
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection
+        title="主动与巡检"
+        info="投机执行:Router 依据「Router 规则」里写明的主动策略(例如「群里有人反馈问题时,静默复现并尝试简单修复」),对没人明确提出的事项先在后台派 Worker 尝试,结果有价值才交付,否则静默丢弃。LLM 看门狗:独立的巡检会话按间隔检查每个 Worker 是否有实质进展、是否偏离任务,必要时提醒、打断、取消、重试,或交 Router 告诉你;也可以直接打开它的会话问诊。两者都会额外消耗模型调用,默认关闭。"
+      >
+        <SettingsCard>
+          <SwitchField
+            {...field}
+            name="speculativeEnabled"
+            label="投机执行"
+            hint={`需要在「Router 规则」里写明主动策略才会触发;同时最多 ${MAX_SPECULATIVE_TICKETS} 个投机任务`}
+          />
+          <SwitchField {...field} name="watchdogEnabled" label="LLM 看门狗" hint="独立巡检会话,判断 Worker 的进展与偏离" />
+          {form.watchdogEnabled ? (
+            <>
+              <TextField {...field} name="watchdogProvider" label="看门狗模型" hint="留空沿用 Router 的模型" placeholder="同 Router" />
+              <TextField {...field} name="watchdogIntervalMin" label="巡检间隔(分钟)" hint="没有进行中的任务、也没有异常时跳过,不调用模型" />
+            </>
+          ) : null}
         </SettingsCard>
       </SettingsSection>
 

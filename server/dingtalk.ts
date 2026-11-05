@@ -55,7 +55,7 @@ export class DingtalkSource implements ImSource {
     this.client = null;
   }
 
-  async send(origin: TriggerOrigin, text: string): Promise<void> {
+  async send(origin: TriggerOrigin, text: string): Promise<null> {
     // replyRef = 消息自带的 sessionWebhook(有过期时间,晚到回复可能失败)。
     if (!origin.replyRef) throw new Error("dingtalk reply missing sessionWebhook");
     const controller = new AbortController();
@@ -76,6 +76,8 @@ export class DingtalkSource implements ImSource {
     } finally {
       clearTimeout(timeout);
     }
+    // sessionWebhook 回执不带消息 id。
+    return null;
   }
 
   /** 服务端依赖回调 ACK 防重推(60s 未响应会重发)。 */

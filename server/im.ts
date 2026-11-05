@@ -12,6 +12,11 @@ export interface InboundMessage {
   sender: string;
   /** 上下文补充(观察模式的未 @ 群消息):不单独要求行动,Router 只做判断。 */
   context?: boolean;
+  /**
+   * 这条消息引用/回复的平台消息 id(直接父消息在前,回复链根消息在后)。引擎据此
+   * 把回复归入被引用消息所在的线程,并把被引用内容内联给 Router(§3.3)。
+   */
+  replyTo?: string[];
 }
 
 /**
@@ -25,6 +30,7 @@ export interface InboundDrop {
   text: string;
   sender: string;
   reason: string;
+  replyTo?: string[];
 }
 
 export type TriggerHandler = (message: InboundMessage) => void;
@@ -34,7 +40,8 @@ export interface ImSource {
   readonly channel: TriggerOrigin["channel"];
   start(onTrigger: TriggerHandler, onDrop?: DropHandler): Promise<void>;
   stop(): Promise<void>;
-  send(origin: TriggerOrigin, text: string): Promise<void>;
+  /** 发送一段答复;通道回执带消息 id 时返回它(供引用回复时找回线程),否则返回空。 */
+  send(origin: TriggerOrigin, text: string): Promise<string | null | void>;
 }
 
 /** 多源管理:按设置启停各 channel,并作为引擎的 ReplySink。 */
@@ -82,9 +89,9 @@ export class ImManager implements ReplySink {
     for (const channel of [...this.sources.keys()]) await this.stopChannel(channel);
   }
 
-  async send(origin: TriggerOrigin, text: string): Promise<void> {
+  async send(origin: TriggerOrigin, text: string): Promise<string | null> {
     const source = this.sources.get(origin.channel);
     if (!source) throw new Error(`IM channel ${origin.channel} is not running`);
-    await source.send(origin, text);
+    return (await source.send(origin, text)) ?? null;
   }
 }

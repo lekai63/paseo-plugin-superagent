@@ -5,7 +5,7 @@ import { useRpc, useSettings, type PluginScreenProps } from "@getpaseo/plugin/cl
 import { Icon, useToast } from "@getpaseo/plugin/client/ui";
 import type { SuperagentSnapshot, Ticket } from "../shared/model";
 import { SUBSCRIBED_STATUSES, TERMINAL_TICKET_STATUSES } from "../shared/model";
-import { agentStatus, currentTickets, directTickets, elapsedTime, ticketPriority } from "../shared/execution";
+import { agentStatus, currentTickets, directTickets, elapsedTime, followsOf, subscribesTo, ticketPriority } from "../shared/execution";
 import {
   ACTIVE_TICKET_STATUSES,
   clockTime,
@@ -15,6 +15,7 @@ import {
   ticketStatusLabel,
   ticketStatusTone,
   watchdogNoteLabel,
+  patrolSummaryLabel,
   type StatusLabel,
 } from "../shared/labels";
 import {
@@ -138,7 +139,7 @@ function observationStatus(observation?: AgentObservation): StatusLabel | null {
 function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, hostId, navigation }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
   const thread = threadId ? snapshot.threads.find((item) => item.id === threadId) : undefined;
   const tickets = thread
-    ? snapshot.tickets.filter((ticket) => ticket.threadId === thread.id)
+    ? snapshot.tickets.filter((ticket) => ticket.threadId === thread.id || followsOf(ticket).includes(thread.id))
     : currentTickets(snapshot.tickets);
   // 只读取进行中 Worker 的会话状态;已结束的任务不必轮询。
   const ids = [snapshot.routerAgentId, ...currentTickets(tickets).map((ticket) => ticket.workerAgentId)]
@@ -147,7 +148,7 @@ function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, h
   const observe = (ticket: Ticket) => (ticket.workerAgentId ? agents[ticket.workerAgentId] : undefined);
   const ordered = [...tickets].sort((a, b) => ticketPriority(a, observe(a)?.agent) - ticketPriority(b, observe(b)?.agent)
     || b.createdAt.localeCompare(a.createdAt));
-  const directs = thread ? directTickets(tickets) : [];
+  const directs = thread ? directTickets(tickets, thread.id) : [];
   return (
     <>
       <RouterCard snapshot={snapshot} observation={snapshot.routerAgentId ? agents[snapshot.routerAgentId] : undefined}
@@ -160,7 +161,9 @@ function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, h
           </Text>
         ) : ordered.map((ticket) => (
           <TicketItem key={ticket.id} ticket={ticket} observation={observe(ticket)} direct={directs.some((direct) => direct.id === ticket.id)}
-            threadTitle={thread ? null : snapshot.threads.find((item) => item.id === ticket.threadId)?.title ?? null}
+            viewThreadId={thread?.id ?? null}
+            threadTitle={thread && ticket.threadId === thread.id ? null
+              : snapshot.threads.find((item) => item.id === ticket.threadId)?.title ?? (thread ? "其他对话" : null)}
             readOnly={thread?.state === "closed"} theme={theme} navigation={navigation}
             onOpenThread={thread ? undefined : () => onSelectThread(ticket.threadId)} />
         ))}
@@ -207,10 +210,12 @@ function RouterCard({ snapshot, observation, theme, navigation }: {
   );
 }
 
-function TicketItem({ ticket, observation, direct, threadTitle, readOnly, theme, navigation, onOpenThread }: {
+function TicketItem({ ticket, observation, direct, viewThreadId = null, threadTitle, readOnly, theme, navigation, onOpenThread }: {
   ticket: Ticket;
   observation?: AgentObservation;
   direct: boolean;
+  /** 正在查看的对话;票据只是跟随它(多对多订阅)时,退订作用于这段对话。 */
+  viewThreadId?: string | null;
   threadTitle: string | null;
   readOnly: boolean;
   theme: Theme;
@@ -222,7 +227,9 @@ function TicketItem({ ticket, observation, direct, threadTitle, readOnly, theme,
   const retryTicket = useRpc(superagentRetryTicketRpc);
   const unsubscribe = useRpc(superagentUnsubscribeRpc);
   const terminal = TERMINAL_TICKET_STATUSES.includes(ticket.status);
-  const subscribed = ticket.subscribed && SUBSCRIBED_STATUSES.includes(ticket.status);
+  const scopeThreadId = viewThreadId ?? ticket.threadId;
+  const following = scopeThreadId !== ticket.threadId;
+  const subscribed = subscribesTo(ticket, scopeThreadId) && SUBSCRIBED_STATUSES.includes(ticket.status);
   const active = ACTIVE_TICKET_STATUSES.includes(ticket.status);
   const session = ticket.workerAgentId ? observationStatus(observation) : null;
   // 普通的执行中/空闲不重复占徽标,权限等待与异常仍独立可见。
@@ -251,6 +258,9 @@ function TicketItem({ ticket, observation, direct, threadTitle, readOnly, theme,
         <StatusBadge theme={theme} label={ticketStatusLabel(ticket.status)} tone={ticketStatusTone(ticket.status)} />
         {sessionNotice ? <StatusBadge theme={theme} {...sessionNotice} /> : null}
         {direct ? <StatusBadge theme={theme} label="直通" tone="default" /> : null}
+        {following ? <StatusBadge theme={theme} label="跟随本对话" tone="default" /> : null}
+        {!following && followsOf(ticket).length ? <StatusBadge theme={theme} label={`另跟随 ${followsOf(ticket).length} 段对话`} tone="muted" /> : null}
+        {ticket.speculative ? <StatusBadge theme={theme} label="投机执行" tone="warning" /> : null}
       </View>
       <Text numberOfLines={3} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm, lineHeight: 17 }}>{meta}</Text>
       {ticket.lastError ? (
@@ -263,9 +273,11 @@ function TicketItem({ ticket, observation, direct, threadTitle, readOnly, theme,
         ) : null}
         {onOpenThread ? <Button theme={theme} size="xs" variant="ghost" icon="MessagesSquare" label="对话" onPress={onOpenThread} /> : null}
         {subscribed && !readOnly ? (
-          <Button theme={theme} size="xs" variant="ghost" label={ticket.status === "waiting" ? "标记完成" : "取消直通"}
-            onPress={() => void run(ticket.status === "waiting" ? "已标记完成" : "已取消直通,后续消息交给 Router",
-              () => unsubscribe({ threadId: ticket.threadId, ticketId: ticket.id }))} />
+          <Button theme={theme} size="xs" variant="ghost"
+            label={following ? "取消跟随" : ticket.status === "waiting" && followsOf(ticket).length === 0 ? "标记完成" : "取消直通"}
+            onPress={() => void run(following ? "已取消跟随,本对话的后续消息交给 Router"
+              : ticket.status === "waiting" && followsOf(ticket).length === 0 ? "已标记完成" : "已取消直通,后续消息交给 Router",
+            () => unsubscribe({ threadId: scopeThreadId, ticketId: ticket.id }))} />
         ) : null}
         {terminal && !readOnly ? (
           <Button theme={theme} size="xs" variant="ghost" icon="RotateCcw" label="重试"
@@ -405,7 +417,7 @@ const CHANNEL_LABELS: [keyof SuperagentSettingsValues, string][] = [
   ["wecomEnabled", "企业微信"],
 ];
 
-function StatusTab({ snapshot, theme, hostId, openSettings }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
+function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
   const settingsState = useSettings(superagentSettings);
   const settings = settingsState.status === "ready" ? settingsState.values : null;
   const { engine } = snapshot;
@@ -420,6 +432,15 @@ function StatusTab({ snapshot, theme, hostId, openSettings }: ChatSidebarProps &
       ? `${clockTime(engine.lastWatchdogAt)} 巡检 · ${watchdogNoteLabel(engine.lastWatchdogNote)}`
       : "等待首次巡检(每 15 秒一次)";
   }
+  const patrol = engine.patrol;
+  let patrolText: string | null = null;
+  if (patrol?.enabled) {
+    if (patrol.running) patrolText = "巡检中…";
+    else if (patrol.lastRunAt) {
+      patrolText = `${clockTime(patrol.lastRunAt)} · ${patrol.lastError ? `出错:${patrol.lastError}` : patrolSummaryLabel(patrol.lastSummary)}`;
+    } else patrolText = `等待首次巡检(每 ${settings?.watchdogIntervalMin ?? 30} 分钟)`;
+  }
+  const patrolAgentId = patrol?.agentId ?? null;
   return (
     <>
       <View style={{ gap: space.sm }}>
@@ -447,6 +468,15 @@ function StatusTab({ snapshot, theme, hostId, openSettings }: ChatSidebarProps &
         {snapshot.workingDirIssue ? <InfoRow theme={theme} label="目录问题" value={snapshot.workingDirIssue} tone="danger" /> : null}
         <InfoRow theme={theme} label="触发来源" value={sources} />
         <InfoRow theme={theme} label="看门狗" value={watchdog} />
+        {patrolText ? (
+          <InfoRow theme={theme} label="LLM 巡检" value={patrolText} tone={patrol?.lastError ? "warning" : undefined} />
+        ) : null}
+        {patrolAgentId && navigation ? (
+          <View style={{ flexDirection: "row" }}>
+            <Button theme={theme} variant="outline" size="xs" icon="ShieldCheck" label="打开巡检会话(可直接问诊)"
+              onPress={() => navigation.openAgent({ agentId: patrolAgentId })} />
+          </View>
+        ) : null}
       </View>
       {snapshot.imDeliveries.length ? (
         <View style={{ gap: space.sm }}>

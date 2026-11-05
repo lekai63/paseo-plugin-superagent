@@ -46,6 +46,8 @@ const DECISION_ICONS: Record<Decision["outcome"], string> = {
   reply: "MessageSquare",
   ignore: "EyeOff",
   stop: "OctagonX",
+  subscribe: "Link",
+  watchdog: "ShieldCheck",
   unparsed: "CircleAlert",
   error: "CircleAlert",
 };
@@ -57,12 +59,15 @@ const DECISION_LABELS: Partial<Record<Decision["outcome"], string>> = {
   retry: "重试任务",
   ignore: "Router 忽略了这条消息",
   stop: "Router 结束了线程",
+  subscribe: "Worker 订阅了本对话",
+  watchdog: "看门狗介入",
   unparsed: "Router 的裁决无法解析",
   error: "Router 评估出错",
 };
 
 const DECISION_TONES: Partial<Record<Decision["outcome"], Tone>> = {
   cancel: "warning",
+  watchdog: "warning",
   stop: "warning",
   unparsed: "danger",
   error: "danger",

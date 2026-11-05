@@ -26,6 +26,10 @@ export function outcomeLabel(outcome: Decision["outcome"]): string {
       return "忽略";
     case "stop":
       return "终止";
+    case "subscribe":
+      return "订阅";
+    case "watchdog":
+      return "巡检";
     case "unparsed":
       return "未解析";
     case "error":
@@ -152,6 +156,14 @@ export function watchdogNoteLabel(note: string | null | undefined): string {
   if (!note) return "一切正常";
   const match = /reconciled (\d+)/.exec(note);
   return match ? `已自动修复 ${match[1]} 项` : note;
+}
+
+/** LLM 巡检结论:引擎写入的固定英文说明译成中文,模型给出的摘要原样显示。 */
+export function patrolSummaryLabel(summary: string | null | undefined): string {
+  if (!summary) return "无结论";
+  if (summary === "nothing to patrol") return "没有进行中的任务,未调用模型";
+  if (summary.startsWith("skipped: the watchdog session is busy")) return "巡检会话正被使用,本次跳过";
+  return summary;
 }
 
 /** 相对时间:刚刚 / N 分钟前 / N 小时前 / N 天前 / M月D日(跨年带年份)。 */

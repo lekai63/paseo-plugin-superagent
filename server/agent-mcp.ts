@@ -3,6 +3,7 @@ import type { SuperagentMcpEndpoint } from "./mcp-server";
 import { DISPATCH_MCP_SERVER_NAME } from "./mcp-server";
 import { isOrchestrationAgent } from "./workers";
 import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
+import { WATCHDOG_AGENT_LABEL_VALUE } from "../shared/model";
 
 /**
  * session_open 转换:把插件自持的 MCP server 注入 agent 会话。
@@ -52,8 +53,9 @@ export function createSessionOpenTransform(
     const endpoint = resolveEndpoint();
     if (!endpoint) return undefined;
     if (request.mcpServers[DISPATCH_MCP_SERVER_NAME]) return undefined;
+    // 看门狗与 Router 同样只拿只读回读/检索工具(它通过 JSON 动作行事,不直接执行)。
     const orchestrationUrl =
-      request.labels[ROUTER_LABEL] === ROUTER_LABEL_VALUE
+      request.labels[ROUTER_LABEL] === ROUTER_LABEL_VALUE || request.labels[ROUTER_LABEL] === WATCHDOG_AGENT_LABEL_VALUE
         ? endpoint.routerUrl()
         : request.labels[TICKET_LABEL]
           ? endpoint.workerUrl(request.labels[TICKET_LABEL])
@@ -84,5 +86,37 @@ export function createSessionOpenTransform(
         },
       },
     };
+  };
+}
+
+/** 编排自身的 MCP 工具名(各 provider 的工具名形态不同:mcp__superagent__superagent_read 等)。 */
+function isOrchestrationTool(name: string): boolean {
+  return /(?:^|[^a-z0-9])superagent_(?:read|list|search|unsubscribe|handback)$/i.test(name) || /^superagent_[a-z]+$/i.test(name);
+}
+
+export type OrchestrationPermission =
+  | { behavior: "allow" }
+  | { behavior: "deny"; message: string };
+
+/**
+ * 编排 agent 的权限策略(agent.permission.before):
+ *   Router/看门狗只裁决不执行(§2.1 "甚至可以不配备 Bash")——自身的只读回读工具放行,
+ *   其余工具、计划与模式切换一律拒绝,避免 Router 停在权限等待里堵住评估队列;
+ *   Worker 的会话控制工具(退订/转回)放行,其余照常交给人审批。
+ * 返回 null 表示不干预。
+ */
+export function orchestrationPermission(
+  role: "router" | "watchdog" | "worker" | null,
+  request: { name: string; kind: string },
+): OrchestrationPermission | null {
+  if (!role) return null;
+  const own = request.kind === "tool" && isOrchestrationTool(request.name);
+  if (own) return { behavior: "allow" };
+  if (role === "worker") return null;
+  return {
+    behavior: "deny",
+    message: role === "router"
+      ? "The Router is decision-only: do not run tools. Answer with the JSON verdict; dispatch a Worker for anything that needs tools."
+      : "The Watchdog acts only through its JSON actions; apart from the superagent recall tools it does not run tools.",
   };
 }

@@ -3,13 +3,14 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
-import { directTickets } from "../shared/execution";
+import { followsOf, subscribesTo } from "../shared/execution";
 import { recentResults, threadResult } from "../shared/results";
 import { defaultChatTabs, pruneChatTabs, type ChatTabs } from "../shared/chat-tabs";
 import {
   dispatchMandateIssue,
   newId,
   truncate,
+  MAX_SPECULATIVE_TICKETS,
   SUBSCRIBED_STATUSES,
   TERMINAL_TICKET_STATUSES,
   type Decision,
@@ -21,6 +22,7 @@ import {
   type Ticket,
   type Trigger,
   type TriggerOrigin,
+  type WatchdogState,
 } from "../shared/model";
 import {
   DEFAULT_WORKER_PROFILE,
@@ -47,18 +49,30 @@ import { matchWorkerProfile, resolveProviderSelection } from "./providers";
 import { ensureSharedWorkspace } from "./workspace";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 import { splitImReply } from "./im-replies";
+import {
+  composePatrolPrompt,
+  composeWatchdogInstructions,
+  ensureWatchdog,
+  parseWatchdogVerdict,
+  WATCHDOG_RUN_TIMEOUT_MS,
+  type PatrolDigest,
+  type PatrolTicket,
+  type WatchdogAction,
+} from "./watchdog";
 
 /**
  * Superagent 引擎:整个编排层的驱动核心。
  *
  * 数据流(对齐文章的事件驱动模型):
- *   dispatch() → fast-path 截断/放行 → Thread 归属
- *     ├─ 线程恰有一个活跃订阅 Ticket → 直通其 Worker(零 LLM);多个订阅交 Router 选择
- *     └─ 否则积攒 → 批窗口合并 → 串行 Router 评估 → 裁决执行
+ *   dispatch() → fast-path 截断/放行 → Thread 归属(引用回复优先归入被引用消息的线程)
+ *     ├─ 线程有活跃订阅(含跟随该线程的其他线程票据)且有会话 → 全部直通(零 LLM)
+ *     └─ 否则(或旁听到的 context-only 消息)积攒 → 批窗口合并 → 串行 Router 评估 → 裁决执行
  *   裁决的副作用动作(steer/cancel/retry/stop)立案成 pendingActions 记录,执行成功
  *   移除、失败按上限重试;崩溃后由恢复流程按序补执行。
- *   Worker 完成 → 汇报抓取 → report Trigger 回流线程 → 再次 Router 评估
- *   看门狗每 15s 对账:错过完成、卡死启动、超时中断、评估重排、待执行动作补执行。
+ *   Worker 完成 → 汇报抓取 → report Trigger 回流到它订阅的每个线程 → 再次 Router 评估
+ *   (投机执行的 DISCARD 汇报静默丢弃,不进 Router)
+ *   程序看门狗每 15s 对账:错过完成、卡死启动、超时中断、评估重排、待执行动作补执行;
+ *   LLM 看门狗(设置开启时)按间隔巡检进展与偏离,经 JSON 动作介入。
  *
  * 不变量:所有状态先落盘再执行副作用;崩溃后 watchdog/prime 恢复。
  */
@@ -72,8 +86,12 @@ const MAX_ACTION_ATTEMPTS = 3;
 const MAX_ABANDONED_ACTIONS = 3;
 /** 评估异常(provider 未就绪/目录不可用等瞬时故障)的自动重排上限:15s 看门狗节奏 ≈ 5 分钟。 */
 const MAX_EVAL_ERRORS = 20;
-/** 单线程 filtered 留痕上限:高频群聊的准入丢弃不再膨胀状态文件。 */
+/** 单线程 filtered 留痕上限:滚动保留最近这么多条(相邻消息内联的来源),旧的先丢。 */
 const MAX_FILTERED_TRIGGERS = 30;
+/** 评估时内联的未 @ 相邻群聊条数(§3.3 Inline:时空相邻的消息)。 */
+const CHATTER_CONTEXT = 5;
+/** 引擎启动前到达(IM 先连上)的触发备注;引擎启动后据此补直通。 */
+const QUEUED_BEFORE_START = "queued before the engine started";
 const PREFERRED_PROVIDERS = ["claude", "codex", "opencode"];
 
 /**
@@ -136,11 +154,14 @@ export interface DispatchInput {
   origin?: TriggerOrigin;
   /** IM 触发的线程关联键:同键消息归属同一 Thread,跨消息延续订阅与记忆。 */
   threadKey?: string;
+  /** IM 消息引用/回复的平台消息 id(父消息在前):命中本地记录时归入其线程并内联原文。 */
+  replyTo?: string[];
 }
 
 /** 答复外发通道:由 index.server 注入(engine 不直接依赖具体 IM 实现)。 */
 export interface ReplySink {
-  send(origin: TriggerOrigin, text: string): Promise<void>;
+  /** 返回通道回执里的消息 id(有的话),用于用户引用答复时找回线程。 */
+  send(origin: TriggerOrigin, text: string): Promise<string | null | void>;
 }
 
 export class SuperagentEngine {
@@ -179,6 +200,8 @@ export class SuperagentEngine {
   private workspaceChain: Promise<unknown> = Promise.resolve();
   private lastWatchdogAt: string | null = null;
   private lastWatchdogNote: string | null = null;
+  /** LLM 看门狗巡检进行中(单飞:一次巡检没结束不起下一次)。 */
+  private patrolInFlight = false;
   private replySink: ReplySink | null = null;
   private settingsValues: SuperagentSettingsValues = SETTINGS_DEFAULTS;
 
@@ -286,10 +309,14 @@ export class SuperagentEngine {
     }
 
     const state = this.store.get();
+    const linked = input.origin && input.replyTo?.length ? this.resolveQuoted(state, input.origin, input.replyTo) : null;
     let thread: Thread | undefined;
     if (input.threadId) {
       thread = state.threads.find((t) => t.id === input.threadId);
       if (!thread) throw new Error(`thread ${input.threadId} not found`);
+    } else if (linked?.threadId && state.threads.some((t) => t.id === linked.threadId)) {
+      // 引用回复(§3.2 Thread = 同一话题):回复哪条已知消息/答复,就归入那条消息的线程。
+      thread = state.threads.find((t) => t.id === linked.threadId);
     } else if (input.threadKey) {
       // IM 触发:同一聊天固定 Thread,订阅直通与 Router 记忆跨消息延续。
       thread = state.threads.find((t) => t.key === input.threadKey);
@@ -325,12 +352,16 @@ export class SuperagentEngine {
     const threadId = thread.id;
 
     if (admission.status === "filtered") {
-      // 留痕上限:超过后静默丢弃,不再膨胀状态。
-      const filteredCount = state.triggers.filter((t) => t.threadId === threadId && t.status === "filtered").length;
-      if (filteredCount >= MAX_FILTERED_TRIGGERS) return null;
+      // 留痕滚动上限:超过后丢弃该线程最旧的 filtered 记录,保留最近的相邻消息供内联。
       await this.store.update((next) => {
         if (!next.threads.some((t) => t.id === threadId)) {
           next.threads.push(thread!);
+        }
+        const filtered = next.triggers.filter((t) => t.threadId === threadId && t.status === "filtered")
+          .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+        if (filtered.length >= MAX_FILTERED_TRIGGERS) {
+          const drop = new Set(filtered.slice(0, filtered.length - MAX_FILTERED_TRIGGERS + 1).map((t) => t.id));
+          next.triggers = next.triggers.filter((t) => !drop.has(t.id));
         }
         next.triggers.push({
           id: triggerId,
@@ -345,15 +376,19 @@ export class SuperagentEngine {
           status: "filtered",
           note: admission.note ?? null,
           threadId,
+          quote: linked?.quote ?? null,
         });
       });
       return null;
     }
 
-    // 订阅直通(fan-out):活跃订阅且有会话的 Worker 全部收到本条消息;
-    // 一个可用会话都没有(无订阅,或订阅仍在启动)才交 Router 评估。
-    const subscribed = this.subscribedTickets(this.store.get(), threadId);
+    // 订阅直通(fan-out):活跃订阅(含跟随本线程的票据)且有会话的 Worker 全部收到本条消息;
+    // 一个可用会话都没有(无订阅,或订阅仍在启动)才交 Router 评估。旁听到的 context-only
+    // 群聊不直通(线程按聊天划分,闲聊不该打断 Worker),一律交 Router 做语义判断。
+    const subscribed = input.context ? [] : this.subscribedTickets(this.store.get(), threadId);
     const direct = subscribed.filter((ticket) => ticket.workerAgentId);
+    // 引擎尚未启动(IM 先于首个 hook 连上):先落盘排队,启动后由 recover 补直通/评估。
+    const queuedBeforeStart = !this.paseo;
 
     const trigger: Trigger = {
       id: triggerId,
@@ -366,8 +401,9 @@ export class SuperagentEngine {
       origin: input.origin ?? null,
       receivedAt: now,
       status: "pending",
-      note: null,
+      note: queuedBeforeStart ? QUEUED_BEFORE_START : null,
       threadId,
+      quote: linked?.quote ?? null,
     };
 
     await this.store.update((next) => {
@@ -379,6 +415,9 @@ export class SuperagentEngine {
       if (target) target.updatedAt = now;
     });
 
+    if (queuedBeforeStart) {
+      return { threadId, triggerId, directDelivered: false, note: "queued until the orchestrator engine starts" };
+    }
     if (direct.length > 0) {
       const directDelivered = await this.deliverDirect(trigger, direct);
       if (directDelivered) return { threadId, triggerId, directDelivered, note: null };
@@ -428,10 +467,55 @@ export class SuperagentEngine {
     this.scheduleEval(threadId);
   }
 
+  /** 订阅本线程的活跃票据:本线程 subscribed 的,加上 follows 里含本线程的(多对多)。 */
   private subscribedTickets(state: SuperagentState, threadId: string): Ticket[] {
-    return state.tickets.filter(
-      (t) => t.threadId === threadId && t.subscribed && SUBSCRIBED_STATUSES.includes(t.status),
-    );
+    return state.tickets.filter((t) => subscribesTo(t, threadId) && SUBSCRIBED_STATUSES.includes(t.status));
+  }
+
+  /**
+   * 相邻消息内联(§3.3):本批之前、Router 上次看过的事件之后,同一线程里被准入层过滤的
+   * 未 @ 群聊(最近几条)。Router 由此看到"@ 之前大家在聊什么",无需工具往返。
+   */
+  private chatterFor(state: SuperagentState, threadId: string, batch: Trigger[]): Trigger[] {
+    const imBatch = batch.filter((trigger) => trigger.origin);
+    if (imBatch.length === 0) return [];
+    const batchIds = new Set(batch.map((trigger) => trigger.id));
+    const lastBatchAt = imBatch.map((trigger) => trigger.receivedAt).sort().at(-1)!;
+    const firstBatchAt = batch.map((trigger) => trigger.receivedAt).sort()[0];
+    const seenAt = state.triggers
+      .filter((t) => t.threadId === threadId && !batchIds.has(t.id) && ["evaluated", "delivered"].includes(t.status)
+        && t.receivedAt < firstBatchAt)
+      .map((t) => t.receivedAt).sort().at(-1) ?? "";
+    return state.triggers
+      .filter((t) => t.threadId === threadId && t.status === "filtered" && t.receivedAt > seenAt && t.receivedAt <= lastBatchAt)
+      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt))
+      .slice(-CHATTER_CONTEXT);
+  }
+
+  /**
+   * 引用解析(§3.2/§3.3):按平台消息 id 在同一聊天里找被引用的触发或 Router 答复。
+   * 线程取第一个命中的 id(父消息优先,其次回复链根);内联原文只取直接父消息。
+   */
+  private resolveQuoted(
+    state: SuperagentState,
+    origin: TriggerOrigin,
+    ids: string[],
+  ): { threadId: string | null; quote: NonNullable<Trigger["quote"]> } {
+    const sameChat = (other: TriggerOrigin | null | undefined) =>
+      other?.channel === origin.channel && other.chatId === origin.chatId;
+    let threadId: string | null = null;
+    let quote: NonNullable<Trigger["quote"]> = { messageId: ids[0], triggerId: null, sender: null, text: null };
+    ids.forEach((id, index) => {
+      const trigger = state.triggers.find((t) => sameChat(t.origin) && t.origin?.messageId === id);
+      const delivery = trigger ? undefined
+        : state.imDeliveries.find((d) => sameChat(d.origin) && (d.sentMessageIds ?? []).includes(id));
+      const matchThread = trigger?.threadId ?? delivery?.threadId ?? null;
+      if (!threadId && matchThread) threadId = matchThread;
+      if (index !== 0) return;
+      if (trigger) quote = { messageId: id, triggerId: trigger.id, sender: trigger.sender, text: truncate(trigger.text, 400) };
+      else if (delivery) quote = { messageId: id, triggerId: null, sender: "router", text: truncate(delivery.parts.join("\n"), 400) };
+    });
+    return { threadId, quote };
   }
 
   /**
@@ -441,10 +525,18 @@ export class SuperagentEngine {
    */
   private async deliverDirect(trigger: Trigger, tickets: Ticket[]): Promise<boolean> {
     const prefix = trigger.context ? "[context] " : "";
+    const quoted = trigger.quote?.text
+      ? `> quoting ${trigger.quote.sender ?? "an earlier message"}: ${truncate(trigger.quote.text.replace(/\s+/g, " "), 300)}\n`
+      : "";
+    const thread = this.store.get().threads.find((t) => t.id === trigger.threadId);
     const delivered: string[] = [];
     const failures: string[] = [];
     for (const ticket of tickets) {
-      const outcome = await this.sendToWorker(ticket.id, `${prefix}${trigger.text}`, "steer");
+      // 跟随来的线程标出来源,Worker 才知道这条消息属于哪段对话(可按线程退订)。
+      const origin = ticket.threadId !== trigger.threadId && thread
+        ? `[thread ${thread.id} "${truncate(thread.title, 60)}"] `
+        : "";
+      const outcome = await this.sendToWorker(ticket.id, `${origin}${prefix}${quoted}${trigger.text}`, "steer");
       if (outcome.ok) delivered.push(ticket.id);
       else failures.push(`${ticket.id}: ${truncate(outcome.error, 120)}`);
     }
@@ -542,7 +634,8 @@ export class SuperagentEngine {
   }
 
   private async drainEvalQueue(): Promise<void> {
-    if (this.evalInFlight) return;
+    // 引擎未启动时保留队列;启动后的 recover 会重新排上有 pending 触发的线程。
+    if (this.evalInFlight || !this.paseo) return;
     const next = [...this.evalQueued][0];
     if (!next) return;
     this.evalInFlight = true;
@@ -597,7 +690,8 @@ export class SuperagentEngine {
       },
       profiles: this.settingsValues.workerProfiles,
     };
-    const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions);
+    const ruleOptions = { speculative: this.settingsValues.speculativeEnabled };
+    const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions, ruleOptions);
     const configHash = createHash("sha256").update(instructions).digest("hex");
     // Router 落在默认 workspace 里;惰性获取——Router 存活时零开销,重建时才查找/新建。
     // 回读/检索工具(superagent_list/read/search)由 session_open 转换注入,不经 agent config。
@@ -629,6 +723,7 @@ export class SuperagentEngine {
       && (restoreContext || !remembered?.triggerIds.includes(trigger.id)))
       .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
     const contextTriggers = unseenContext.slice(-8);
+    const chatter = this.chatterFor(state, threadId, batch);
     const prompt = composeEvalPrompt({
       thread,
       batch,
@@ -639,6 +734,8 @@ export class SuperagentEngine {
         && !(router.created && routerUsesSystemPrompt(routerProvider)),
       includeHistory: restoreContext || !remembered?.threadIds.includes(threadId),
       contextTriggers,
+      chatter,
+      options: ruleOptions,
     });
     const result = await router.handle.run(prompt, { timeoutMs: ROUTER_EVAL_TIMEOUT_MS });
     const replyText =
@@ -690,10 +787,23 @@ export class SuperagentEngine {
     /** 与已立案动作对齐的待执行记录;dispatch/reply/ignore 没有记录(null)。 */
     const actionRecords: (PendingAction | null)[] = [];
     const replies: string[] = [];
+    /** subscribe 动作:落盘时把票据挂到本线程(本线程票据恢复 subscribed,其他线程票据加入 follows)。 */
+    const subscribeTickets: string[] = [];
+    let liveSpeculative = state.tickets.filter((t) => t.speculative && !TERMINAL_TICKET_STATUSES.includes(t.status)).length;
     let summary: string | null = null;
     for (const action of actions) {
       const decision = newDecision(threadId, triggerIds, action.action);
       if (action.action === "dispatch") {
+        // 投机执行仅在设置开启时生效;并发上限内才立案,超出的直接丢弃(记入裁决)。
+        const speculative = Boolean(action.speculative) && this.settingsValues.speculativeEnabled;
+        if (speculative && liveSpeculative >= MAX_SPECULATIVE_TICKETS) {
+          decision.outcome = "ignore";
+          decision.rationale = `speculative dispatch "${truncate(action.title, 80)}" dropped: ${liveSpeculative} speculative tickets already running (limit ${MAX_SPECULATIVE_TICKETS})`;
+          decisions.push(decision);
+          actionRecords.push(null);
+          continue;
+        }
+        if (speculative) liveSpeculative += 1;
         // 档位只能取自设置名单;未知名字退回默认 Worker 并记入裁决,派发本身不失败。
         const choice = matchWorkerProfile(action.profile, this.settingsValues.workerProfiles, DEFAULT_WORKER_PROFILE);
         if (choice.note) decision.rationale = choice.note;
@@ -711,21 +821,35 @@ export class SuperagentEngine {
           provider: null,
           startedAt: null,
           attempts: 0,
-          subscribed: !action.unsubscribe,
+          // 投机执行不订阅线程:闲聊与后续消息不打扰它,结果经汇报回流。
+          subscribed: speculative ? false : !action.unsubscribe,
+          follows: [],
+          speculative,
           report: null,
           lastError: null,
           createdAt: decision.createdAt,
           updatedAt: decision.createdAt,
         };
         decision.ticketId = ticket.id;
+        if (speculative) decision.rationale = [decision.rationale, "speculative background attempt"].filter(Boolean).join("; ");
         createdTickets.push(ticket);
-        if (!summary) summary = action.title;
+        if (!summary && !speculative) summary = action.title;
       } else if (action.action === "reply") {
         decision.reply = action.reply;
         replies.push(action.reply);
         if (!summary) summary = action.reply;
       } else if (action.action === "steer") {
         decision.rationale = truncate(action.text, 300);
+      } else if (action.action === "subscribe") {
+        const target = state.tickets.find((t) => t.id === action.ticketId);
+        if (!target || TERMINAL_TICKET_STATUSES.includes(target.status)) {
+          decision.rationale = `ticket ${action.ticketId} ${target ? `is ${target.status}` : "not found"}; nothing subscribed`;
+        } else {
+          subscribeTickets.push(target.id);
+          decision.rationale = target.threadId === threadId
+            ? "re-subscribed to its own thread"
+            : `now also follows this thread (home thread ${target.threadId})`;
+        }
       } else if ("rationale" in action) {
         decision.rationale = action.rationale ?? null;
       }
@@ -741,7 +865,7 @@ export class SuperagentEngine {
     const delivery = fullReply && origin && replyDecision ? {
       id: `im-${replyDecision.id}`, threadId, origin,
       parts: splitImReply(fullReply, this.settingsValues.imReplyMaxChars), nextPart: 0,
-      status: "pending" as const, createdAt: decidedAt, updatedAt: decidedAt,
+      status: "pending" as const, sentMessageIds: [], createdAt: decidedAt, updatedAt: decidedAt,
     } : null;
 
     // 成功裁决也留一份截断的原始回复,挂在批内首条决策上:格式/占位类问题事后可审计。
@@ -760,6 +884,15 @@ export class SuperagentEngine {
       if (delivery) next.imDeliveries.push(delivery);
       next.decisions.push(...decisions);
       next.tickets.push(...createdTickets);
+      for (const ticketId of subscribeTickets) {
+        const target = next.tickets.find((t) => t.id === ticketId);
+        if (!target) continue;
+        if (target.threadId === threadId) target.subscribed = true;
+        else target.follows = [...new Set([...followsOf(target), threadId])];
+        // 已完成待命的票据被重新订阅后回到待命(waiting),后续消息能唤醒它。
+        if (target.status === "completed" && target.workerAgentId) target.status = "waiting";
+        target.updatedAt = decidedAt;
+      }
       next.pendingActions.push(...actionRecords.filter((record): record is PendingAction => record !== null));
       for (const trigger of next.triggers) {
         if (triggerIds.includes(trigger.id)) trigger.status = "evaluated";
@@ -787,7 +920,8 @@ export class SuperagentEngine {
         if (record) await this.runPendingAction(record.id);
         break;
       }
-      if (action.action === "dispatch") {
+      // 以裁决结果为准:被丢弃的投机派发(记为 ignore)没有票据可启动。
+      if (decisions[index]?.outcome === "dispatch") {
         const ticket = launchQueue.shift();
         if (!ticket) continue;
         void this.startTicket(ticket.id).catch((error) => {
@@ -827,9 +961,10 @@ export class SuperagentEngine {
       // 首次落盘失败时记录仍可能留在内存;恢复发送前先确认它可以持久化。
       await this.store.update(() => {});
       while (delivery.nextPart < delivery.parts.length) {
+        let sentId: string | null = null;
         try {
           if (!this.replySink) throw new Error("IM reply channel is not available");
-          await this.replySink.send(delivery.origin, delivery.parts[delivery.nextPart]);
+          sentId = (await this.replySink.send(delivery.origin, delivery.parts[delivery.nextPart])) || null;
         } catch {
           await this.store.update((next) => {
             const target = next.imDeliveries.find((item) => item.id === id);
@@ -844,6 +979,8 @@ export class SuperagentEngine {
           if (!target) return;
           target.nextPart++;
           target.updatedAt = new Date().toISOString();
+          // 记下已发消息 id:用户引用这条答复回复时,能归回本线程并内联原文。
+          if (sentId) target.sentMessageIds = [...(target.sentMessageIds ?? []), sentId];
           if (target.nextPart === target.parts.length) target.status = "sent";
         });
         delivery = this.store.get().imDeliveries.find((item) => item.id === id);
@@ -1202,7 +1339,9 @@ export class SuperagentEngine {
       settled = true;
       target.updatedAt = now;
       if (done) {
-        target.status = target.subscribed ? "waiting" : "completed";
+        // 仍订阅任一线程(本线程或跟随的线程)的票据待命,后续消息可唤醒;投机执行不待命。
+        const stillSubscribed = !target.speculative && (target.subscribed || followsOf(target).length > 0);
+        target.status = stillSubscribed ? "waiting" : "completed";
         target.report = report;
       } else {
         const retryable = target.attempts <= this.settingsValues.maxTicketAttempts;
@@ -1237,14 +1376,59 @@ export class SuperagentEngine {
       const text = done
         ? report ?? "(no report text)"
         : `Worker failed: ${truncate(failure ?? "", 500)}`;
-      await this.enqueueReport(target.threadId, target, text);
+      if (target.speculative) {
+        await this.settleSpeculative(target, text, done);
+        return;
+      }
+      // 汇报回流到票据订阅的每个线程(多对多):每段对话的 Router 裁决各自答复。
+      for (const threadId of this.reportThreads(target)) await this.enqueueReport(threadId, target, text);
     }
+  }
+
+  /** 汇报的目标线程:本线程,加上仍处于活跃状态的跟随线程。 */
+  private reportThreads(ticket: Ticket): string[] {
+    const state = this.store.get();
+    const follows = followsOf(ticket).filter((id) => state.threads.find((t) => t.id === id)?.state === "active");
+    return [...new Set([ticket.threadId, ...follows])];
+  }
+
+  /**
+   * 投机执行落定(§3.4):汇报首行 DISCARD(或运行失败)即静默丢弃——留一条已处理的
+   * 汇报记录供审计,回收 Worker 与独占工作区,不进 Router、不打扰人;否则作为投机汇报交
+   * Router 简短转述。
+   */
+  private async settleSpeculative(ticket: Ticket, text: string, done: boolean): Promise<void> {
+    const discard = !done || /^\s*(?:\*\*)?DISCARD\b/i.test(text);
+    if (!discard) {
+      await this.enqueueReport(ticket.threadId, ticket, `(speculative background attempt — nobody asked; relay only if still useful)\n${text}`);
+      return;
+    }
+    const now = new Date().toISOString();
+    const thread = this.store.get().threads.find((t) => t.id === ticket.threadId);
+    await this.store.update((next) => {
+      next.triggers.push({
+        id: newId("trg"),
+        kind: "report",
+        sender: `worker:${ticket.id}`,
+        threadKey: thread?.key ?? `manual:${ticket.threadId}`,
+        text: `Worker report for "${ticket.title}":\n${truncate(text, 2000)}`,
+        context: false,
+        replyToAgentId: null,
+        origin: null,
+        receivedAt: now,
+        status: "evaluated",
+        note: done ? "speculative attempt discarded" : "speculative attempt failed; discarded",
+        threadId: ticket.threadId,
+      });
+    });
+    await retireWorker(this.requirePaseo(), ticket, true);
   }
 
   // ------------------------------------------------------------ watchdog
 
   private async recover(): Promise<void> {
     await this.store.ready;
+    await this.flushQueuedBeforeStart();
     const state = this.store.get();
     for (const thread of state.threads) {
       const pending = state.triggers.some((t) => t.threadId === thread.id && t.status === "pending");
@@ -1258,11 +1442,310 @@ export class SuperagentEngine {
     await this.watchdogTick();
   }
 
+  /**
+   * 引擎启动前已落盘的 IM 触发:按到达顺序补直通(线程有可用订阅时),其余留给评估。
+   * 插件拿不到启动时的 Paseo 句柄(宿主限制),IM 先连上收消息,引擎在首个 hook/RPC 时启动。
+   */
+  private async flushQueuedBeforeStart(): Promise<void> {
+    const queued = this.store.get().triggers
+      .filter((t) => t.status === "pending" && t.note === QUEUED_BEFORE_START)
+      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+    for (const trigger of queued) {
+      await this.store.update((next) => {
+        const target = next.triggers.find((t) => t.id === trigger.id);
+        if (target?.note === QUEUED_BEFORE_START) target.note = null;
+      });
+      if (trigger.context || !trigger.threadId) continue;
+      const direct = this.subscribedTickets(this.store.get(), trigger.threadId).filter((ticket) => ticket.workerAgentId);
+      if (direct.length > 0) await this.deliverDirect({ ...trigger, note: null }, direct);
+    }
+  }
+
   private async watchdogTick(): Promise<void> {
     if (!this.primed || !this.paseo) return;
     const note = await this.reconcile();
     this.lastWatchdogAt = new Date().toISOString();
     this.lastWatchdogNote = note;
+    // LLM 巡检按自己的间隔走,不阻塞程序对账。
+    void this.maybePatrol().catch((error) => {
+      console.error("[superagent] watchdog patrol failed", error);
+    });
+  }
+
+  // ------------------------------------------------------- LLM watchdog
+
+  /** 到点(或 force)且设置开启时跑一次巡检;失败也记下时间,下个间隔再试,不在 15s 节奏里重试。 */
+  async maybePatrol(force = false): Promise<void> {
+    await this.store.ready;
+    if (!this.settingsValues.watchdogEnabled || !this.paseo || this.patrolInFlight) return;
+    const last = this.store.get().kv.watchdog?.lastRunAt;
+    const due = !last || Date.now() - Date.parse(last) >= this.settingsValues.watchdogIntervalMin * 60_000;
+    if (!force && !due) return;
+    this.patrolInFlight = true;
+    try {
+      await this.runPatrol();
+    } catch (error) {
+      const message = truncate(error instanceof Error ? error.message : String(error), 400);
+      await this.updateWatchdogState({ lastRunAt: new Date().toISOString(), lastError: message });
+      throw error;
+    } finally {
+      this.patrolInFlight = false;
+    }
+  }
+
+  private async updateWatchdogState(patch: Partial<WatchdogState>): Promise<void> {
+    await this.store.update((next) => {
+      const current = next.kv.watchdog ?? { lastActions: 0, seen: {} };
+      next.kv.watchdog = { ...current, ...patch, seen: patch.seen ?? current.seen ?? {} };
+    });
+  }
+
+  private async runPatrol(): Promise<void> {
+    const paseo = this.requirePaseo();
+    const now = new Date();
+    const { digest, seen } = await this.collectPatrolDigest(now);
+    if (digest.tickets.length === 0 && digest.health.length === 0) {
+      // 无事可巡:不调用模型。
+      await this.updateWatchdogState({ lastRunAt: now.toISOString(), lastSummary: "nothing to patrol", lastError: null, lastActions: 0, seen });
+      return;
+    }
+    const configured = this.settingsValues.watchdogProvider.trim();
+    const provider = configured
+      ? await this.validateConfiguredProvider("watchdog", configured)
+      : await this.resolveProvider("router", this.store.get().kv.routerProvider);
+    if (!provider) throw new Error("no available provider for the watchdog");
+    const instructions = composeWatchdogInstructions();
+    const configHash = createHash("sha256").update(instructions).digest("hex");
+    const state = this.store.get();
+    const remembered = state.kv.watchdog;
+    const watchdog = await ensureWatchdog(
+      paseo,
+      state,
+      provider,
+      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, DEFAULT_WORKSPACE_TITLE),
+      instructions,
+    );
+    if (!watchdog.created) {
+      // 维护者正在和看门狗对话:这次巡检让路,下个间隔再来。
+      const live = (await watchdog.handle.refresh().catch(() => null))?.agent;
+      if (live?.status === "running") {
+        await this.updateWatchdogState({ agentId: watchdog.agentId, provider, lastRunAt: now.toISOString(),
+          lastSummary: "skipped: the watchdog session is busy (a maintainer may be talking to it)" });
+        return;
+      }
+    }
+    const includeRules = watchdog.created
+      ? !routerUsesSystemPrompt(provider)
+      : remembered?.agentId !== watchdog.agentId || remembered?.configHash !== configHash
+        || Boolean(remembered?.lastError?.startsWith("unparsed"));
+    const result = await watchdog.handle.run(composePatrolPrompt(digest, includeRules ? instructions : null), {
+      timeoutMs: WATCHDOG_RUN_TIMEOUT_MS,
+    });
+    const replyText = result.lastMessage?.trim() || (await readLastAssistantMessage(paseo, watchdog.agentId)) || "";
+    const parsed = parseWatchdogVerdict(replyText);
+    if ("error" in parsed) {
+      await this.updateWatchdogState({ agentId: watchdog.agentId, provider, configHash, lastRunAt: now.toISOString(),
+        lastError: `unparsed: ${truncate(parsed.error, 300)}` });
+      return;
+    }
+    const executed = await this.executeWatchdogActions(parsed.verdict.actions);
+    await this.updateWatchdogState({
+      agentId: watchdog.agentId, provider, configHash, lastRunAt: now.toISOString(),
+      lastSummary: truncate(parsed.verdict.summary, 300), lastError: null, lastActions: executed, seen,
+    });
+  }
+
+  /** 巡检摘要:未完结票据的会话状态与进展增量,加引擎健康状况。 */
+  private async collectPatrolDigest(now: Date): Promise<{ digest: PatrolDigest; seen: WatchdogState["seen"] }> {
+    const paseo = this.requirePaseo();
+    const state = this.store.get();
+    const previous = state.kv.watchdog?.seen ?? {};
+    const seen: WatchdogState["seen"] = {};
+    const minutes = (from: number) => Math.max(0, Math.round((now.getTime() - from) / 60_000));
+    const unfinished = state.tickets
+      .filter((t) => !TERMINAL_TICKET_STATUSES.includes(t.status))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .slice(0, 12);
+    const tickets: PatrolTicket[] = [];
+    for (const ticket of unfinished) {
+      let sessionStatus: string | null = null;
+      let pendingPermissions = 0;
+      let latestSeq: number | null = null;
+      let latestAt: number | null = null;
+      let latestMessage: string | null = null;
+      if (ticket.workerAgentId) {
+        try {
+          const ref = paseo.agents.ref(ticket.workerAgentId);
+          const snapshot = await ref.refresh();
+          sessionStatus = snapshot?.agent.status ?? null;
+          pendingPermissions = snapshot?.agent.pendingPermissions?.length ?? 0;
+          const timeline = await ref.timeline.refetch({ direction: "tail", limit: 30 });
+          for (const entry of timeline.entries) {
+            const seq = (entry as { seqEnd?: number }).seqEnd ?? entry.seqStart;
+            if (latestSeq === null || seq > latestSeq) latestSeq = seq;
+            const at = Date.parse((entry as { timestamp?: string }).timestamp ?? "");
+            if (Number.isFinite(at) && (latestAt === null || at > latestAt)) latestAt = at;
+          }
+          const assistant = timeline.entries
+            .filter((entry) => entry.item.type === "assistant_message")
+            .sort((a, b) => b.seqStart - a.seqStart)[0];
+          if (assistant?.item.type === "assistant_message") latestMessage = assistant.item.text?.trim() || null;
+        } catch (error) {
+          console.error("[superagent] watchdog could not read worker", ticket.workerAgentId, error);
+        }
+      }
+      const before = previous[ticket.id];
+      if (latestSeq !== null) {
+        const changed = !before || before.seq !== latestSeq;
+        seen[ticket.id] = { seq: latestSeq, at: changed ? new Date(latestAt ?? now.getTime()).toISOString() : before.at };
+      }
+      const thread = state.threads.find((t) => t.id === ticket.threadId);
+      tickets.push({
+        id: ticket.id,
+        title: ticket.title,
+        threadId: ticket.threadId,
+        threadTitle: thread?.title ?? null,
+        status: ticket.status,
+        attempts: ticket.attempts,
+        profile: ticket.profile ?? null,
+        provider: ticket.provider ?? null,
+        speculative: Boolean(ticket.speculative),
+        runningMin: ticket.startedAt ? minutes(Date.parse(ticket.startedAt)) : null,
+        lastError: ticket.lastError ?? null,
+        mandate: ticket.mandate,
+        sessionStatus,
+        pendingPermissions,
+        newEntries: before && latestSeq !== null ? Math.max(0, latestSeq - before.seq) : null,
+        quietMin: latestAt !== null ? minutes(latestAt) : seen[ticket.id] ? minutes(Date.parse(seen[ticket.id].at)) : null,
+        latestMessage,
+      });
+    }
+    return {
+      digest: { at: now.toISOString(), intervalMin: this.settingsValues.watchdogIntervalMin, tickets, health: this.healthLines(state, now) },
+      seen,
+    };
+  }
+
+  /** 引擎健康的单行说明:评估熔断/连续出错、久候的触发、投递失败、积压动作、近期失败票据、Router 丢失。 */
+  private healthLines(state: SuperagentState, now: Date): string[] {
+    const lines: string[] = [];
+    const ago = (iso: string) => Math.max(0, Math.round((now.getTime() - Date.parse(iso)) / 60_000));
+    const label = (threadId: string) => {
+      const thread = state.threads.find((t) => t.id === threadId);
+      return thread ? `thread ${thread.id} "${truncate(thread.title, 60)}"` : `thread ${threadId}`;
+    };
+    for (const thread of state.threads.filter((t) => t.state === "active")) {
+      const pending = state.triggers.filter((t) => t.threadId === thread.id && t.status === "pending");
+      const unparsed = this.evalFailures.get(thread.id) ?? 0;
+      const errors = this.evalErrors.get(thread.id) ?? 0;
+      if (unparsed >= 3) lines.push(`${label(thread.id)}: Router output unparsed ${unparsed} times in a row; automatic re-evaluation is paused (reeval resets it)`);
+      if (errors >= 3) {
+        const last = state.decisions.filter((d) => d.threadId === thread.id && d.outcome === "error").at(-1);
+        lines.push(`${label(thread.id)}: ${errors} Router evaluation errors in a row${last?.rationale ? `; last: ${truncate(last.rationale, 200)}` : ""}`);
+      }
+      const oldest = pending.map((t) => t.receivedAt).sort()[0];
+      if (oldest && ago(oldest) >= 10 && unparsed < 3 && errors < 3) {
+        lines.push(`${label(thread.id)}: ${pending.length} trigger(s) waiting for the Router for ${ago(oldest)} min`);
+      }
+    }
+    for (const delivery of state.imDeliveries.filter((d) => d.status === "failed")) {
+      lines.push(`IM reply ${delivery.id} (${delivery.origin.channel}) failed at part ${delivery.nextPart + 1}/${delivery.parts.length} on ${label(delivery.threadId)}`);
+    }
+    if (state.pendingActions.length > 0) {
+      lines.push(`${state.pendingActions.length} Router action(s) still waiting to execute (max attempts ${MAX_ACTION_ATTEMPTS})`);
+    }
+    const window = 2 * this.settingsValues.watchdogIntervalMin;
+    for (const ticket of state.tickets.filter((t) => t.status === "failed" && ago(t.updatedAt) <= window)) {
+      lines.push(`ticket ${ticket.id} "${truncate(ticket.title, 60)}" failed ${ago(ticket.updatedAt)} min ago: ${truncate(ticket.lastError ?? "unknown error", 200)}`);
+    }
+    if (!state.kv.routerAgentId && state.threads.some((t) => t.state === "active")) {
+      lines.push("no live Router agent; it is recreated on the next evaluation");
+    }
+    return lines;
+  }
+
+  /** 执行看门狗动作:每个动作一条 watchdog 裁决留痕;取消/上报经引擎触发交 Router 告知人。 */
+  private async executeWatchdogActions(actions: WatchdogAction[]): Promise<number> {
+    let executed = 0;
+    for (const action of actions) {
+      const state = this.store.get();
+      const ticket = "ticketId" in action && action.ticketId ? state.tickets.find((t) => t.id === action.ticketId) : undefined;
+      const threadId = ("threadId" in action && action.threadId) || ticket?.threadId || null;
+      if (!threadId || !state.threads.some((t) => t.id === threadId)) {
+        console.warn(`[superagent] watchdog ${action.action} skipped: unknown target`);
+        continue;
+      }
+      let note: string;
+      try {
+        if (action.action === "nudge" || action.action === "interrupt") {
+          if (!ticket) continue;
+          const outcome = await this.applySteer(ticket.id, `[watchdog] ${action.text}`, action.action === "interrupt" ? "interrupt" : "steer");
+          if (!outcome.ok) throw new Error(outcome.error);
+          note = `${action.action}: ${action.text}`;
+        } else if (action.action === "cancel") {
+          if (!ticket) continue;
+          await this.cancelTicket(ticket.id);
+          note = `cancel: ${action.reason}`;
+          await this.enqueueEngineNote(threadId, `[watchdog] canceled ticket ${ticket.id} "${ticket.title}": ${action.reason}`);
+        } else if (action.action === "retry") {
+          if (!ticket) continue;
+          await this.retryTicket(ticket.id);
+          note = `retry${action.reason ? `: ${action.reason}` : ""}`;
+        } else if (action.action === "reeval") {
+          await this.forceEval(threadId);
+          note = `reeval${action.reason ? `: ${action.reason}` : ""}`;
+        } else {
+          note = `escalate: ${action.text}`;
+          await this.enqueueEngineNote(threadId, `[watchdog]${ticket ? ` ticket ${ticket.id} "${ticket.title}":` : ""} ${action.text}`);
+        }
+      } catch (error) {
+        note = `${action.action} failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      executed += 1;
+      await this.store.update((next) => {
+        next.decisions.push(newDecision(threadId, [], "watchdog", { ticketId: ticket?.id ?? null, rationale: truncate(note, 500) }));
+      });
+    }
+    return executed;
+  }
+
+  /** 引擎以触发形式把看门狗的结论交给线程的 Router,由 Router 统一对人表述。 */
+  private async enqueueEngineNote(threadId: string, text: string): Promise<void> {
+    const thread = this.store.get().threads.find((t) => t.id === threadId);
+    if (!thread) return;
+    const originTrigger = this.store.get().triggers
+      .filter((t) => t.threadId === threadId && ["evaluated", "delivered"].includes(t.status))
+      .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
+      .find((t) => t.replyToAgentId || t.origin);
+    await this.store.update((next) => {
+      next.triggers.push({
+        id: newId("trg"),
+        kind: "engine",
+        sender: "watchdog",
+        threadKey: thread.key,
+        text: truncate(text, 2000),
+        context: false,
+        replyToAgentId: originTrigger?.replyToAgentId ?? null,
+        origin: originTrigger?.origin ?? null,
+        receivedAt: new Date().toISOString(),
+        status: "pending",
+        note: null,
+        threadId,
+      });
+    });
+    if (thread.state === "active") this.scheduleEval(threadId);
+  }
+
+  /**
+   * 编排自身 agent 的角色(权限钩子用):Router / 看门狗 / Worker;其他 agent 为 null。
+   * 只认引擎记得的 id,不额外查询普通 agent。
+   */
+  orchestrationRole(agentId: string): "router" | "watchdog" | "worker" | null {
+    const state = this.store.get();
+    if (state.kv.routerAgentId === agentId) return "router";
+    if (state.kv.watchdog?.agentId === agentId) return "watchdog";
+    if (state.tickets.some((ticket) => ticket.workerAgentId === agentId)) return "worker";
+    return null;
   }
 
   /** 对账:错过完成 / 卡死启动 / 超时中断 / 评估重排(unparsed ≥3 熔断;瞬时异常按上限重查)。 */
@@ -1454,6 +1937,10 @@ export class SuperagentEngine {
           ticket.status = "canceled";
           ticket.subscribed = false;
           ticket.updatedAt = now;
+        } else if (ticket.threadId !== threadId && followsOf(ticket).includes(threadId)) {
+          // 其他线程的票据只是跟随本线程:解除跟随,票据本身不受影响。
+          ticket.follows = followsOf(ticket).filter((id) => id !== threadId);
+          ticket.updatedAt = now;
         }
       }
       for (const trigger of next.triggers) {
@@ -1465,13 +1952,16 @@ export class SuperagentEngine {
     });
   }
 
+  /** 界面退订:本线程票据取消 subscribed;跟随本线程的其他线程票据从 follows 里移除。 */
   async unsubscribe(threadId: string, ticketId: string): Promise<void> {
     await this.store.update((next) => {
       const ticket = next.tickets.find((t) => t.id === ticketId);
-      if (!ticket || ticket.threadId !== threadId) return;
-      ticket.subscribed = false;
+      if (!ticket) return;
+      if (ticket.threadId === threadId) ticket.subscribed = false;
+      else if (followsOf(ticket).includes(threadId)) ticket.follows = followsOf(ticket).filter((id) => id !== threadId);
+      else return;
       ticket.updatedAt = new Date().toISOString();
-      if (ticket.status === "waiting") ticket.status = "completed";
+      if (ticket.status === "waiting" && !ticket.subscribed && followsOf(ticket).length === 0) ticket.status = "completed";
     });
   }
 
@@ -1505,6 +1995,9 @@ export class SuperagentEngine {
         `kind: ${trigger.kind}  status: ${trigger.status}  sender: ${trigger.sender}`,
         `receivedAt: ${trigger.receivedAt}${trigger.context ? "  (context-only)" : ""}`,
         trigger.note ? `note: ${trigger.note}` : null,
+        trigger.quote
+          ? `quoting: ${trigger.quote.triggerId ?? (trigger.quote.text ? "an earlier Router reply" : `platform message ${trigger.quote.messageId ?? "?"}`)}${trigger.quote.text ? ` — "${truncate(trigger.quote.text, 300)}"` : ""}`
+          : null,
         "",
         trigger.text,
       ]
@@ -1518,7 +2011,8 @@ export class SuperagentEngine {
         `# ticket ${ticket.id}`,
         `title: ${ticket.title}`,
         `thread: ${threadLabel(ticket.threadId)}`,
-        `status: ${ticket.status}  subscribed: ${ticket.subscribed}  attempts: ${ticket.attempts}`,
+        `status: ${ticket.status}  subscribed: ${ticket.subscribed}  attempts: ${ticket.attempts}${ticket.speculative ? "  speculative" : ""}`,
+        ...followsOf(ticket).map((threadId) => `also follows: ${threadLabel(threadId)}`),
         `profile: ${ticket.profile ?? "(default)"}  provider: ${ticket.provider ?? "(unresolved)"}`,
         ticket.branchName ? `branch: ${ticket.branchName}` : null,
         `workerAgent: ${ticket.workerAgentId ?? "(none)"}`,
@@ -1530,6 +2024,7 @@ export class SuperagentEngine {
         ticket.report
           ? `\n## report (final worker message)\n${truncate(ticket.report, SuperagentEngine.RECALL_REPORT_CHARS)}`
           : null,
+        await this.recentWorkerMessages(ticket),
       ]
         .filter((line) => line !== null)
         .join("\n");
@@ -1549,8 +2044,9 @@ export class SuperagentEngine {
         "",
         `## tickets (${tickets.length})`,
         ...tickets.map((ticket) =>
-          `- [${ticket.id}] "${ticket.title}" status=${ticket.status} subscribed=${ticket.subscribed}`,
+          `- [${ticket.id}] "${ticket.title}" status=${ticket.status} subscribed=${ticket.subscribed}${ticket.speculative ? " speculative" : ""}`,
         ),
+        ...this.threadLinks(state, thread.id),
       ]
         .filter((line) => line !== null)
         .join("\n");
@@ -1572,6 +2068,55 @@ export class SuperagentEngine {
         .join("\n");
     }
     return null;
+  }
+
+  /**
+   * 线程回读的下一跳(§3.3 链式召回):跟随本线程的其他线程票据、最近的消息与裁决 ID,
+   * 每条都可再用 superagent_read 展开。
+   */
+  private threadLinks(state: SuperagentState, threadId: string): string[] {
+    const lines: string[] = [];
+    const followers = state.tickets.filter((t) => t.threadId !== threadId && followsOf(t).includes(threadId));
+    if (followers.length) {
+      lines.push("", `## tickets of other threads following this one (${followers.length})`);
+      for (const ticket of followers) lines.push(`- [${ticket.id}] "${ticket.title}" status=${ticket.status} home-thread=${ticket.threadId}`);
+    }
+    const triggers = state.triggers.filter((t) => t.threadId === threadId)
+      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+    if (triggers.length) {
+      lines.push("", `## recent messages (${Math.min(10, triggers.length)} of ${triggers.length}, oldest first)`);
+      for (const trigger of triggers.slice(-10)) {
+        lines.push(`- [${trigger.id} ${trigger.kind} ${trigger.status}] ${trigger.sender}: ${truncate(trigger.text.replace(/\s+/g, " "), 100)}`);
+      }
+    }
+    const decisions = state.decisions.filter((d) => d.threadId === threadId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    if (decisions.length) {
+      lines.push("", `## recent router decisions (${Math.min(5, decisions.length)} of ${decisions.length})`);
+      for (const decision of decisions.slice(-5)) {
+        const detail = decision.reply ?? decision.rationale;
+        lines.push(`- [${decision.id} ${decision.outcome}]${decision.ticketId ? ` ${decision.ticketId}` : ""}${detail ? ` ${truncate(detail.replace(/\s+/g, " "), 100)}` : ""}`);
+      }
+    }
+    return lines;
+  }
+
+  /** 票据回读的 Worker 会话尾部(最近几条 assistant 消息):汇报之外的进展,读不到时省略。 */
+  private async recentWorkerMessages(ticket: Ticket): Promise<string | null> {
+    if (!ticket.workerAgentId || !this.paseo) return null;
+    try {
+      const payload = await this.paseo.agents.ref(ticket.workerAgentId).timeline.refetch({ direction: "tail", limit: 40 });
+      const messages = payload.entries
+        .filter((entry) => entry.item.type === "assistant_message")
+        .sort((a, b) => a.seqStart - b.seqStart)
+        .map((entry) => (entry.item.type === "assistant_message" ? entry.item.text?.trim() ?? "" : ""))
+        .filter(Boolean)
+        .slice(-3);
+      if (messages.length === 0) return null;
+      return ["", "## recent worker messages (session tail, oldest first)", ...messages.map((text) => `- ${truncate(text.replace(/\s+/g, " "), 600)}`)].join("\n");
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1684,30 +2229,43 @@ export class SuperagentEngine {
    * Worker 退订(工具入口):按票据定位(与注入 URL 一致,不经 agent id,无竞态)。
    * 语义与 UI 的退订 RPC 相同:waiting 票据随之完结,Worker 本身不回收。
    */
-  async workerUnsubscribe(ticketId: string): Promise<ToolOutcome> {
+  async workerUnsubscribe(ticketId: string, threadId?: string): Promise<ToolOutcome> {
     await this.store.ready;
     const ticket = this.store.get().tickets.find((t) => t.id === ticketId);
     if (!ticket) return { ok: false, error: `ticket ${ticketId} does not exist` };
     if (!SUBSCRIBED_STATUSES.includes(ticket.status)) {
       return { ok: false, error: `ticket ${ticketId} is ${ticket.status}; only running/waiting workers can unsubscribe` };
     }
-    if (!ticket.subscribed) {
+    const target = threadId?.trim() || null;
+    if (target && target !== ticket.threadId && !followsOf(ticket).includes(target)) {
+      return { ok: false, error: `ticket ${ticketId} does not follow thread ${target}` };
+    }
+    const leavingHome = !target || target === ticket.threadId;
+    if (leavingHome && !ticket.subscribed && (target || followsOf(ticket).length === 0)) {
       return { ok: true, note: "already unsubscribed; future thread events go to the Router" };
     }
     let completed = false;
     await this.store.update((next) => {
-      const target = next.tickets.find((t) => t.id === ticketId);
-      if (!target || !target.subscribed) return;
-      target.subscribed = false;
-      target.updatedAt = new Date().toISOString();
-      if (target.status === "waiting") {
-        target.status = "completed";
+      const current = next.tickets.find((t) => t.id === ticketId);
+      if (!current) return;
+      if (!target) {
+        current.subscribed = false;
+        current.follows = [];
+      } else if (target === current.threadId) {
+        current.subscribed = false;
+      } else {
+        current.follows = followsOf(current).filter((id) => id !== target);
+      }
+      current.updatedAt = new Date().toISOString();
+      if (current.status === "waiting" && !current.subscribed && followsOf(current).length === 0) {
+        current.status = "completed";
         completed = true;
       }
     });
+    const scope = target ? ` from thread ${target}` : "";
     return completed
-      ? { ok: true, note: "unsubscribed; the ticket is completed. Future thread events go to the Router." }
-      : { ok: true, note: "unsubscribed; future thread events go to the Router instead of your session." };
+      ? { ok: true, note: `unsubscribed${scope}; the ticket is completed. Future thread events go to the Router.` }
+      : { ok: true, note: `unsubscribed${scope}; future thread events go to the Router instead of your session.` };
   }
 
   /**
@@ -1798,8 +2356,9 @@ export class SuperagentEngine {
       })),
       threads,
       recentResults: recentResults(state, options.threadId),
+      // 跟随(多对多订阅)某线程的其他线程票据也随该线程下发,对话页能看到并退订。
       tickets: state.tickets
-        .filter((t) => threads.some((th) => th.id === t.threadId))
+        .filter((t) => threads.some((th) => th.id === t.threadId || followsOf(t).includes(th.id)))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
       triggers: options.omitRecords ? [] : state.triggers
         .filter((t) => threads.some((th) => th.id === t.threadId))
@@ -1823,6 +2382,14 @@ export class SuperagentEngine {
         lastWatchdogNote: this.lastWatchdogNote,
         evalInFlight: this.evalInFlight,
         currentEvalThreadId: this.currentEvalThread,
+        patrol: {
+          enabled: settings.watchdogEnabled,
+          agentId: state.kv.watchdog?.agentId ?? null,
+          lastRunAt: state.kv.watchdog?.lastRunAt ?? null,
+          lastSummary: state.kv.watchdog?.lastSummary ?? null,
+          lastError: state.kv.watchdog?.lastError ?? null,
+          running: this.patrolInFlight,
+        },
       },
       chatTabs: this.chatTabs(),
     };

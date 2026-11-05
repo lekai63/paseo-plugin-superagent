@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { Ticket } from "../shared/model";
-import { slugify } from "../shared/model";
+import { slugify, WATCHDOG_AGENT_LABEL_VALUE } from "../shared/model";
 import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 
 /**
@@ -25,10 +25,13 @@ const WORKER_ROLE = [
   "key entities (paths, ids, commands) — only the beginning of the report reaches the Router as",
   "a stub, and that first line is what its keyword recall matches on.",
   "Keep the report under 300 words. If you are blocked, say precisely what you need.",
+  "Follow-up messages may arrive while you work. One prefixed \"[thread thr_…]\" comes from another",
+  "conversation the Router asked you to follow as well; your report reaches that conversation too.",
   "Your session may provide two orchestration tools (skip them if they are absent):",
-  "- superagent_unsubscribe — stop routing this thread's future follow-up messages directly",
-  "  to you; the Router evaluates them instead. Call it when later messages are no longer",
-  "  yours to answer (for example a one-shot task once its report is delivered).",
+  "- superagent_unsubscribe — stop routing future follow-up messages directly to you; the Router",
+  "  evaluates them instead. Call it when later messages are no longer yours to answer (for",
+  "  example a one-shot task once its report is delivered). Pass `threadId` to leave only one",
+  "  followed conversation.",
   "- superagent_handback — return a message you received to the Router because it belongs",
   "  elsewhere (off-topic for your ticket, another worker's domain, or needs a human-facing",
   "  reply); quote or summarize it in `text` and set `unsubscribe` to also stop future",
@@ -83,9 +86,26 @@ function sharedEnvironment(
   return lines.join("\n");
 }
 
+/**
+ * 投机执行(§3.4)说明:没人提出的后台试探,静默完成;汇报首行以 DELIVER:/DISCARD: 开头,
+ * DISCARD 由引擎静默丢弃,DELIVER 才交 Router 转述。
+ */
+const SPECULATIVE_NOTICE = [
+  "[Speculative background attempt]",
+  "Nobody asked for this ticket: the orchestrator started it on its own initiative to save the humans",
+  "time. Work silently — do not message, mention, or notify anyone, and do not push, open pull",
+  "requests, or change shared systems unless the mandate explicitly allows it; keep changes inside your",
+  "workspace. Your report's FIRST LINE must start with exactly one of:",
+  "  DELIVER: <conclusion> — you confirmed the problem/opportunity and have a simple, verified result",
+  "           worth a human's attention (say where the fix or output is);",
+  "  DISCARD: <reason> — you could not confirm it, found no simple result, or it is not worth",
+  "           interrupting anyone. Discarded results are dropped silently.",
+  "When in doubt, DISCARD.",
+].join("\n");
+
 /** Worker 首条 prompt:角色与汇报要求 + 执行环境说明 + 任务书。 */
 export function composeWorkerPrompt(
-  ticket: Pick<Ticket, "id" | "title" | "mandate" | "createdAt">,
+  ticket: Pick<Ticket, "id" | "title" | "mandate" | "createdAt"> & { speculative?: boolean | null },
   workingDir: string,
   isolation: "worktree" | "shared",
   instructionFiles: string[] = [],
@@ -99,7 +119,8 @@ export function composeWorkerPrompt(
         ].join("\n")
       : sharedEnvironment(ticket, workingDir, instructionFiles);
   const role = `[Worker instructions]\n${WORKER_ROLE.join("\n")}`;
-  return `${role}\n\n${environment}\n\n# Ticket: ${ticket.title}\n\n${ticket.mandate}`;
+  const speculative = ticket.speculative ? `\n\n${SPECULATIVE_NOTICE}` : "";
+  return `${role}\n\n${environment}${speculative}\n\n# Ticket: ${ticket.title}\n\n${ticket.mandate}`;
 }
 
 export interface WorkerLaunch {
@@ -266,8 +287,9 @@ export async function retireWorker(
   }
 }
 
-/** Router 标签判断(避免把本插件自己的 agent 再注入派发工具)。 */
+/** 编排自身 agent 的标签判断(Router/看门狗/Worker;避免再注入派发工具)。 */
 export function isOrchestrationAgent(labels: Record<string, string> | undefined): boolean {
   if (!labels) return false;
-  return labels[ROUTER_LABEL] === ROUTER_LABEL_VALUE || Boolean(labels[TICKET_LABEL]);
+  return labels[ROUTER_LABEL] === ROUTER_LABEL_VALUE || labels[ROUTER_LABEL] === WATCHDOG_AGENT_LABEL_VALUE
+    || Boolean(labels[TICKET_LABEL]);
 }

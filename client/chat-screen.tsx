@@ -6,7 +6,7 @@ import { Icon, Loading, Modal, ScrollView, useToast } from "@getpaseo/plugin/cli
 import type { SuperagentSnapshot } from "../shared/model";
 import { buildChatEntries } from "../shared/chat";
 import { closeChatTab, entryChatTab, openChatTab } from "../shared/chat-tabs";
-import { directTickets } from "../shared/execution";
+import { directTickets, followsOf } from "../shared/execution";
 import { markdownPreview, relativeTime, threadStatus } from "../shared/labels";
 import { superagentDispatchRpc } from "../shared/rpc";
 import { ChatComposer, type ComposerHint } from "./chat-composer";
@@ -96,7 +96,8 @@ export function ChatScreen(props: ChatScreenProps) {
   const snapshot = list.data;
   const detailData = threadId ? detail.data : undefined;
   const thread = detailData?.threads.find((item) => item.id === threadId) ?? snapshot?.threads.find((item) => item.id === threadId);
-  const tickets = useMemo(() => (detailData?.tickets ?? snapshot?.tickets ?? []).filter((ticket) => ticket.threadId === threadId),
+  const tickets = useMemo(() => (detailData?.tickets ?? snapshot?.tickets ?? [])
+    .filter((ticket) => ticket.threadId === threadId || (threadId !== null && followsOf(ticket).includes(threadId))),
     [detailData, snapshot, threadId]);
   const entries = useMemo(
     () => (detailData ? buildChatEntries(detailData.triggers, detailData.decisions, detailData.tickets) : []),
@@ -170,7 +171,7 @@ export function ChatScreen(props: ChatScreenProps) {
     setSelected(next);
   };
 
-  const directs = thread && thread.state !== "closed" ? directTickets(tickets) : [];
+  const directs = thread && thread.state !== "closed" ? directTickets(tickets, thread.id) : [];
   let hint: ComposerHint = { icon: "Route", label: "交给 Router 评估" };
   if (!threadId) hint = { icon: "Sparkles", label: "新对话 · Router 评估后答复或派发 Worker" };
   else if (thread?.state === "closed") hint = { icon: "RotateCcw", label: "对话已关闭,发送后重新打开" };

@@ -14,7 +14,7 @@ import type { DispatchInput } from "./engine";
  *
  * 同一 endpoint 按调用方角色下发不同工具集(URL query 区分):
  *   普通 agent      superagent_dispatch(委派入口)
- *   Router          superagent_list / superagent_read / superagent_search(跨线程可见 + Chain of Recall 回读)
+ *   Router/看门狗    superagent_list / superagent_read / superagent_search(跨线程可见 + Chain of Recall 回读)
  *   Worker          superagent_unsubscribe / superagent_handback(退订与转回)
  *
  * 形态对齐 daemon 自身的 agent MCP 端点(/mcp/agents):stateless——每个 HTTP 请求新建
@@ -46,8 +46,8 @@ export interface DispatchMcpEngine {
   listThreads?(): Promise<string>;
   /** Router 关键词检索:按关键词在全部记录里找 ID 与摘录(不知道 ID 时的回读入口)。 */
   searchRecords?(query: string): Promise<string>;
-  /** Worker 退订:停止线程后续事件直通该 Worker(按票据定位,与 URL 一致)。 */
-  workerUnsubscribe?(ticketId: string): Promise<ToolOutcome>;
+  /** Worker 退订:停止线程后续事件直通该 Worker(按票据定位,与 URL 一致);给出 threadId 只退该线程。 */
+  workerUnsubscribe?(ticketId: string, threadId?: string): Promise<ToolOutcome>;
   /** Worker 转回:把不该由它处理的消息作为待评估触发交回 Router。 */
   workerHandback?(ticketId: string, text: string, options?: { unsubscribe?: boolean }): Promise<ToolOutcome>;
 }
@@ -224,15 +224,19 @@ function registerWorkerTools(mcp: McpServer, engine: DispatchMcpEngine, ticketId
     {
       title: "Superagent 退订",
       description:
-        "Stop delivering this thread's future follow-up messages directly into your session; the Router " +
-        "evaluates them again instead. Call this once further messages are no longer yours to answer " +
-        "(for example a one-shot task whose report has been delivered). Your current turn is not affected.",
-      inputSchema: z.object({}),
+        "Stop delivering future follow-up messages directly into your session; the Router evaluates them " +
+        "again instead. Call this once further messages are no longer yours to answer (for example a " +
+        "one-shot task whose report has been delivered). Without `threadId` you leave every conversation " +
+        "you follow; with it (the thr_… id from a \"[thread …]\" prefix) only that one. Your current turn " +
+        "is not affected.",
+      inputSchema: z.object({
+        threadId: z.string().min(3).max(80).optional().describe("Leave only this followed thread (thr_…)"),
+      }),
     },
-    async () => {
+    async ({ threadId }) => {
       if (!engine.workerUnsubscribe) return toolError(`${UNSUBSCRIBE_TOOL_NAME} is not available`);
       try {
-        const outcome = await engine.workerUnsubscribe(ticketId);
+        const outcome = await engine.workerUnsubscribe(ticketId, threadId);
         return outcome.ok
           ? { content: [{ type: "text" as const, text: outcome.note }] }
           : toolError(outcome.error);

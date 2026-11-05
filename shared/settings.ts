@@ -8,6 +8,7 @@ export const NUMBER_LIMITS = {
   maxTicketAttempts: { min: 0, max: 5 },
   triggerMaxChars: { min: 500, max: 64000 },
   imReplyMaxChars: { min: 100, max: 4000 },
+  watchdogIntervalMin: { min: 5, max: 240 },
 } as const;
 export type NumberSettingKey = keyof typeof NUMBER_LIMITS;
 
@@ -71,7 +72,7 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 8,
+  version: 9,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
@@ -155,13 +156,30 @@ export const superagentSettings = defineSettings({
 
     /** IM 单条消息上限(含分段序号);长答复完整分段发送。 */
     imReplyMaxChars: boundedInt("imReplyMaxChars", 600),
+
+    // ---- 主动与巡检(§3.4 投机执行 / §6 看门狗) ----
+    /**
+     * 投机执行:允许 Router 依据「Router 规则」里写的主动策略,对没人明确提出的事项
+     * (如观察到的群聊反馈)在后台静默派发 Worker 先行尝试;结果有价值才交付,否则丢弃。
+     */
+    speculativeEnabled: z.boolean().default(false),
+    /**
+     * LLM 看门狗:独立的巡检 agent 按间隔检查每个 Worker 是否有实质进展、是否偏离任务,
+     * 必要时提醒/打断/取消/重试或上报 Router;维护者也可直接在该会话里问诊。
+     */
+    watchdogEnabled: z.boolean().default(false),
+    /** 看门狗的 `provider` 或 `provider/model`;留空沿用 Router 的模型。 */
+    watchdogProvider: z.string().trim().max(120).default(""),
+    /** 巡检间隔(分钟)。没有进行中的任务、也没有异常时跳过,不调用模型。 */
+    watchdogIntervalMin: boundedInt("watchdogIntervalMin", 30),
   }),
   /**
    * v1/v2 → v3:新字段由 schema 默认值补齐;v3 → v4:新增 agentToolProviders 同理;
    * v4 → v5:新增 workerDescription/workerProfiles 同理(无档位 = 与旧版一致的单一 Worker);
    * v5 → v6:新增 routerInstructions,留空沿用内置编排规则;
    * v6 → v7:档位新增 workingDir(留空 = 全局 workingDir),旧档位由默认值补齐;
-   * v7 → v8:新增 feishuObserve/qqObserve(默认关闭,行为与旧版一致)。
+   * v7 → v8:新增 feishuObserve/qqObserve(默认关闭,行为与旧版一致);
+   * v8 → v9:新增 speculativeEnabled 与 watchdog* 字段(默认关闭,行为与旧版一致)。
    */
   migrate: (values) => values,
 });

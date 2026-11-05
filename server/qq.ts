@@ -33,6 +33,7 @@ interface OneBotEvent {
 
 interface OneBotResponse {
   echo?: string;
+  data?: { message_id?: number | string } | null;
   status?: string;
   retcode?: number;
 }
@@ -42,23 +43,26 @@ const RECONNECT_MAX_MS = 60_000;
 
 type RawSegment = { type: string; data: Record<string, unknown> };
 
-/** OneBot message 字段(段数组或 CQ 字符串)→ 纯文本 + 是否 @ 机器人。 */
-function extractText(message: unknown, raw: string, selfId: string): { text: string; addressed: boolean } {
+/** OneBot message 字段(段数组或 CQ 字符串)→ 纯文本 + 是否 @ 机器人 + 引用的消息 id。 */
+function extractText(message: unknown, raw: string, selfId: string): { text: string; addressed: boolean; replyTo: string[] } {
   if (Array.isArray(message)) {
     let addressed = false;
     const parts: string[] = [];
+    const replyTo: string[] = [];
     for (const segment of message as RawSegment[]) {
       if (segment?.type === "at") {
         if (String(segment.data?.qq ?? "") === selfId) addressed = true;
         continue;
       }
+      if (segment?.type === "reply" && segment.data?.id !== undefined) replyTo.push(String(segment.data.id));
       if (segment?.type === "text") parts.push(String(segment.data?.text ?? ""));
     }
-    return { text: parts.join(" ").trim(), addressed };
+    return { text: parts.join(" ").trim(), addressed, replyTo };
   }
   const addressed = new RegExp(`\\[CQ:at[^\\]]*qq=${selfId}[^\\]]*\\]`).test(raw);
+  const replyTo = [...raw.matchAll(/\[CQ:reply,(?:[^\]]*,)?id=(-?\d+)[^\]]*\]/g)].map((match) => match[1]);
   const text = raw.replace(/\[CQ:[^\]]+\]/g, "").trim();
-  return { text, addressed };
+  return { text, addressed, replyTo };
 }
 
 export class QqSource implements ImSource {
@@ -67,7 +71,7 @@ export class QqSource implements ImSource {
   private stopped = false;
   private reconnectAttempts = 0;
   private echoCounter = 0;
-  private readonly pending = new Map<string, { resolve(): void; reject(error: Error): void }>();
+  private readonly pending = new Map<string, { resolve(data?: OneBotResponse["data"]): void; reject(error: Error): void }>();
 
   constructor(private readonly config: QqConfig) {}
 
@@ -83,7 +87,7 @@ export class QqSource implements ImSource {
     this.rejectAllPending(new Error("QQ source stopped"));
   }
 
-  async send(origin: TriggerOrigin, text: string): Promise<void> {
+  async send(origin: TriggerOrigin, text: string): Promise<string | null> {
     const isGroup = origin.chatId.startsWith("g:");
     const target = origin.chatId.slice(2);
     const replySegment =
@@ -94,7 +98,8 @@ export class QqSource implements ImSource {
     const params = isGroup
       ? { group_id: Number(target), message: [...replySegment, { type: "text", data: { text } }] }
       : { user_id: Number(target), message: [...replySegment, { type: "text", data: { text } }] };
-    await this.call(action, params);
+    const data = await this.call(action, params);
+    return data?.message_id !== undefined && data.message_id !== null ? String(data.message_id) : null;
   }
 
   private connect(onTrigger: (message: InboundMessage) => void, onDrop?: (drop: InboundDrop) => void): Promise<void> {
@@ -143,7 +148,7 @@ export class QqSource implements ImSource {
       const waiter = this.pending.get(frame.echo);
       if (waiter) {
         this.pending.delete(frame.echo);
-        if (frame.status === "ok" || frame.retcode === 0) waiter.resolve();
+        if (frame.status === "ok" || frame.retcode === 0) waiter.resolve(frame.data);
         else waiter.reject(new Error(`OneBot ${frame.echo} failed: ${frame.status ?? frame.retcode}`));
       }
       return;
@@ -160,7 +165,7 @@ export class QqSource implements ImSource {
     if (!this.config.allowUsers.includes(userId)) return null;
     const selfId = event.self_id !== undefined ? String(event.self_id) : "";
     const raw = event.raw_message ?? "";
-    const { text, addressed } = extractText(event.message, raw, selfId);
+    const { text, addressed, replyTo } = extractText(event.message, raw, selfId);
     if (event.message_type === "group") {
       const groupId = event.group_id !== undefined ? String(event.group_id) : "";
       if (!groupId || !this.config.allowGroups.includes(groupId)) return null;
@@ -181,6 +186,7 @@ export class QqSource implements ImSource {
             text,
             sender: `qq:${userId}`,
             context: true,
+            replyTo,
           };
         }
         onDrop?.({
@@ -196,6 +202,7 @@ export class QqSource implements ImSource {
           text,
           sender: `qq:${userId}`,
           reason: "群消息未 @ 机器人",
+          replyTo,
         });
         return null;
       }
@@ -213,6 +220,7 @@ export class QqSource implements ImSource {
         title: `QQ群 ${truncate(text, 40)}`,
         text,
         sender: `qq:${userId}`,
+        replyTo,
       };
     }
     if (event.message_type === "private") {
@@ -230,12 +238,13 @@ export class QqSource implements ImSource {
         title: `QQ私聊 ${truncate(text, 40)}`,
         text,
         sender: `qq:${userId}`,
+        replyTo,
       };
     }
     return null;
   }
 
-  private call(action: string, params: Record<string, unknown>): Promise<void> {
+  private call(action: string, params: Record<string, unknown>): Promise<OneBotResponse["data"]> {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("QQ OneBot socket is not open"));

@@ -54,11 +54,12 @@ export class WecomSource implements ImSource {
     this.client = null;
   }
 
-  async send(origin: TriggerOrigin, text: string): Promise<void> {
+  async send(origin: TriggerOrigin, text: string): Promise<null> {
     const client = this.client;
     if (!client) throw new Error("wecom source is not started");
     const result = await client.sendMessage(origin.chatId, { msgtype: "markdown", markdown: { content: text } });
     if (result.errcode !== 0) throw new Error(`wecom send rejected (${result.errcode})`);
+    return null;
   }
 
   private translate(frame: WsFrame<TextMessage>): InboundMessage | null {

@@ -50,7 +50,7 @@ function fixture(t, status = "running", subscribed = true) {
   });
   const calls = {
     sends: [], watches: [], archives: [], workspaceArchives: [], creates: 0, workspaceCreateOptions: [], evals: [],
-    routerCreates: [], workerCreates: [], prompts: [],
+    routerCreates: [], workerCreates: [], prompts: [], watchdogCreates: [], patrols: [],
   };
   const controls = {
     send: async () => {},
@@ -58,6 +58,7 @@ function fixture(t, status = "running", subscribed = true) {
     createRouterAgent: async () => ref("new-router"),
     timeline: async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: "work completed" } }] }),
     verdict: { decision: "reply", reply: "done" },
+    patrolVerdict: { summary: "all good", actions: [] },
     isGit: true,
     instructionFiles: [],
     routerSessionId: null,
@@ -70,7 +71,7 @@ function fixture(t, status = "running", subscribed = true) {
   const ref = (id) => {
     if (!handles.has(id)) handles.set(id, {
       id,
-      refresh: async () => ({ agent: { status: id === "router" ? "idle" : "running", archivedAt: null,
+      refresh: async () => ({ agent: { status: id === "router" || id.includes("watchdog") ? "idle" : "running", archivedAt: null,
         persistence: id.includes("router") && controls.routerSessionId ? { sessionId: controls.routerSessionId } : null } }),
       current: () => ({ persistence: controls.routerSessionId ? { sessionId: controls.routerSessionId } : null }),
       send: async (text, options) => {
@@ -78,6 +79,10 @@ function fixture(t, status = "running", subscribed = true) {
         await controls.send(text, options);
       },
       run: async (prompt) => {
+        if (id.includes("watchdog")) {
+          calls.patrols.push(prompt);
+          return { lastMessage: JSON.stringify(controls.patrolVerdict) };
+        }
         calls.prompts.push(prompt);
         return { lastMessage: JSON.stringify(controls.verdict) };
       },
@@ -106,6 +111,10 @@ function fixture(t, status = "running", subscribed = true) {
           if (options.labels?.["superagent.role"] === "router") {
             calls.routerCreates.push(options);
             return controls.createRouterAgent(options);
+          }
+          if (options.labels?.["superagent.role"] === "watchdog") {
+            calls.watchdogCreates.push(options);
+            return ref("watchdog");
           }
           calls.workerCreates.push(options);
           return controls.createAgent(options);
@@ -167,7 +176,7 @@ function fixture(t, status = "running", subscribed = true) {
   engine.primed = true;
   engine.scheduleEval = (id) => { calls.evals.push(id); };
   t.after(() => engine.stop());
-  return { engine, state, calls, controls, finishes, ref, values, ticket: state.tickets[0], daemonWorkspaces };
+  return { engine, state, calls, controls, finishes, ref, values, paseo, ticket: state.tickets[0], daemonWorkspaces };
 }
 
 function pendingTrigger(state) {
@@ -1542,8 +1551,12 @@ test("the eval batch window is armed once and not reset by later triggers", asyn
   // 显式延时(0 = 立即)仍然替换定时器:handback/forceEval 需要插队。
   schedule.call(f.engine, "thread", 0);
   assert.notEqual(f.engine.batchTimers.get("thread"), armed);
-  // 触发后定时器清空(线程无 pending 触发,runEval 立即返回)。
-  await until(() => !f.engine.batchTimers.has("thread"));
+  // 触发后定时器清空(线程无 pending 触发,runEval 立即返回)。按真实时间轮询:
+  // 0ms 定时器在并行负载下可能晚于 50 轮 setImmediate 才触发。
+  for (let waited = 0; f.engine.batchTimers.has("thread") && waited < 2000; waited += 5) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(f.engine.batchTimers.has("thread"), false);
 });
 
 test("filtered drops are recorded with a reason without eval, direct delivery, or reopening", async (t) => {
@@ -1614,4 +1627,291 @@ test("transient eval errors keep requeueing well past the unparsed circuit break
   await f.engine.forceEval("thread");
   assert.equal(f.engine.evalFailures.get("thread"), undefined);
   assert.equal(f.engine.evalErrors.get("thread"), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// 《Super-agent》各模块的补齐:语义慢路径、引用归线程、相邻消息内联、多对多订阅、
+// 投机执行、链式召回、LLM 看门狗、引擎启动前排队。
+
+const otherThread = (id, title = "B 讨论") => ({
+  id, key: `manual:${id}`, title, state: "active", summary: null, createdAt: oldTime, updatedAt: oldTime,
+});
+
+test("context-only messages on a subscribed thread go to the Router instead of the workers", async (t) => {
+  const f = fixture(t, "waiting");
+  const result = await f.engine.dispatch({ task: "群里闲聊一句", threadId: "thread", context: true });
+  assert.equal(result.directDelivered, false);
+  assert.equal(f.calls.sends.length, 0, "overheard chatter never steers a worker");
+  assert.deepEqual(f.calls.evals, ["thread"]);
+  const addressed = await f.engine.dispatch({ task: "正式的追问", threadId: "thread" });
+  assert.equal(addressed.directDelivered, true, "addressed follow-ups still take the fast path");
+});
+
+test("an IM reply quoting a known message joins that message's thread and the Router sees the quote", async (t) => {
+  const f = fixture(t, "completed");
+  const chat = (messageId, senderId) => ({ channel: "feishu", chatId: "oc_g", messageId, senderId });
+  f.state.triggers.push({
+    id: "trg_m1", threadId: "thread", threadKey: "manual:test", kind: "feishu", sender: "feishu:ou_a",
+    text: "登录页报 500", status: "evaluated", context: false, receivedAt: oldTime, origin: chat("m1", "ou_a"),
+  });
+  const result = await f.engine.dispatch({
+    task: "还是不行", sender: "feishu:ou_b", origin: chat("m2", "ou_b"),
+    threadKey: "feishu:chat:oc_g:root:m1", replyTo: ["m1"],
+  });
+  assert.equal(result.threadId, "thread", "the reply continues the quoted message's thread");
+  const trigger = f.state.triggers.find((item) => item.id === result.triggerId);
+  assert.equal(trigger.quote.triggerId, "trg_m1");
+  await f.engine.runEval("thread");
+  assert.match(f.calls.prompts.at(-1), /quoting: trg_m1 \(feishu:ou_a\): "登录页报 500"/);
+});
+
+test("quoting a Router reply finds its thread through the sent message id the channel returned", async (t) => {
+  const f = fixture(t, "completed");
+  pendingTrigger(f.state);
+  f.state.triggers[0].origin = { channel: "qq", chatId: "g:1", messageId: "5", senderId: "u" };
+  f.controls.verdict = { actions: [{ action: "reply", reply: "已修复,请重试" }] };
+  f.engine.setReplySink({ send: async () => "901" });
+  await f.engine.runEval("thread");
+  assert.deepEqual(f.state.imDeliveries[0].sentMessageIds, ["901"]);
+  const result = await f.engine.dispatch({
+    task: "确认可以了", sender: "qq:u", origin: { channel: "qq", chatId: "g:1", messageId: "6", senderId: "u" },
+    threadKey: "qq:group:elsewhere", replyTo: ["901"],
+  });
+  assert.equal(result.threadId, "thread");
+  const trigger = f.state.triggers.find((item) => item.id === result.triggerId);
+  assert.equal(trigger.quote.sender, "router");
+  assert.equal(trigger.quote.text, "已修复,请重试");
+});
+
+test("filtered chatter rolls over and the latest unaddressed messages are inlined for the Router", async (t) => {
+  const f = fixture(t, "completed");
+  const origin = (messageId, senderId = "ou_x") => ({ channel: "feishu", chatId: "oc_g", messageId, senderId });
+  for (let i = 0; i < 32; i++) {
+    await f.engine.dispatchFiltered({ task: `闲聊 ${i}`, sender: "feishu:ou_x", origin: origin(`c${i}`), threadId: "thread" }, "群消息未 @ 机器人");
+  }
+  const filtered = f.state.triggers.filter((item) => item.status === "filtered");
+  assert.equal(filtered.length, 30, "the record keeps a rolling window instead of freezing at the cap");
+  assert.ok(!filtered.some((item) => item.text === "闲聊 0" || item.text === "闲聊 1"));
+  await f.engine.dispatch({ task: "刚才说的问题帮看下", sender: "feishu:ou_y", origin: origin("q1", "ou_y"), threadId: "thread" });
+  await f.engine.runEval("thread");
+  const prompt = f.calls.prompts.at(-1);
+  const section = prompt.split("## Recent unaddressed chat in this conversation (filtered at admission; context only)\n")[1]?.split("\n\n")[0];
+  assert.ok(section, "the neighbouring chatter is inlined");
+  assert.deepEqual(section.split("\n").map((line) => line.replace(/^- \[[^\]]+\] /, "")),
+    [27, 28, 29, 30, 31].map((i) => `feishu:ou_x: 闲聊 ${i}`), "only the latest few neighbours, oldest first");
+  assert.equal(prompt.split("闲聊 31").length - 1, 1, "inlined chatter is not repeated in the history stubs");
+});
+
+test("a Router subscribe makes another thread's worker follow this one: follow-ups fan out and reports return to both", async (t) => {
+  const f = fixture(t, "running");
+  f.state.threads.push(otherThread("thread-b"));
+  f.state.triggers.push({
+    id: "trg_b", threadId: "thread-b", threadKey: "manual:thread-b", kind: "manual", sender: "user",
+    text: "这和 A 那边的修复是一回事", status: "pending", context: false, receivedAt: new Date().toISOString(),
+  });
+  f.controls.verdict = { actions: [{ action: "subscribe", ticketId: "ticket" }, { action: "steer", ticketId: "ticket", text: "B 线程也在等这个修复" }] };
+  await f.engine.runEval("thread-b");
+  assert.deepEqual(f.ticket.follows, ["thread-b"]);
+  const subscribed = f.state.decisions.find((decision) => decision.outcome === "subscribe");
+  assert.equal(subscribed.ticketId, "ticket");
+  assert.match(subscribed.rationale, /also follows this thread \(home thread thread\)/);
+
+  const follow = await f.engine.dispatch({ task: "B 这边补充了日志", threadId: "thread-b" });
+  assert.equal(follow.directDelivered, true);
+  assert.equal(f.calls.sends.at(-1).text, '[thread thread-b "B 讨论"] B 这边补充了日志');
+
+  await f.engine.settleTicketRun("ticket", null);
+  assert.equal(f.ticket.status, "waiting");
+  const reports = f.state.triggers.filter((item) => item.kind === "report");
+  assert.deepEqual(reports.map((item) => item.threadId).sort(), ["thread", "thread-b"]);
+
+  f.controls.verdict = { actions: [{ action: "ignore" }] };
+  await f.engine.runEval("thread-b");
+  assert.match(f.calls.prompts.at(-1), /also follow this thread[^\n]*\n- \[ticket\] "test" status=waiting home-thread=thread/);
+});
+
+test("a subscribe for a finished or unknown ticket is recorded without changing anything", async (t) => {
+  const f = fixture(t, "failed");
+  f.state.threads.push(otherThread("thread-b"));
+  f.state.triggers.push({
+    id: "trg_b", threadId: "thread-b", threadKey: "manual:thread-b", kind: "manual", sender: "user",
+    text: "接上", status: "pending", context: false, receivedAt: new Date().toISOString(),
+  });
+  f.controls.verdict = { actions: [{ action: "subscribe", ticketId: "ticket" }] };
+  await f.engine.runEval("thread-b");
+  assert.deepEqual(f.ticket.follows ?? [], []);
+  assert.match(f.state.decisions.at(-1).rationale, /is failed; nothing subscribed/);
+});
+
+test("a worker can leave one followed thread, and closing a followed thread keeps the ticket", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.threads.push(otherThread("thread-b"), otherThread("thread-c", "C"));
+  f.ticket.follows = ["thread-b", "thread-c"];
+  const left = await f.engine.workerUnsubscribe("ticket", "thread-b");
+  assert.equal(left.ok, true);
+  assert.match(left.note, /from thread thread-b/);
+  assert.deepEqual(f.ticket.follows, ["thread-c"]);
+  assert.equal(f.ticket.subscribed, true);
+  assert.equal(f.ticket.status, "waiting");
+  const unknown = await f.engine.workerUnsubscribe("ticket", "thread-x");
+  assert.equal(unknown.ok, false);
+  await f.engine.closeThread("thread-c");
+  assert.deepEqual(f.ticket.follows, []);
+  assert.equal(f.ticket.status, "waiting");
+  assert.equal(f.calls.archives.length, 0, "a followed thread closing does not retire the follower");
+});
+
+test("speculative dispatch is honored only when enabled, never subscribes, and is capped", async (t) => {
+  const f = fixture(t, "completed");
+  const spec = (title) => ({ action: "dispatch", title, mandate: `静默尝试:${title}`, speculative: true });
+  f.controls.verdict = { actions: [spec("复现登录问题")] };
+  await evaluateRouter(f, "群里有人说登录挂了");
+  const plain = f.state.tickets.at(-1);
+  assert.equal(plain.speculative, false, "the flag is ignored while the setting is off");
+  assert.equal(plain.subscribed, true);
+  assert.doesNotMatch(f.calls.prompts.at(-1), /Speculative execution/);
+
+  f.values.speculativeEnabled = true;
+  f.controls.verdict = { actions: [spec("一"), spec("二"), spec("三")] };
+  await evaluateRouter(f, "又有人反馈");
+  assert.match(f.calls.prompts.at(-1), /## Speculative execution \(enabled\)/);
+  const speculative = f.state.tickets.filter((ticket) => ticket.speculative);
+  assert.deepEqual(speculative.map((ticket) => ticket.title), ["一", "二"]);
+  assert.ok(speculative.every((ticket) => ticket.subscribed === false));
+  const dropped = f.state.decisions.filter((decision) => decision.outcome === "ignore" && /speculative dispatch "三" dropped/.test(decision.rationale ?? ""));
+  assert.equal(dropped.length, 1);
+  await until(() => f.calls.workerCreates.some((options) => options.title === "二"));
+  assert.match(f.calls.workerCreates.find((options) => options.title === "二").prompt, /\[Speculative background attempt\][\s\S]*DISCARD:/);
+});
+
+test("a DISCARD speculative report is dropped silently with its worker retired; DELIVER reaches the Router", async (t) => {
+  const discard = fixture(t, "running");
+  Object.assign(discard.ticket, { speculative: true, subscribed: false });
+  discard.controls.timeline = async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: "DISCARD: 无法复现" } }] });
+  await discard.engine.settleTicketRun("ticket", null);
+  assert.equal(discard.ticket.status, "completed");
+  const silent = discard.state.triggers.find((item) => item.kind === "report");
+  assert.equal(silent.status, "evaluated");
+  assert.equal(silent.note, "speculative attempt discarded");
+  assert.ok(discard.calls.archives.includes("worker"));
+  assert.equal(discard.calls.evals.length, 0, "nothing reaches the Router or the human");
+
+  const deliver = fixture(t, "running");
+  Object.assign(deliver.ticket, { speculative: true, subscribed: false });
+  deliver.controls.timeline = async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: "DELIVER: 已复现并修复,分支 superagent/fix" } }] });
+  await deliver.engine.settleTicketRun("ticket", null);
+  const report = deliver.state.triggers.find((item) => item.kind === "report");
+  assert.equal(report.status, "pending");
+  assert.match(report.text, /speculative background attempt[\s\S]*DELIVER: 已复现并修复/);
+  assert.deepEqual(deliver.calls.evals, ["thread"]);
+});
+
+test("chain of recall: threads list their messages, decisions and followers; tickets their follows and session tail", async (t) => {
+  const f = fixture(t, "running");
+  f.state.threads[0].id = "thr_main";
+  Object.assign(f.ticket, { id: "tkt_main", threadId: "thr_main", follows: ["thr_b"] });
+  f.state.threads.push({ ...otherThread("thr_b"), title: "B 讨论" });
+  f.state.triggers.push({
+    id: "trg_1", threadId: "thr_main", threadKey: "manual:test", kind: "manual", sender: "user",
+    text: "请修复登录", status: "evaluated", context: false, receivedAt: oldTime,
+  });
+  f.state.decisions.push({
+    id: "dec_1", threadId: "thr_main", triggerIds: ["trg_1"], outcome: "dispatch", reply: null,
+    rationale: null, ticketId: "tkt_main", raw: null, createdAt: oldTime,
+  });
+  const thread = await f.engine.readRecord("thr_main");
+  assert.match(thread, /## recent messages \(1 of 1, oldest first\)\n- \[trg_1 manual evaluated\] user: 请修复登录/);
+  assert.match(thread, /## recent router decisions \(1 of 1\)\n- \[dec_1 dispatch\] tkt_main/);
+  const followed = await f.engine.readRecord("thr_b");
+  assert.match(followed, /## tickets of other threads following this one \(1\)\n- \[tkt_main\] "test" status=running home-thread=thr_main/);
+  const ticket = await f.engine.readRecord("tkt_main");
+  assert.match(ticket, /also follows: thread thr_b "B 讨论" \(active\)/);
+  assert.match(ticket, /## recent worker messages \(session tail, oldest first\)\n- work completed/);
+});
+
+test("the LLM watchdog patrols unfinished work, judges progress across patrols, and acts through its verdict", async (t) => {
+  const f = fixture(t, "running");
+  f.values.watchdogEnabled = true;
+  f.controls.patrolVerdict = {
+    summary: "ticket loops on the same failure",
+    actions: [
+      { action: "nudge", ticketId: "ticket", text: "先跑单测再改代码" },
+      { action: "escalate", ticketId: "ticket", text: "需要人决定是否回滚" },
+    ],
+  };
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.watchdogCreates.length, 1);
+  const created = f.calls.watchdogCreates[0];
+  assert.equal(created.labels["superagent.role"], "watchdog");
+  assert.match(created.config.systemPrompt, /Superagent Watchdog instructions/);
+  assert.deepEqual(created.config.options, { sandbox_mode: "read-only" }, "codex sessions get a read-only sandbox");
+  assert.match(f.calls.patrols[0], /### ticket "test" — status=running/);
+  assert.match(f.calls.patrols[0], /activity: first patrol for this ticket/);
+  assert.match(f.calls.patrols[0], /latest worker message \(excerpt\):\n```text\nwork completed/);
+  assert.ok(f.calls.sends.some((send) => send.id === "worker" && send.text === "[watchdog] 先跑单测再改代码"));
+  const escalation = f.state.triggers.find((item) => item.sender === "watchdog");
+  assert.equal(escalation.status, "pending");
+  assert.match(escalation.text, /需要人决定是否回滚/);
+  assert.ok(f.calls.evals.includes("thread"), "the Router tells the human");
+  assert.equal(f.state.decisions.filter((decision) => decision.outcome === "watchdog").length, 2);
+  assert.equal(f.state.kv.watchdog.lastSummary, "ticket loops on the same failure");
+
+  f.controls.patrolVerdict = { summary: "steady", actions: [] };
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.watchdogCreates.length, 1, "the watchdog session is reused");
+  assert.match(f.calls.patrols[1], /activity since last patrol: NONE/);
+  assert.doesNotMatch(f.calls.patrols[1], /Superagent Watchdog instructions/, "rules are not resent to the same session");
+  assert.equal(f.engine.snapshot().engine.patrol.lastSummary, "steady");
+});
+
+test("the LLM watchdog stays off by default and skips the model when there is nothing to patrol", async (t) => {
+  const off = fixture(t, "running");
+  await off.engine.maybePatrol(true);
+  assert.equal(off.calls.patrols.length, 0);
+  assert.equal(off.state.kv.watchdog, undefined);
+
+  const idle = fixture(t, "completed");
+  idle.values.watchdogEnabled = true;
+  await idle.engine.maybePatrol(true);
+  assert.equal(idle.calls.patrols.length, 0);
+  assert.equal(idle.calls.watchdogCreates.length, 0);
+  assert.equal(idle.state.kv.watchdog.lastSummary, "nothing to patrol");
+});
+
+test("an unparsable watchdog reply is recorded and the rules are resent next time", async (t) => {
+  const f = fixture(t, "running");
+  f.values.watchdogEnabled = true;
+  f.values.routerProvider = "zcode-acp/builtin:plan\\GLM";
+  f.controls.patrolVerdict = "not json";
+  await f.engine.maybePatrol(true);
+  assert.match(f.calls.patrols[0], /Superagent Watchdog instructions/, "ACP sessions receive the rules in the first turn");
+  assert.match(f.state.kv.watchdog.lastError, /^unparsed/);
+  f.controls.patrolVerdict = { summary: "ok", actions: [] };
+  await f.engine.maybePatrol(true);
+  assert.match(f.calls.patrols[1], /Superagent Watchdog instructions/);
+  assert.equal(f.state.kv.watchdog.lastError, null);
+});
+
+test("messages that arrive before the engine starts are kept and delivered once it starts", async (t) => {
+  const f = fixture(t, "waiting");
+  f.engine.paseo = null;
+  const queued = await f.engine.dispatch({ task: "引擎启动前的消息", threadId: "thread" });
+  assert.equal(queued.directDelivered, false);
+  assert.equal(f.calls.sends.length, 0);
+  assert.equal(f.calls.evals.length, 0);
+  f.engine.paseo = f.paseo;
+  await f.engine.flushQueuedBeforeStart();
+  assert.equal(f.calls.sends[0].text, "引擎启动前的消息");
+  const trigger = f.state.triggers.find((item) => item.id === queued.triggerId);
+  assert.equal(trigger.status, "delivered");
+  assert.equal(f.engine.orchestrationRole("worker"), "worker");
+  assert.equal(f.engine.orchestrationRole("router"), "router");
+  assert.equal(f.engine.orchestrationRole("someone-else"), null);
+});
+
+test("a new codex Router is created with a read-only sandbox", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.kv.routerAgentId = null;
+  await evaluateRouter(f, "first event");
+  assert.deepEqual(f.calls.routerCreates[0].config.options, { sandbox_mode: "read-only" });
 });

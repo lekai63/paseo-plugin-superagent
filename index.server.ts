@@ -12,7 +12,7 @@ import {
   createStateHandler,
   createUnsubscribeHandler,
 } from "./server/handlers";
-import { createSessionOpenTransform, resolveMcpProviders } from "./server/agent-mcp";
+import { createSessionOpenTransform, orchestrationPermission, resolveMcpProviders } from "./server/agent-mcp";
 import { startDispatchMcpServer, type SuperagentMcpEndpoint } from "./server/mcp-server";
 import { ImManager } from "./server/im";
 import { FeishuSource } from "./server/feishu";
@@ -82,12 +82,11 @@ export default function contribute(server: PluginServerContext) {
     () => resolveMcpProviders(current.agentToolProviders),
   );
 
-  // IM 触发源(飞书/QQ):引擎 prime 后启动;答复经 ImManager 发回原聊天。
+  // IM 触发源:插件启动即连接(不等引擎 prime——宿主不在启动时提供 Paseo 句柄,
+  // 无头重启后可能很久才有首个 hook/RPC);引擎启动前到达的消息先落盘排队,启动后补处理。
+  // 答复经 ImManager 发回原聊天。
   const im = new ImManager();
   engine.setReplySink(im);
-  engine.onFirstPrime = () => {
-    void syncImSources();
-  };
   im.setHandler((message) => {
     void engine
       .dispatch({
@@ -97,6 +96,7 @@ export default function contribute(server: PluginServerContext) {
         origin: message.origin,
         threadKey: message.threadKey,
         context: message.context,
+        replyTo: message.replyTo,
       })
       .catch((error) => {
         console.error("[superagent] IM trigger dispatch failed", error);
@@ -112,6 +112,7 @@ export default function contribute(server: PluginServerContext) {
           sender: drop.sender,
           origin: drop.origin,
           threadKey: drop.threadKey,
+          replyTo: drop.replyTo,
         },
         drop.reason,
       )
@@ -235,7 +236,7 @@ export default function contribute(server: PluginServerContext) {
     if (state.status !== "ready") return;
     current = state.values;
     const signature = imSignature(current);
-    if (signature !== lastImSignature && engine.isPrimed) {
+    if (signature !== lastImSignature) {
       lastImSignature = signature;
       void syncImSources();
     }
@@ -246,14 +247,27 @@ export default function contribute(server: PluginServerContext) {
     const signature = imSignature(current);
     if (signature === lastImSignature) return;
     lastImSignature = signature;
-    // 引擎未 prime 前不启动 source(onFirstPrime 兜底首次启动)。
-    if (engine.isPrimed) void syncImSources();
+    void syncImSources();
   });
 
   // hook 同时用于 prime 与注入:无头重启后首个 session_open 就把引擎拉起来。
   const removeSessionOpen = server.before("agent.session_open", ({ request }, context) => {
     engine.prime(context.paseo);
     return agentToolTransform(request);
+  });
+
+  // 编排 agent 的权限策略:Router/看门狗只裁决不执行(非自身工具一律拒绝),
+  // Worker 的退订/转回工具自动放行;其余权限照常交给人。
+  const removePermissionHook = server.addHook("agent.permission.before", async ({ agent, request }, context) => {
+    engine.prime(context.paseo);
+    await store.ready;
+    const decision = orchestrationPermission(engine.orchestrationRole(agent.id), request);
+    if (!decision) return;
+    try {
+      await context.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: decision });
+    } catch (error) {
+      console.error("[superagent] permission response failed", error);
+    }
   });
 
   // hook 仅用于 prime(无头重启后到首个 RPC 之间保持引擎活着)。
@@ -267,6 +281,7 @@ export default function contribute(server: PluginServerContext) {
   return () => {
     for (const remove of hookRemovers) remove();
     removeSessionOpen();
+    removePermissionHook();
     void dispatchEndpoint?.stop();
     void im.stopAll();
     void engine.stop();

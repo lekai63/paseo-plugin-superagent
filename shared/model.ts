@@ -20,6 +20,8 @@ import { ChatTabsSchema } from "./chat-tabs";
  */
 export const ROUTER_AGENT_LABEL = "superagent.role";
 export const ROUTER_AGENT_LABEL_VALUE = "router";
+/** 同一标签键下的 LLM 看门狗会话(§6):独立于 Router 的巡检 agent。 */
+export const WATCHDOG_AGENT_LABEL_VALUE = "watchdog";
 
 export const TRIGGER_KINDS = ["manual", "agent", "report", "engine", "feishu", "qq", "dingtalk", "wecom"] as const;
 export const TriggerKindSchema = z.enum(TRIGGER_KINDS);
@@ -61,6 +63,16 @@ export const TriggerSchema = z.object({
   /** fast-path 丢弃原因或投递备注。 */
   note: z.string().nullish(),
   threadId: z.string().nullish(),
+  /**
+   * IM 消息引用(回复)的那条消息(§3.3 Inline):在本地记录里找到时内联其摘要与 ID,
+   * 找不到时只保留平台消息 id。text 已截断,全文按 triggerId 回读。
+   */
+  quote: z.object({
+    triggerId: z.string().nullish(),
+    sender: z.string().nullish(),
+    text: z.string().nullish(),
+    messageId: z.string().nullish(),
+  }).nullish(),
 });
 export type Trigger = z.infer<typeof TriggerSchema>;
 
@@ -130,8 +142,18 @@ export const TicketSchema = z.object({
   /** 当前(或最近一次)Worker 启动时间,看门狗超时判定的基准。 */
   startedAt: z.string().nullish(),
   attempts: z.number().int().nonnegative().default(0),
-  /** 线程后续事件是否直通该 Worker(多对多订阅中的一个成员)。 */
+  /** 本线程(threadId)的后续事件是否直通该 Worker。 */
   subscribed: z.boolean().default(true),
+  /**
+   * 额外订阅的其他线程(§3.2 多对多):这些线程的后续事件同样直通该 Worker,
+   * 汇报也回流到这些线程。由 Router 的 subscribe 动作加入,Worker 可按线程退订。
+   */
+  follows: z.array(z.string()).default([]),
+  /**
+   * 投机执行(§3.4):没人明确提出、由 Router 依据主动策略在后台先行尝试的任务。
+   * 不订阅线程;汇报首行 DISCARD 时引擎静默丢弃并回收 Worker,否则交 Router 转述。
+   */
+  speculative: z.boolean().default(false),
   report: z.string().nullish(),
   lastError: z.string().nullish(),
   createdAt: z.string(),
@@ -147,6 +169,8 @@ export const DECISION_OUTCOMES = [
   "reply",
   "ignore",
   "stop",
+  "subscribe",
+  "watchdog",
   "unparsed",
   "error",
 ] as const;
@@ -169,6 +193,8 @@ export type Decision = z.infer<typeof DecisionSchema>;
 
 /** 一次裁决最多包含的动作数:fan-out 上限,防止失控派发。 */
 export const ROUTER_ACTION_LIMIT = 5;
+/** 同时存活的投机执行 Ticket 上限(§3.4):后台试探消耗算力,超出的投机派发直接丢弃。 */
+export const MAX_SPECULATIVE_TICKETS = 2;
 
 /**
  * Router 的单个动作。一次裁决是一组动作(可 fan-out 多个 dispatch、票级操控),
@@ -182,6 +208,8 @@ export const RouterActionSchema = z.discriminatedUnion("action", [
     unsubscribe: z.boolean().optional(),
     /** Worker 档位名;省略或不在设置名单里时用默认 Worker。 */
     profile: z.string().max(60).nullish(),
+    /** 投机执行:后台静默尝试,结果有价值才交付(仅在设置开启时生效)。 */
+    speculative: z.boolean().optional(),
   }),
   z.object({
     action: z.literal("steer"),
@@ -197,6 +225,11 @@ export const RouterActionSchema = z.discriminatedUnion("action", [
   }),
   z.object({
     action: z.literal("retry"),
+    ticketId: z.string().min(1),
+  }),
+  z.object({
+    /** 让一个已有 Ticket 的 Worker 也订阅当前线程(多对多订阅),后续消息直通给它。 */
+    action: z.literal("subscribe"),
     ticketId: z.string().min(1),
   }),
   z.object({
@@ -242,7 +275,7 @@ export function verdictPlaceholderIssue(verdict: RouterVerdict): string | null {
       if (PLACEHOLDER_TICKET_ID.test(action.ticketId) || PLACEHOLDER_ELLIPSIS.test(action.text)) {
         field = "steer ticketId/text";
       }
-    } else if (action.action === "cancel" || action.action === "retry") {
+    } else if (action.action === "cancel" || action.action === "retry" || action.action === "subscribe") {
       if (PLACEHOLDER_TICKET_ID.test(action.ticketId)) field = `${action.action} ticketId`;
     } else if (action.action === "reply") {
       if (PLACEHOLDER_ELLIPSIS.test(action.reply)) field = "reply text";
@@ -293,6 +326,8 @@ export const ImDeliverySchema = z.object({
   parts: z.array(z.string()).min(1),
   nextPart: z.number().int().nonnegative(),
   status: z.enum(["pending", "failed", "sent"]),
+  /** 通道回执里的已发送消息 id:用户引用 Router 答复时,据此找回所属线程与原文。 */
+  sentMessageIds: z.array(z.string()).default([]),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -308,6 +343,22 @@ const RouterPromptStateSchema = z.object({
   triggerIds: z.array(z.string()),
 });
 
+/**
+ * LLM 看门狗(§6)的持久状态:会话 id、规则游标、上次巡检结论,以及每个 Ticket
+ * 上次巡检时看到的时间线位置(判断"有没有实质进展"的依据)。
+ */
+const WatchdogStateSchema = z.object({
+  agentId: z.string().nullish(),
+  provider: z.string().nullish(),
+  configHash: z.string().nullish(),
+  lastRunAt: z.string().nullish(),
+  lastSummary: z.string().nullish(),
+  lastError: z.string().nullish(),
+  lastActions: z.number().int().nonnegative().default(0),
+  seen: z.record(z.string(), z.object({ seq: z.number(), at: z.string() })).default({}),
+});
+export type WatchdogState = z.infer<typeof WatchdogStateSchema>;
+
 /** 整个持久化文件的形状。 */
 export const SuperagentStateSchema = z.object({
   version: z.literal(1),
@@ -320,6 +371,7 @@ export const SuperagentStateSchema = z.object({
     sharedWorkspaces: z.record(z.string(), z.string()).nullish(),
     /** 对话页打开着的标签;从未保存过时为空,快照按界面发起的对话给出初始标签。 */
     chatTabs: ChatTabsSchema.nullish(),
+    watchdog: WatchdogStateSchema.nullish(),
   }),
   threads: z.array(ThreadSchema),
   triggers: z.array(TriggerSchema),
@@ -390,6 +442,15 @@ export const SuperagentSnapshotSchema = z.object({
     evalInFlight: z.boolean(),
     /** 当前正在评估的线程;仅运行时状态,不写入持久化文件。 */
     currentEvalThreadId: z.string().nullish(),
+    /** LLM 看门狗巡检(设置开启时):上次巡检时间与结论。 */
+    patrol: z.object({
+      enabled: z.boolean(),
+      agentId: z.string().nullish(),
+      lastRunAt: z.string().nullish(),
+      lastSummary: z.string().nullish(),
+      lastError: z.string().nullish(),
+      running: z.boolean(),
+    }).nullish(),
   }),
   /** 对话页顶部标签(已去掉不存在的线程)。 */
   chatTabs: ChatTabsSchema.nullish(),

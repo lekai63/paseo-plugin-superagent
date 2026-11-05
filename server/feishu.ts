@@ -37,6 +37,7 @@ interface LarkMessageEvent {
   message?: {
     message_id?: string;
     root_id?: string | null;
+    parent_id?: string | null;
     chat_id?: string;
     chat_type?: string;
     message_type?: string;
@@ -95,7 +96,7 @@ export class FeishuSource implements ImSource {
     }
   }
 
-  async send(origin: TriggerOrigin, text: string): Promise<void> {
+  async send(origin: TriggerOrigin, text: string): Promise<string | null> {
     const client = this.requireClient();
     if (origin.messageId) {
       const result = await client.im.v1.message.reply({
@@ -103,7 +104,7 @@ export class FeishuSource implements ImSource {
         data: { msg_type: "text", content: JSON.stringify({ text }) },
       });
       if (result.code !== 0) throw new Error(`feishu reply rejected (${result.code})`);
-      return;
+      return result.data?.message_id ?? null;
     }
     const result = await client.im.v1.message.create({
       params: { receive_id_type: "chat_id" },
@@ -114,6 +115,7 @@ export class FeishuSource implements ImSource {
       },
     });
     if (result.code !== 0) throw new Error(`feishu send rejected (${result.code})`);
+    return result.data?.message_id ?? null;
   }
 
   private requireClient(): LarkClient {
@@ -150,6 +152,8 @@ export class FeishuSource implements ImSource {
     }
     const mentions = message.mentions ?? [];
     const isGroup = message.chat_type === "group";
+    // 引用链:直接父消息优先,其次回复链根消息(去重)。
+    const replyTo = [...new Set([message.parent_id, message.root_id].filter((id): id is string => Boolean(id)))];
     // 群聊准入:被 @ 直接放行;未 @ 时观察模式作上下文候选,否则留痕丢弃。
     const observe = isGroup && mentions.length === 0;
     if (observe && !this.config.observeGroups) {
@@ -168,6 +172,7 @@ export class FeishuSource implements ImSource {
         text,
         sender: `feishu:${senderOpenId}`,
         reason: "群消息未 @ 机器人",
+        replyTo,
       });
       return null;
     }
@@ -193,6 +198,7 @@ export class FeishuSource implements ImSource {
       text,
       sender: `feishu:${senderOpenId}`,
       context: observe || undefined,
+      replyTo,
     };
   }
 }
