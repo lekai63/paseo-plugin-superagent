@@ -350,3 +350,26 @@ test("history stubs keep trigger and decision ids for recall", () => {
   assert.match(prompt, /- \[trigger trg_old manual evaluated\] u: old request/);
   assert.match(prompt, /- \[router dec_old reply\] reply="old answer"/);
 });
+
+test("IM-origin threads get channel reply-style guidance; manual threads do not", () => {
+  const state = emptyState();
+  const thread = { id: "t", key: "k", title: "t", state: "active", summary: null, createdAt: "", updatedAt: "" };
+  const imTrigger = {
+    id: "g1", threadId: "t", threadKey: "k", kind: "feishu", sender: "u", text: "查一下数据",
+    status: "pending", context: false, receivedAt: "",
+    origin: { channel: "feishu", chatId: "oc_1", senderId: "u_1" },
+  };
+  const manualTrigger = {
+    id: "g2", threadId: "t2", threadKey: "k2", kind: "manual", sender: "u", text: "详细调研",
+    status: "pending", context: false, receivedAt: "",
+  };
+  const worker = { workingDir: "/repo", isolation: "worktree", issue: null };
+  const imPrompt = composeEvalPrompt({ thread, batch: [imTrigger], state, worker, includeInstructions: false });
+  assert.match(imPrompt, /## Reply style for this channel\nThe human reads your replies inside a chat client \(feishu\)/);
+  assert.match(imPrompt, /under ~100 words/);
+  const manualState = emptyState();
+  const manualPrompt = composeEvalPrompt({
+    thread: { ...thread, id: "t2", key: "k2" }, batch: [manualTrigger], state: manualState, worker, includeInstructions: false,
+  });
+  assert.doesNotMatch(manualPrompt, /Reply style for this channel/);
+});

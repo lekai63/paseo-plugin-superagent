@@ -44,7 +44,7 @@ steer/cancel/retry 的目标也可以是「其他活跃线程」里列出的票�
 |---|---|
 | 双层架构 | Router = 常驻 agent(`superagent.role=router` 标签,provider 可配轻量模型,只裁决、不执行,唯一可用的工具是编排自身的只读回读);固定规则与 actions 示例只初始化一次。已确认支持 systemPrompt 的内置 claude/codex/opencode/omp 在创建时设置;ACP(如 zcode-acp)及其他 provider 通过首轮消息初始化。Worker = 每 Ticket 独立 agent + worktree 隔离 + `superagent.ticket` 标签,可按 Worker 档位让不同 Ticket 跑在不同模型上;层级在 app 的 Subagents track 可见。跨线程指挥:评估提示词列出其他活跃线程的未完结票据,steer/cancel/retry 可指向它们,裁决仍记录在本线程 |
 | 事件驱动 | Trigger 三源(手动/agent 工具/worker 汇报)+ 四 IM 通道;fast-path 程序过滤(白名单之外,未 @ 群消息记 filtered 留痕,观察模式下作上下文候选);Thread 归属;批窗口合并评估(窗口有界,不随后续消息重置);订阅 fan-out 直通。正常续轮只带新触发(每条最多 4000 字,截断处标注回读指针)、任务状态快照、尚未读过的直通上下文(最近 8 条、每条最多 1000 字)。Chain of Recall:提示词里的触发/票据/线程/裁决均带 ID,历史存根也保留 ID,Router 用 `superagent_read` 按 ID 找回完整未截断记录、用 `superagent_list` 总览全部活跃线程;Worker 汇报回流时截断的文本附带票据回读指针。不重复用户首行标题或 Ticket 汇报正文;线程首次恢复时才补最多 8 条历史存根 |
-| 面向人的交互 | Paseo app 即信道:推送、attention、权限流;任意 agent 会话内 `/superagent` 或 `superagent_dispatch` 工具委派,Router 答复经 sourceAgentId 回到原会话;Worker 会话可随时人工接管。直通误投自愈:Worker 调 `superagent_handback` 把不属于自己的消息转回 Router 重新路由(继承原 IM/agent 回投目标),`superagent_unsubscribe` 退订后续直通 |
+| 面向人的交互 | Paseo app 即信道:推送、attention、权限流;任意 agent 会话内 `/superagent` 或 `superagent_dispatch` 工具委派,Router 答复经 sourceAgentId 回到原会话;Worker 会话可随时人工接管。多渠道输出风格:IM 来源线程的评估提示词带渠道风格小节(答复保持简短、长内容派 Worker 后转述摘要与产物位置),超长答复仍按段落自动分段回投 直通误投自愈:Worker 调 `superagent_handback` 把不属于自己的消息转回 Router 重新路由(继承原 IM/agent 回投目标),`superagent_unsubscribe` 退订后续直通 |
 | 存算/环境分离 | 即 Paseo daemon 本身:daemon 在你的机器,客户端(relay E2EE)在任何地方;执行环境留在原地 |
 | Watchdog | 15s 对账巡检:launch 卡死重试、运行超时 reload+判败、idle 收割汇报、评估重排、Router 丢失重建 |
 

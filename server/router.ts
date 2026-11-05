@@ -316,6 +316,19 @@ export function composeEvalPrompt({
       if (trigger.text.length > 1000) lines.push(`[truncated — full text: superagent_read ${trigger.id}]`);
     }
   }
+  // 渠道风格(§4.2):答复要匹配回投渠道——IM 聊天要短,长内容交给 Worker 产出。
+  const originChannels = [...new Set(batch.filter((trigger) => trigger.origin).map((trigger) => trigger.origin!.channel))];
+  if (originChannels.length > 0) {
+    lines.push(
+      "## Reply style for this channel",
+      `The human reads your replies inside a chat client (${originChannels.join(", ")}):`,
+      "keep replies concise — a few sentences (under ~100 words) unless the human explicitly",
+      "asks for detail; prefer plain text over tables and heavy markup. When the useful output",
+      "is long, dispatch a worker, then relay a short summary and where the full result lands",
+      "instead of pasting it. Multi-part splitting is automatic; do not pad or number parts.",
+      "",
+    );
+  }
   lines.push(`## New triggers (${batch.length}, this batch)`);
   batch.forEach((trigger, index) => {
     lines.push(`### trigger ${index + 1}/${batch.length}`);
