@@ -270,7 +270,7 @@ test("unseen direct-to-Worker context reaches Router exactly once without replay
   await evaluateRouter(f);
   f.state.triggers.push({ ...f.state.triggers[0], id: "direct-followup", status: "delivered", text: "追加要求：输出中文报告。" });
   const next = await evaluateRouter(f, "worker finished");
-  assert.match(next, /already delivered directly to Workers \(do not dispatch again\)/);
+  assert.match(next, /already delivered directly to Workers \(do not dispatch again/);
   assert.equal(next.split("追加要求：输出中文报告。").length - 1, 1);
   assert.doesNotMatch(await evaluateRouter(f), /追加要求|Recent thread history/);
 });
@@ -1267,4 +1267,178 @@ test("a shared profile directory gets one persistent workspace named after the p
   const launched = f.state.tickets.filter((ticket) => ticket.title !== "test");
   assert.deepEqual(launched.map((ticket) => ticket.workspaceId), ["new-workspace", "new-workspace"]);
   assert.deepEqual(launched.map((ticket) => ticket.ownsWorkspace), [false, false]);
+});
+
+// ---------------------------------------------------- 跨线程指挥 / 回读 / Worker 工具
+
+test("the eval prompt lists other active threads as steer targets", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.threads.push({ ...f.state.threads[0], id: "thread-b", key: "manual:b", title: "plan B" });
+  f.state.tickets.push({
+    ...f.state.tickets[0], id: "tkt-b", threadId: "thread-b", title: "Other work",
+    status: "running", workerAgentId: "worker-b",
+  });
+  const prompt = await evaluateRouter(f, "plan A 在 IM 里,但 B 线程的工单要先改");
+  assert.match(prompt, /## Other active threads/);
+  assert.match(prompt, /- thread thread-b "plan B"/);
+  assert.match(prompt, /  - \[tkt-b\] "Other work" status=running subscribed=true/);
+});
+
+test("a Router steer action can command a ticket on another thread", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.threads.push({ ...f.state.threads[0], id: "thread-b", key: "manual:b", title: "plan B" });
+  f.state.tickets.push({
+    ...f.state.tickets[0], id: "tkt-b", threadId: "thread-b", title: "Other work",
+    status: "running", workerAgentId: "worker-b", workspaceId: "workspace-b",
+  });
+  pendingTrigger(f.state);
+  f.controls.verdict = { actions: [{ action: "steer", ticketId: "tkt-b", text: "switch to plan B", mode: "interrupt" }] };
+  await f.engine.runEval("thread");
+  assert.equal(f.calls.sends.length, 1);
+  assert.equal(f.calls.sends[0].id, "worker-b");
+  assert.ok(f.calls.sends[0].text.includes("switch to plan B"));
+  assert.equal(f.calls.sends[0].options.activeTurnBehavior, "interrupt");
+  assert.equal(f.state.tickets.find((ticket) => ticket.id === "tkt-b").status, "running");
+  // 裁决记录挂在本线程,票据指向跨线程目标。
+  assert.equal(f.state.decisions[0].threadId, "thread");
+  assert.equal(f.state.decisions[0].ticketId, "tkt-b");
+  assert.equal(f.state.triggers[0].status, "evaluated");
+});
+
+test("a persisted cross-thread steer survives a restart and still reaches the other ticket", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.threads.push({ ...f.state.threads[0], id: "thread-b", key: "manual:b", title: "plan B" });
+  f.state.tickets.push({
+    ...f.state.tickets[0], id: "tkt-b", threadId: "thread-b", title: "Other work",
+    status: "running", workerAgentId: "worker-b", startedAt: new Date().toISOString(),
+  });
+  f.state.pendingActions.push({
+    id: "act_cross", threadId: "thread", decisionId: "dec_cross", kind: "steer",
+    ticketId: "tkt-b", text: "focus on tests", mode: "steer", attempts: 0, createdAt: oldTime,
+  });
+  await f.engine.recover();
+  await until(() => f.state.pendingActions.length === 0);
+  assert.equal(f.calls.sends[0].id, "worker-b");
+  assert.ok(f.calls.sends[0].text.includes("focus on tests"));
+});
+
+test("router and worker configs stay clean — orchestration tools arrive via session_open only", async (t) => {
+  // daemon 侧两条硬校验决定了角色工具只能走 session_open 注入:保存配置里同名
+  // mcpServer 与插件注入冲突会拒绝建会话;toolPolicy 预授权引用的 server 必须出现在
+  // 同一个 agent 请求里(插件注入在合并之前,不满足)。这里回归护栏:创建配置两样都不带。
+  const f = fixture(t, "pending");
+  await f.engine.startTicket("ticket");
+  const workerConfig = f.calls.workerCreates[0].config;
+  assert.equal(workerConfig.mcpServers, undefined, "no MCP server is saved into the agent config");
+  assert.equal(workerConfig.toolPolicy, undefined, "no MCP preapproval is saved either");
+
+  const routerFixture = fixture(t, "waiting");
+  routerFixture.state.kv.routerAgentId = null;
+  await evaluateRouter(routerFixture, "first event");
+  const routerConfig = routerFixture.calls.routerCreates[0].config;
+  assert.equal(routerConfig.mcpServers, undefined);
+  assert.equal(routerConfig.toolPolicy, undefined);
+});
+
+test("worker unsubscribe stops direct delivery and completes a waiting ticket", async (t) => {
+  const f = fixture(t, "waiting");
+  const outcome = await f.engine.workerUnsubscribe("ticket");
+  assert.equal(outcome.ok, true);
+  assert.match(outcome.note, /unsubscribed; the ticket is completed/);
+  assert.equal(f.ticket.subscribed, false);
+  assert.equal(f.ticket.status, "completed");
+  const repeated = await f.engine.workerUnsubscribe("ticket");
+  assert.equal(repeated.ok, false);
+  assert.match(repeated.error, /only running\/waiting workers can unsubscribe/);
+  const missing = await f.engine.workerUnsubscribe("tkt_missing");
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /does not exist/);
+});
+
+test("worker handback re-queues a misdelivered message with reply routing intact", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.triggers.push({
+    id: "im-1", threadId: "thread", threadKey: "manual:test", kind: "feishu", sender: "alice",
+    text: "原消息", status: "evaluated", context: false, receivedAt: "2021-01-01T00:00:00.000Z",
+    origin: { channel: "feishu", chatId: "oc_1", senderId: "u_1" }, note: null, replyToAgentId: null,
+  });
+  const outcome = await f.engine.workerHandback("ticket", "这条消息与我的工单无关:帮忙订机票", { unsubscribe: true });
+  assert.equal(outcome.ok, true);
+  const handback = f.state.triggers.find((trigger) => trigger.kind === "engine");
+  assert.equal(handback.status, "pending");
+  assert.equal(handback.sender, "worker:ticket");
+  assert.match(handback.text, /^\[handback\] /);
+  assert.equal(handback.origin?.chatId, "oc_1");
+  assert.equal(f.ticket.subscribed, false);
+  assert.equal(f.ticket.status, "completed");
+  assert.deepEqual(f.calls.evals, ["thread"]);
+  // 空文本与关闭线程的转回被拒绝。
+  assert.equal((await f.engine.workerHandback("ticket", "  ")).ok, false);
+  await f.engine.closeThread("thread");
+  const closed = await f.engine.workerHandback("ticket", "again");
+  assert.equal(closed.ok, false);
+  assert.match(closed.error, /thread of this ticket is closed/);
+});
+
+test("readRecord recalls full untruncated records by id prefix", async (t) => {
+  const f = fixture(t, "running");
+  const now = new Date().toISOString();
+  f.state.triggers.push({
+    id: "trg_full", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
+    text: "x".repeat(5000), status: "pending", context: false, receivedAt: now, note: null,
+  });
+  f.state.tickets.push({
+    ...f.state.tickets[0], id: "tkt_full", threadId: "thr_full", mandate: "完整任务书", report: "R".repeat(25_000),
+  });
+  f.state.decisions.push({
+    id: "dec_full", threadId: "thread", triggerIds: ["trg_full"], outcome: "reply",
+    reply: "答复全文", rationale: null, ticketId: null, raw: null, createdAt: now,
+  });
+  f.state.threads.push({ ...f.state.threads[0], id: "thr_full", title: "带前缀的线程" });
+  const trigger = await f.engine.readRecord("trg_full");
+  assert.ok(trigger.includes("x".repeat(5000)), "trigger text comes back untruncated");
+  const ticket = await f.engine.readRecord("tkt_full");
+  assert.match(ticket, /## mandate\n完整任务书/);
+  assert.ok(ticket.includes("R".repeat(19_999)), "reports come back at the recall cap");
+  assert.ok(!ticket.includes("R".repeat(20_000)), "oversized reports are still bounded");
+  const thread = await f.engine.readRecord("thr_full");
+  assert.match(thread, /# thread thr_full/);
+  assert.match(thread, /title: 带前缀的线程/);
+  assert.match(thread, /- \[tkt_full\] "test" status=running/);
+  assert.equal(await f.engine.readRecord("thread"), null, "ids without a known prefix are not recalled");
+  const decision = await f.engine.readRecord("dec_full");
+  assert.match(decision, /outcome: reply/);
+  assert.match(decision, /reply: 答复全文/);
+  assert.equal(await f.engine.readRecord("trg_nope"), null);
+});
+
+test("listThreads shows every active thread with its unfinished tickets", async (t) => {
+  const f = fixture(t, "running");
+  f.state.threads.push({ ...f.state.threads[0], id: "thread-b", key: "manual:b", title: "plan B" });
+  f.state.tickets.push({
+    ...f.state.tickets[0], id: "tkt_done", threadId: "thread-b", status: "completed", subscribed: false,
+  });
+  f.state.triggers.push({
+    id: "trg_wait", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
+    text: "pending 事件", status: "pending", context: false, receivedAt: new Date().toISOString(),
+  });
+  const listing = await f.engine.listThreads();
+  assert.match(listing, /- thread thread "test" pendingTriggers=1/);
+  assert.match(listing, /- thread thread-b "plan B"/);
+  assert.match(listing, /  - \[ticket\] "test" status=running subscribed=true/);
+  assert.doesNotMatch(listing, /tkt_done/, "terminal tickets are omitted");
+  assert.match(listing, /superagent_read <id>/);
+});
+
+test("worker reports truncated in the trigger text keep a recall pointer to the ticket", async (t) => {
+  const f = fixture(t, "running");
+  f.ticket.startedAt = new Date().toISOString();
+  await f.engine.enqueueReport("thread", f.ticket, "A".repeat(3000));
+  const report = f.state.triggers.find((trigger) => trigger.kind === "report");
+  assert.ok(report.text.includes("A".repeat(1_999)));
+  assert.match(report.text, /\[report truncated — full report: superagent_read ticket\]/);
+  assert.equal(f.state.threads[0].latestResult.text.length, 3000, "thread result keeps the full report");
+  await f.engine.enqueueReport("thread", f.ticket, "short one");
+  const short = f.state.triggers.filter((trigger) => trigger.kind === "report").at(-1);
+  assert.doesNotMatch(short.text, /report truncated/);
 });

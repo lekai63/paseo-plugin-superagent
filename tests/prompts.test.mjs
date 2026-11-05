@@ -183,7 +183,7 @@ test("recently finished tickets are listed with ids, status and branch as retry 
   const doneIndex = prompt.indexOf('- [tkt_done] "Write docs" status=completed');
   const oldIndex = prompt.indexOf('- [tkt_old] "Old job" status=canceled');
   assert.ok(failIndex > 0 && doneIndex > failIndex && oldIndex > doneIndex, "newest terminal tickets come first");
-  assert.match(prompt, /Terminal tickets are listed under "Recently finished tickets" below/);
+  assert.match(prompt, /Terminal tickets of this thread are listed under "Recently finished tickets" below/);
 });
 
 test("parseVerdict accepts the actions format and enforces the 1-5 cap", () => {
@@ -274,4 +274,79 @@ test("placeholder checks accept terse but real values and catch ellipsis-only on
     null,
   );
   assert.ok(verdictPlaceholderIssue({ actions: [{ action: "retry", ticketId: "tkt_..." }] }));
+});
+
+// 跨线程可见性与 Chain of Recall 的提示词面。
+
+test("other active threads appear as steer stubs and truncated texts carry recall pointers", () => {
+  const state = emptyState();
+  const thread = { id: "t", key: "k", title: "main topic", state: "active", summary: null, createdAt: "", updatedAt: "" };
+  state.threads.push(thread);
+  state.threads.push({ ...thread, id: "t2", key: "k2", title: "plan B", updatedAt: "2026-02-01T00:00:00.000Z" });
+  state.tickets.push({
+    id: "tkt_b", threadId: "t2", title: "Other work", mandate: "m", status: "running",
+    workerAgentId: "ag", subscribed: true, createdAt: "", updatedAt: "",
+  });
+  const long = "x".repeat(5000);
+  const trigger = {
+    id: "trg_long", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: long,
+    status: "pending", context: false, receivedAt: "",
+  };
+  const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null } });
+  assert.match(prompt, /## Other active threads \(stubs — steer\/cancel\/retry may target their tickets;/);
+  assert.match(prompt, /- thread t2 "plan B"/);
+  assert.match(prompt, /  - \[tkt_b\] "Other work" status=running subscribed=true/);
+  assert.match(prompt, /\[truncated — full text: superagent_read trg_long\]/);
+});
+
+test("delivered context truncation carries a recall pointer", () => {
+  const state = emptyState();
+  const thread = { id: "t", key: "k", title: "topic", state: "active", summary: null, createdAt: "", updatedAt: "" };
+  const long = "y".repeat(2000);
+  const context = {
+    id: "trg_ctx", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: long,
+    status: "delivered", context: false, receivedAt: "",
+  };
+  const batch = [{
+    id: "trg_new", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "go on",
+    status: "pending", context: false, receivedAt: "",
+  }];
+  const prompt = composeEvalPrompt({
+    thread, batch, state, worker: { workingDir: "/repo", isolation: "worktree", issue: null },
+    contextTriggers: [context],
+  });
+  assert.match(prompt, /already delivered directly to Workers \(do not dispatch again\nunless a \[handback\] trigger/);
+  assert.match(prompt, /\[truncated — full text: superagent_read trg_ctx\]/);
+});
+
+test("router rules allow only the recall tools and define handback re-routing", () => {
+  const state = emptyState();
+  const thread = { id: "t", key: "k", title: "t", state: "active", summary: null, createdAt: "", updatedAt: "" };
+  const trigger = { id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "x", status: "pending", context: false, receivedAt: "" };
+  const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null } });
+  assert.match(prompt, /Apart from the orchestrator's own\nread-only recall tools \(superagent_list, superagent_read\), do NOT call any tools/);
+  assert.match(prompt, /Other active threads appear\s+only as stubs/);
+  assert.match(prompt, /When a trigger starts with "\[handback\]"/);
+  assert.match(prompt, /Do not steer the same message back to the worker that handed it back/);
+  assert.match(prompt, /steer, cancel or retry their tickets/);
+});
+
+test("history stubs keep trigger and decision ids for recall", () => {
+  const state = emptyState();
+  const thread = { id: "t", key: "k", title: "t", state: "active", summary: null, createdAt: "", updatedAt: "" };
+  state.triggers.push({
+    id: "trg_old", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "old request",
+    status: "evaluated", context: false, receivedAt: "2026-01-01T00:00:00.000Z",
+  });
+  state.decisions.push({
+    id: "dec_old", threadId: "t", triggerIds: ["trg_old"], outcome: "reply",
+    reply: "old answer", rationale: null, ticketId: null, raw: null, createdAt: "2026-01-01T00:00:01.000Z",
+  });
+  const trigger = { id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "x", status: "pending", context: false, receivedAt: "2026-01-02T00:00:00.000Z" };
+  const prompt = composeEvalPrompt({
+    thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null },
+    includeHistory: true, includeInstructions: false,
+  });
+  assert.match(prompt, /- \[trigger trg_old manual evaluated\] u: old request/);
+  assert.match(prompt, /- \[router dec_old reply\] reply="old answer"/);
 });

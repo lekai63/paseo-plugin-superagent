@@ -11,6 +11,7 @@ import {
   newId,
   truncate,
   SUBSCRIBED_STATUSES,
+  TERMINAL_TICKET_STATUSES,
   type Decision,
   type PendingAction,
   type RouterAction,
@@ -41,6 +42,7 @@ import {
   type RouterWorkerEnvironment,
 } from "./router";
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
+import type { ToolOutcome } from "./mcp-server";
 import { matchWorkerProfile, resolveProviderSelection } from "./providers";
 import { ensureSharedWorkspace } from "./workspace";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
@@ -342,6 +344,9 @@ export class SuperagentEngine {
     const replyTo = originTrigger?.replyToAgentId ?? null;
     const origin = originTrigger?.origin ?? null;
     const reportId = newId("trg");
+    // 触发文本里的汇报截断时带上票据 ID 存根:Router 可用 superagent_read 回读全文。
+    const clippedReport = truncate(report, 2000);
+    const recallSuffix = report.length > 2000 ? `\n[report truncated — full report: superagent_read ${ticket.id}]` : "";
     await this.store.update((next) => {
       const target = next.threads.find((item) => item.id === threadId);
       if (target) {
@@ -353,7 +358,7 @@ export class SuperagentEngine {
         kind: "report",
         sender: `worker:${ticket.id}`,
         threadKey: thread.key,
-        text: `Worker report for "${ticket.title}":\n${truncate(report, 2000)}`,
+        text: `Worker report for "${ticket.title}":\n${clippedReport}${recallSuffix}`,
         context: false,
         replyToAgentId: replyTo,
         origin,
@@ -429,16 +434,15 @@ export class SuperagentEngine {
     return { ok: true };
   }
 
-  /** Router 的 steer 动作:仅本线程 running/waiting 的 Worker 可接收指令。 */
+  /** Router 的 steer 动作:任意线程 running/waiting 的 Worker 都可接收指令(跨线程指挥)。 */
   private async applySteer(
-    threadId: string,
     ticketId: string,
     text: string,
     mode: "steer" | "interrupt",
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const ticket = this.store.get().tickets.find((t) => t.id === ticketId);
-    if (!ticket || ticket.threadId !== threadId) {
-      return { ok: false, error: `ticket ${ticketId} is not on this thread` };
+    if (!ticket) {
+      return { ok: false, error: `ticket ${ticketId} not found` };
     }
     if (!ticket.workerAgentId || !["running", "waiting"].includes(ticket.status)) {
       return { ok: false, error: `ticket ${ticketId} cannot receive messages while ${ticket.status}` };
@@ -518,6 +522,7 @@ export class SuperagentEngine {
     const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions);
     const configHash = createHash("sha256").update(instructions).digest("hex");
     // Router 落在默认 workspace 里;惰性获取——Router 存活时零开销,重建时才查找/新建。
+    // 回读工具(superagent_list/read)由 session_open 转换注入,不经 agent config。
     const router = await ensureRouter(
       paseo,
       state,
@@ -896,18 +901,20 @@ export class SuperagentEngine {
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const paseo = this.requirePaseo();
     if (record.kind === "steer") {
-      return this.applySteer(record.threadId, record.ticketId ?? "", record.text ?? "", record.mode ?? "steer");
+      // 跨线程 steer:目标票据可能属于其他线程(裁决记录仍挂在本线程)。
+      return this.applySteer(record.ticketId ?? "", record.text ?? "", record.mode ?? "steer");
     }
     if (record.kind === "cancel") {
+      // 跨线程 cancel:目标票据不在(已清理)视为幂等成功。
       const ticket = this.store.get().tickets.find((t) => t.id === record.ticketId);
-      if (!ticket || ticket.threadId !== record.threadId) return { ok: true };
+      if (!ticket) return { ok: true };
       // 终态票据的补回收已并入 cancelTicket,RPC 与动作重放两条路径行为一致。
       await this.cancelTicket(ticket.id);
       return { ok: true };
     }
     if (record.kind === "retry") {
       const ticket = this.store.get().tickets.find((t) => t.id === record.ticketId);
-      if (!ticket || ticket.threadId !== record.threadId) return { ok: true };
+      if (!ticket) return { ok: true };
       if (["failed", "canceled", "completed"].includes(ticket.status)) {
         await this.retryTicket(ticket.id);
         return { ok: true };
@@ -1384,6 +1391,206 @@ export class SuperagentEngine {
       ticket.updatedAt = new Date().toISOString();
       if (ticket.status === "waiting") ticket.status = "completed";
     });
+  }
+
+  // ------------------------------------------------- recall & worker tools
+
+  /** 回读记录时各字段的长度上限:全文远超提示词预算,但仍要防无界输出。 */
+  private static readonly RECALL_REPORT_CHARS = 20_000;
+
+  /**
+   * Router 回读(Chain of Recall):按 ID 找回完整未截断记录。触发/票据/线程/裁决
+   * 四类;已清理(超上限裁剪或线程关闭收口)返回 null,由工具层转为可读错误。
+   */
+  async readRecord(id: string): Promise<string | null> {
+    await this.store.ready;
+    const state = this.store.get();
+    const trimmed = id.trim();
+    const threadLabel = (threadId: string | null | undefined) => {
+      if (!threadId) return "(no thread)";
+      const thread = state.threads.find((t) => t.id === threadId);
+      return thread ? `thread ${thread.id} "${thread.title}" (${thread.state})` : `thread ${threadId} (pruned)`;
+    };
+    if (trimmed.startsWith("trg_")) {
+      const trigger = state.triggers.find((t) => t.id === trimmed);
+      if (!trigger) return null;
+      return [
+        `# trigger ${trigger.id}`,
+        `thread: ${threadLabel(trigger.threadId)}`,
+        `kind: ${trigger.kind}  status: ${trigger.status}  sender: ${trigger.sender}`,
+        `receivedAt: ${trigger.receivedAt}${trigger.context ? "  (context-only)" : ""}`,
+        trigger.note ? `note: ${trigger.note}` : null,
+        "",
+        trigger.text,
+      ]
+        .filter((line) => line !== null)
+        .join("\n");
+    }
+    if (trimmed.startsWith("tkt_")) {
+      const ticket = state.tickets.find((t) => t.id === trimmed);
+      if (!ticket) return null;
+      return [
+        `# ticket ${ticket.id}`,
+        `title: ${ticket.title}`,
+        `thread: ${threadLabel(ticket.threadId)}`,
+        `status: ${ticket.status}  subscribed: ${ticket.subscribed}  attempts: ${ticket.attempts}`,
+        `profile: ${ticket.profile ?? "(default)"}  provider: ${ticket.provider ?? "(unresolved)"}`,
+        ticket.branchName ? `branch: ${ticket.branchName}` : null,
+        `workerAgent: ${ticket.workerAgentId ?? "(none)"}`,
+        ticket.startedAt ? `startedAt: ${ticket.startedAt}` : null,
+        ticket.lastError ? `lastError: ${ticket.lastError}` : null,
+        "",
+        "## mandate",
+        ticket.mandate,
+        ticket.report
+          ? `\n## report (final worker message)\n${truncate(ticket.report, SuperagentEngine.RECALL_REPORT_CHARS)}`
+          : null,
+      ]
+        .filter((line) => line !== null)
+        .join("\n");
+    }
+    if (trimmed.startsWith("thr_")) {
+      const thread = state.threads.find((t) => t.id === trimmed);
+      if (!thread) return null;
+      const tickets = state.tickets.filter((t) => t.threadId === thread.id);
+      return [
+        `# thread ${thread.id}`,
+        `title: ${thread.title}`,
+        `state: ${thread.state}  createdAt: ${thread.createdAt}  updatedAt: ${thread.updatedAt}`,
+        thread.summary ? `summary: ${thread.summary}` : null,
+        thread.latestResult
+          ? `latestResult (${thread.latestResult.kind}, ${thread.latestResult.createdAt}):\n${truncate(thread.latestResult.text, 8000)}`
+          : null,
+        "",
+        `## tickets (${tickets.length})`,
+        ...tickets.map((ticket) =>
+          `- [${ticket.id}] "${ticket.title}" status=${ticket.status} subscribed=${ticket.subscribed}`,
+        ),
+      ]
+        .filter((line) => line !== null)
+        .join("\n");
+    }
+    if (trimmed.startsWith("dec_")) {
+      const decision = state.decisions.find((d) => d.id === trimmed);
+      if (!decision) return null;
+      return [
+        `# decision ${decision.id}`,
+        `thread: ${threadLabel(decision.threadId)}`,
+        `outcome: ${decision.outcome}  createdAt: ${decision.createdAt}`,
+        decision.ticketId ? `ticketId: ${decision.ticketId}` : null,
+        decision.reply ? `reply: ${decision.reply}` : null,
+        decision.rationale ? `rationale: ${decision.rationale}` : null,
+        decision.raw ? `raw (truncated router reply):\n${decision.raw}` : null,
+        `triggerIds: ${decision.triggerIds.join(", ") || "(none)"}`,
+      ]
+        .filter((line) => line !== null)
+        .join("\n");
+    }
+    return null;
+  }
+
+  /** Router 跨线程总览:活跃线程及其未完结票据存根(全部线程,不止当前评估线程)。 */
+  async listThreads(): Promise<string> {
+    await this.store.ready;
+    const state = this.store.get();
+    const active = state.threads
+      .filter((t) => t.state === "active")
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, 10);
+    if (active.length === 0) return "No active threads.";
+    const lines = ["# Active threads (newest first, up to 10)"];
+    for (const thread of active) {
+      const pending = state.triggers.filter((t) => t.threadId === thread.id && t.status === "pending").length;
+      lines.push(`- thread ${thread.id} "${thread.title}"${pending > 0 ? ` pendingTriggers=${pending}` : ""}`);
+      if (thread.summary) lines.push(`  summary: ${truncate(thread.summary, 200)}`);
+      const tickets = state.tickets
+        .filter((t) => t.threadId === thread.id && !TERMINAL_TICKET_STATUSES.includes(t.status))
+        .slice(0, 8);
+      for (const ticket of tickets) {
+        lines.push(`  - [${ticket.id}] "${ticket.title}" status=${ticket.status} subscribed=${ticket.subscribed}`);
+      }
+    }
+    lines.push("", "Recall any record in full with superagent_read <id>.");
+    return lines.join("\n");
+  }
+
+  /**
+   * Worker 退订(工具入口):按票据定位(与注入 URL 一致,不经 agent id,无竞态)。
+   * 语义与 UI 的退订 RPC 相同:waiting 票据随之完结,Worker 本身不回收。
+   */
+  async workerUnsubscribe(ticketId: string): Promise<ToolOutcome> {
+    await this.store.ready;
+    const ticket = this.store.get().tickets.find((t) => t.id === ticketId);
+    if (!ticket) return { ok: false, error: `ticket ${ticketId} does not exist` };
+    if (!SUBSCRIBED_STATUSES.includes(ticket.status)) {
+      return { ok: false, error: `ticket ${ticketId} is ${ticket.status}; only running/waiting workers can unsubscribe` };
+    }
+    if (!ticket.subscribed) {
+      return { ok: true, note: "already unsubscribed; future thread events go to the Router" };
+    }
+    let completed = false;
+    await this.store.update((next) => {
+      const target = next.tickets.find((t) => t.id === ticketId);
+      if (!target || !target.subscribed) return;
+      target.subscribed = false;
+      target.updatedAt = new Date().toISOString();
+      if (target.status === "waiting") {
+        target.status = "completed";
+        completed = true;
+      }
+    });
+    return completed
+      ? { ok: true, note: "unsubscribed; the ticket is completed. Future thread events go to the Router." }
+      : { ok: true, note: "unsubscribed; future thread events go to the Router instead of your session." };
+  }
+
+  /**
+   * Worker 转回(工具入口):直通投递的消息不该由该 Worker 处理时,由它退回 Router
+   * 重新路由。文本以 [handback] 前缀立案成待评估触发;继承线程最近的 IM/agent 回投
+   * 目标,Router 的答复仍能送回原聊天。退订失败不阻断转回。
+   */
+  async workerHandback(ticketId: string, text: string, options: { unsubscribe?: boolean } = {}): Promise<ToolOutcome> {
+    await this.store.ready;
+    const message = text.trim();
+    if (!message) return { ok: false, error: "handback text is empty" };
+    const state = this.store.get();
+    const ticket = state.tickets.find((t) => t.id === ticketId);
+    if (!ticket) return { ok: false, error: `ticket ${ticketId} does not exist` };
+    const thread = state.threads.find((t) => t.id === ticket.threadId);
+    if (!thread || thread.state === "closed") {
+      return { ok: false, error: "the thread of this ticket is closed; state the outcome in your final report instead" };
+    }
+    if (options.unsubscribe && ticket.subscribed) {
+      await this.workerUnsubscribe(ticketId).catch((error) => {
+        console.error("[superagent] handback unsubscribe failed", error);
+      });
+    }
+    // 回投目标继承:与 Worker 汇报回流同一规则——找线程上最近带 origin/replyTo 的已评估触发。
+    const originTrigger = state.triggers
+      .filter((t) => t.threadId === thread.id && ["evaluated", "delivered"].includes(t.status))
+      .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
+      .find((t) => t.replyToAgentId || t.origin);
+    const now = new Date().toISOString();
+    await this.store.update((next) => {
+      next.triggers.push({
+        id: newId("trg"),
+        kind: "engine",
+        sender: `worker:${ticketId}`,
+        threadKey: thread.key,
+        text: `[handback] ${message}`.slice(0, this.settingsValues.triggerMaxChars),
+        context: false,
+        replyToAgentId: originTrigger?.replyToAgentId ?? null,
+        origin: originTrigger?.origin ?? null,
+        receivedAt: now,
+        status: "pending",
+        note: null,
+        threadId: thread.id,
+      });
+      const target = next.threads.find((t) => t.id === thread.id);
+      if (target) target.updatedAt = now;
+    });
+    this.scheduleEval(thread.id, 0);
+    return { ok: true, note: "handed back to the Router for re-routing; continue with your own ticket." };
   }
 
   // ------------------------------------------------------------- snapshot

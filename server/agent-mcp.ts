@@ -1,15 +1,20 @@
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import type { SuperagentMcpEndpoint } from "./mcp-server";
+import { DISPATCH_MCP_SERVER_NAME } from "./mcp-server";
 import { isOrchestrationAgent } from "./workers";
+import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 
 /**
- * session_open 转换:把插件自持的 superagent_dispatch MCP server 注入普通 agent 会话。
+ * session_open 转换:把插件自持的 MCP server 注入 agent 会话。
  * 替代早期 defineAgentTool 的 tools 注入——那条通道会被宿主的 "Paseo tools" 开关
  * (mcp.injectIntoAgents)连带给关掉,这条不会。
+ *
+ * 注入按调用方分三档:普通 agent 拿 superagent_dispatch(受设置开关控制);编排自身的
+ * Router 拿回读工具、Worker 拿退订/转回工具(编排内部机制,不受设置开关控制)。
  */
 
-/** 注入的 MCP server 名。不能叫 `paseo`(daemon 保留名),也应避开常见自定义名。 */
-export const DISPATCH_MCP_SERVER_NAME = "superagent";
+/** 注入的 MCP server 名(定义在 mcp-server;不能叫 `paseo`,daemon 保留名)。 */
+export { DISPATCH_MCP_SERVER_NAME } from "./mcp-server";
 
 /**
  * 默认注入的 provider:已知声明 supportsMcpServers 的内置 provider。其余(pi 及 ACP 系
@@ -26,19 +31,47 @@ export function resolveMcpProviders(configured: string): string[] {
   return list.length > 0 ? list : DEFAULT_MCP_PROVIDERS;
 }
 
-/** session_open 转换:按设置注入 MCP server;编排自身的 agent 与不支持的 provider 不注入。 */
+/**
+ * 编排 agent(Router/Worker)的 provider 门控:provider 可能带 model 限定
+ * (如 codex/test),按 family 匹配。默认五家之外,用户在「注入 provider」里显式
+ * 配置过的 family 也放行(如本机 zcode-acp——插件型 provider 在 daemon 侧统一声明
+ * supportsMcpServers,注入不支持的 provider 才会导致会话启动失败)。
+ */
+export function mcpCapableProvider(provider: string, extraFamilies: readonly string[] = []): boolean {
+  const family = provider.split("/")[0];
+  return DEFAULT_MCP_PROVIDERS.includes(family) || extraFamilies.includes(family);
+}
+
+/** session_open 转换:编排 agent 注入各自角色工具;普通 agent 按设置注入委派工具。 */
 export function createSessionOpenTransform(
   resolveEndpoint: () => SuperagentMcpEndpoint | null,
   enabled: () => boolean,
   providers: () => string[],
 ): (request: PluginSessionOpenRequest) => PluginSessionOpenRequest | undefined {
   return (request) => {
-    if (!enabled()) return undefined;
     const endpoint = resolveEndpoint();
     if (!endpoint) return undefined;
+    if (request.mcpServers[DISPATCH_MCP_SERVER_NAME]) return undefined;
+    const orchestrationUrl =
+      request.labels[ROUTER_LABEL] === ROUTER_LABEL_VALUE
+        ? endpoint.routerUrl()
+        : request.labels[TICKET_LABEL]
+          ? endpoint.workerUrl(request.labels[TICKET_LABEL])
+          : null;
+    // Router/Worker 的角色工具是编排自身机制:不受 agentToolEnabled 影响,但同样
+    // 只注入声明支持 MCP servers 的 provider 家族(默认名单 ∪ 用户配置,否则会话启动失败)。
+    if (orchestrationUrl && mcpCapableProvider(request.provider, providers())) {
+      return {
+        ...request,
+        mcpServers: {
+          ...request.mcpServers,
+          [DISPATCH_MCP_SERVER_NAME]: { type: "http" as const, url: orchestrationUrl, alwaysLoad: true },
+        },
+      };
+    }
+    if (!enabled()) return undefined;
     if (isOrchestrationAgent(request.labels)) return undefined;
     if (!providers().includes(request.provider)) return undefined;
-    if (request.mcpServers[DISPATCH_MCP_SERVER_NAME]) return undefined;
     return {
       ...request,
       mcpServers: {

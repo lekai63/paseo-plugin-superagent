@@ -14,6 +14,7 @@ import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 /**
  * Worker 角色与汇报要求。systemPrompt 之外也放进首条 prompt:ACP 系 provider 不会把
  * systemPrompt 交给模型,否则 Worker 不知道最终消息就是交给编排层的汇报。
+ * 会话控制工具(退订/转回)只在 provider 支持 MCP 注入时存在,故注明"缺失时跳过"。
  */
 const WORKER_ROLE = [
   "You are a Worker agent executing one ticket of a super-agent orchestration layer.",
@@ -21,6 +22,14 @@ const WORKER_ROLE = [
   "When the work is done, your final message is the REPORT for the orchestrator:",
   "state what was done, key changes, verification (tests/commands run), and remaining risks.",
   "Keep the report under 300 words. If you are blocked, say precisely what you need.",
+  "Your session may provide two orchestration tools (skip them if they are absent):",
+  "- superagent_unsubscribe — stop routing this thread's future follow-up messages directly",
+  "  to you; the Router evaluates them instead. Call it when later messages are no longer",
+  "  yours to answer (for example a one-shot task once its report is delivered).",
+  "- superagent_handback — return a message you received to the Router because it belongs",
+  "  elsewhere (off-topic for your ticket, another worker's domain, or needs a human-facing",
+  "  reply); quote or summarize it in `text` and set `unsubscribe` to also stop future",
+  "  direct deliveries. After a handback, continue with your own ticket.",
 ];
 
 const WORKER_SYSTEM_PROMPT = [
