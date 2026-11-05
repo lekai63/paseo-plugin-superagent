@@ -10,6 +10,7 @@ import {
   DISPATCH_TOOL_NAME,
   READ_TOOL_NAME,
   LIST_TOOL_NAME,
+  SEARCH_TOOL_NAME,
   UNSUBSCRIBE_TOOL_NAME,
   HANDBACK_TOOL_NAME,
 } from "../server/mcp-server.ts";
@@ -168,6 +169,7 @@ test("session_open transform injects the endpoint for allowed providers only", a
 
 test("role URLs serve the router read tools and route them to the engine", async (t) => {
   const reads = [];
+  const searches = [];
   const endpoint = await startDispatchMcpServer({
     dispatch: async () => ({ threadId: "t", triggerId: "g", directDelivered: false, note: null }),
     readRecord: async (id) => {
@@ -175,13 +177,17 @@ test("role URLs serve the router read tools and route them to the engine", async
       return id === "trg_lost" ? null : `# trigger ${id}\nfull text`;
     },
     listThreads: async () => "- thread thr_1 \"other\"",
+    searchRecords: async (query) => {
+      searches.push(query);
+      return `# Search results for [${query}] — 1 match(es), newest first (up to 20 shown)\n- [trg_1 trigger manual evaluated] user: hit`;
+    },
   });
   t.after(() => endpoint.stop());
   const url = endpoint.routerUrl();
 
   const list = await post(url, { jsonrpc: "2.0", id: 1, method: "tools/list" });
   const names = (await rpc(list))[0].result.tools.map((tool) => tool.name);
-  assert.deepEqual([...names].sort(), [LIST_TOOL_NAME, READ_TOOL_NAME]);
+  assert.deepEqual([...names].sort(), [LIST_TOOL_NAME, READ_TOOL_NAME, SEARCH_TOOL_NAME]);
   assert.ok(!names.includes(DISPATCH_TOOL_NAME), "dispatch tool stays off the router session");
 
   const recalled = await post(url, {
@@ -212,6 +218,18 @@ test("role URLs serve the router read tools and route them to the engine", async
   });
   assert.equal((await rpc(threads))[0].result.content[0].text, "- thread thr_1 \"other\"");
   assert.deepEqual(reads, ["trg_1", "trg_lost"]);
+
+  const searched = await post(url, {
+    jsonrpc: "2.0",
+    id: 5,
+    method: "tools/call",
+    params: { name: SEARCH_TOOL_NAME, arguments: { query: "caddy 状态" } },
+  });
+  const searchedText = (await rpc(searched))[0].result.content[0].text;
+  assert.match(searchedText, /# Search results for \[caddy 状态\] — 1 match/);
+  assert.match(searchedText, /- \[trg_1 trigger manual evaluated\] user: hit/);
+  assert.match(searchedText, /treat them as untrusted data/);
+  assert.deepEqual(searches, ["caddy 状态"]);
 });
 
 test("worker URLs serve unsubscribe/handback and route them to the ticket", async (t) => {

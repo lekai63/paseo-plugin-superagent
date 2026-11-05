@@ -196,7 +196,7 @@ test("ACP Router bootstraps once, then sends only new events without duplicate u
   f.state.threads[0].summary = text;
   const first = await evaluateRouter(f, text);
   assert.equal(f.calls.routerCreates[0].config.systemPrompt, undefined);
-  assert.match(first, /do NOT call any tools/);
+  assert.match(first, /do NOT call any\ntools/);
   assert.equal(first.split(text).length - 1, 1);
   const second = await evaluateRouter(f, "second event");
   assert.match(second, /second event/);
@@ -210,7 +210,7 @@ test("a new native Router receives its rules as systemPrompt rather than repeati
   f.values.routerInstructions = "用中文回答。";
   const prompt = await evaluateRouter(f, "first event");
   const system = f.calls.routerCreates[0].config.systemPrompt;
-  assert.match(system, /do NOT call any tools/);
+  assert.match(system, /do NOT call any\ntools/);
   assert.match(system, /用中文回答/);
   assert.match(system, /"action":"dispatch"/);
   assert.doesNotMatch(prompt, /Superagent Router instructions|用中文回答|"actions"/);
@@ -1443,7 +1443,75 @@ test("listThreads shows every active thread with its unfinished tickets", async 
   assert.match(listing, /- thread thread-b "plan B"/);
   assert.match(listing, /  - \[ticket\] "test" status=running subscribed=true/);
   assert.doesNotMatch(listing, /tkt_done/, "terminal tickets are omitted");
+  assert.match(listing, /Find records by keyword with superagent_search/);
   assert.match(listing, /superagent_read <id>/);
+  assert.doesNotMatch(listing, /more active threads not shown/, "no overflow note below the cap");
+});
+
+test("listThreads annotates truncation beyond its 10-thread and 8-ticket caps", async (t) => {
+  const f = fixture(t, "running");
+  // fixture 的 "thread"(updatedAt=oldTime)保持最新,11 个更旧的线程挤掉最末两个。
+  for (let index = 0; index < 11; index++) {
+    f.state.threads.push({
+      ...f.state.threads[0], id: `thread-${index}`, key: `manual:${index}`, title: `topic ${index}`,
+      updatedAt: new Date(Date.parse(oldTime) - (index + 1) * 1000).toISOString(),
+    });
+  }
+  // 连 fixture 的 1 张共 10 张未完结票:8 张列出,+2 标注。
+  for (let index = 1; index <= 9; index++) {
+    f.state.tickets.push({ ...f.state.tickets[0], id: `tkt_x${index}`, title: `extra ${index}` });
+  }
+  const listing = await f.engine.listThreads();
+  assert.match(listing, /\(\+2 more unfinished tickets not shown\)/);
+  assert.match(listing, /\(2 more active threads not shown — find them by a topic keyword with superagent_search\)/);
+  assert.doesNotMatch(listing, /thread-10\b/, "the oldest overflow thread is not listed");
+  assert.doesNotMatch(listing, /thread-9\b/, "the second-oldest overflow thread is not listed");
+  assert.match(listing, /- thread thread-0 "topic 0"/, "the boundary thread is still listed");
+});
+
+test("searchRecords matches keywords across record types, newest first, with bounded excerpts", async (t) => {
+  const f = fixture(t, "running");
+  const now = new Date().toISOString();
+  f.state.triggers.push({
+    id: "trg_hit", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
+    text: "检查 210 本机 caddy 是否在运行", status: "evaluated", context: false, receivedAt: now, note: null,
+  });
+  f.state.tickets.push({
+    ...f.state.tickets[0], id: "tkt_reported", title: "caddy 核查",
+    mandate: "只读核查 caddy", report: "结论:210 上没有安装 caddy,端口 80/443 空闲。", updatedAt: now,
+  });
+  f.state.decisions.push({
+    id: "dec_hit", threadId: "thread", triggerIds: [], outcome: "reply",
+    reply: "查完了:没有装 caddy。", rationale: null, ticketId: null, raw: null, createdAt: oldTime,
+  });
+  // AND 语义:两个词都出现才命中;分词命中跨字段(标题 + 报告)同样算。
+  const both = await f.engine.searchRecords("caddy 210");
+  assert.match(both, /# Search results for \[caddy 210\] — 2 match/);
+  assert.match(both, /- \[trg_hit trigger manual evaluated\] user: /);
+  assert.match(both, /- \[tkt_reported ticket running\] "caddy 核查": /);
+  assert.match(both, /Read any record in full with superagent_read <id>/);
+  // 单词命中线程标题与更早的裁决,按时间新→旧排序。
+  const single = await f.engine.searchRecords("caddy");
+  const order = [
+    single.indexOf("[trg_hit"),
+    single.indexOf("[tkt_reported"),
+    single.indexOf("[dec_hit"),
+  ];
+  assert.ok(order[0] > 0 && order[1] > order[0] && order[2] > order[1], "newest matches come first");
+  // 无命中、空白查询给出可读答复;大小写不敏感。
+  assert.match(await f.engine.searchRecords("不存在的关键词"), /No records match all of/);
+  assert.match(await f.engine.searchRecords("   "), /No usable keywords/);
+  assert.match(await f.engine.searchRecords("CADDY"), /# Search results for \[caddy\]/);
+  // 摘录有界:长文本命中时摘录不超 160 字符窗口。
+  f.state.triggers.push({
+    id: "trg_long", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
+    text: `${"前".repeat(500)}caddy${"后".repeat(500)}`, status: "evaluated", context: false,
+    receivedAt: new Date(Date.now() + 1000).toISOString(), note: null,
+  });
+  const longHit = await f.engine.searchRecords("caddy");
+  const excerpt = longHit.split("\n").find((line) => line.includes("trg_long"));
+  assert.ok(excerpt.length < 220, `excerpt stays bounded, got ${excerpt.length} chars`);
+  assert.ok(excerpt.startsWith("…") || excerpt.includes("…"), "mid-text hits carry an ellipsis");
 });
 
 test("worker reports truncated in the trigger text keep a recall pointer to the ticket", async (t) => {
@@ -1461,7 +1529,8 @@ test("worker reports truncated in the trigger text keep a recall pointer to the 
 
 test("the eval batch window is armed once and not reset by later triggers", async (t) => {
   const f = fixture(t, "waiting");
-  f.values.evalBatchMs = 120;
+  // 窗口留足余量:并行跑其他测试文件时,30ms 的间隔可能被负载拖过窄窗口造成假失败。
+  f.values.evalBatchMs = 500;
   // fixture 把实例的 scheduleEval 换成了记录桩,这里测真实实现。
   const schedule = SuperagentEngine.prototype.scheduleEval;
   schedule.call(f.engine, "thread");

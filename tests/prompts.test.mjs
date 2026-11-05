@@ -57,7 +57,7 @@ test("Router preferences enter the eval prompt without changing Worker instructi
   const rules = "面向用户使用中文。\n汇报必须包含验证情况。";
   const prompt = composeEvalPrompt({ ...context, routerInstructions: rules });
   assert.ok(prompt.includes(rules));
-  assert.ok(prompt.indexOf("do NOT call any tools") < prompt.indexOf(rules));
+  assert.ok(prompt.indexOf("do NOT call any\ntools") < prompt.indexOf(rules));
   assert.ok(prompt.indexOf(rules) < prompt.indexOf("# Thread:"));
   assert.match(prompt, /keep the decision-only role, configured worker profiles, action limit/);
   assert.match(prompt, /These replace any preferences from earlier evaluations/);
@@ -79,7 +79,7 @@ test("Router bootstrap carries the decision-only rules before the thread", () =>
   const worker = { workingDir: "/repo", isolation: "worktree", issue: null };
   const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker });
   assert.match(prompt, /^\[Superagent Router instructions/);
-  assert.match(prompt, /do NOT call any tools/);
+  assert.match(prompt, /do NOT call any\s+tools/);
   assert.match(prompt, /dispatch \(the default for real work\)/);
   assert.match(prompt, /SEVERAL dispatches/);
   assert.match(prompt, /If answering would need a lookup, dispatch instead/);
@@ -105,6 +105,8 @@ test("the Worker's first prompt carries its role and report instructions", () =>
     const prompt = composeWorkerPrompt(ticket, "/repo", isolation);
     assert.match(prompt, /^\[Worker instructions\]\nYou are a Worker agent/);
     assert.match(prompt, /your final message is the REPORT for the orchestrator/);
+    assert.match(prompt, /FIRST LINE must be one self-contained conclusion sentence/);
+    assert.match(prompt, /keyword recall matches on/);
     assert.ok(prompt.indexOf("[Execution environment]") < prompt.indexOf("# Ticket: Do it"));
     assert.ok(prompt.endsWith("the mandate"));
   }
@@ -324,11 +326,22 @@ test("router rules allow only the recall tools and define handback re-routing", 
   const thread = { id: "t", key: "k", title: "t", state: "active", summary: null, createdAt: "", updatedAt: "" };
   const trigger = { id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "x", status: "pending", context: false, receivedAt: "" };
   const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null } });
-  assert.match(prompt, /Apart from the orchestrator's own\nread-only recall tools \(superagent_list, superagent_read\), do NOT call any tools/);
+  assert.match(prompt, /Apart from the orchestrator's own\nread-only recall tools \(superagent_list, superagent_read, superagent_search\), do NOT call any\ntools/);
   assert.match(prompt, /Other active threads appear\s+only as stubs/);
   assert.match(prompt, /When a trigger starts with "\[handback\]"/);
   assert.match(prompt, /Do not steer the same message back to the worker that handed it back/);
   assert.match(prompt, /steer, cancel or retry their tickets/);
+});
+
+test("router rules carry the memory discipline and reconciliation guardrail", () => {
+  const state = emptyState();
+  const thread = { id: "t", key: "k", title: "t", state: "active", summary: null, createdAt: "", updatedAt: "" };
+  const trigger = { id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "x", status: "pending", context: false, receivedAt: "" };
+  const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null } });
+  assert.match(prompt, /this conversation is not durable storage/);
+  assert.match(prompt, /belongs in a ticket mandate or in your reply text, never only\s+in your working memory/);
+  assert.match(prompt, /before stop, or any steer\/cancel\/retry against another thread when\s+the target is not certain from the stubs, reconcile the full picture with superagent_list/);
+  assert.match(prompt, /superagent_search when you remember only fragments of the target/);
 });
 
 test("history stubs keep trigger and decision ids for recall", () => {

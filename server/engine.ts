@@ -600,7 +600,7 @@ export class SuperagentEngine {
     const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions);
     const configHash = createHash("sha256").update(instructions).digest("hex");
     // Router 落在默认 workspace 里;惰性获取——Router 存活时零开销,重建时才查找/新建。
-    // 回读工具(superagent_list/read)由 session_open 转换注入,不经 agent config。
+    // 回读/检索工具(superagent_list/read/search)由 session_open 转换注入,不经 agent config。
     const router = await ensureRouter(
       paseo,
       state,
@@ -1479,6 +1479,9 @@ export class SuperagentEngine {
 
   /** 回读记录时各字段的长度上限:全文远超提示词预算,但仍要防无界输出。 */
   private static readonly RECALL_REPORT_CHARS = 20_000;
+  /** 关键词检索的命中上限与摘录宽度: newest first,防撑爆 Router 上下文。 */
+  private static readonly SEARCH_HITS_LIMIT = 20;
+  private static readonly SEARCH_EXCERPT_CHARS = 160;
 
   /**
    * Router 回读(Chain of Recall):按 ID 找回完整未截断记录。触发/票据/线程/裁决
@@ -1571,28 +1574,109 @@ export class SuperagentEngine {
     return null;
   }
 
-  /** Router 跨线程总览:活跃线程及其未完结票据存根(全部线程,不止当前评估线程)。 */
+  /**
+   * Router 关键词检索:在全部触发/票据(含 mandate 与 worker 报告)/线程标题与摘要/
+   * 裁决答复与理由里找「空格分词后全部命中」的记录,返回 ID + 短摘录,newest first。
+   * 不知道 ID 时的回读入口;命中摘录取自外部输入,不可信框架由工具层附加。
+   */
+  async searchRecords(query: string): Promise<string> {
+    await this.store.ready;
+    const state = this.store.get();
+    const terms = [...new Set(query.toLowerCase().split(/\s+/).filter((term) => term.length > 0))];
+    if (terms.length === 0) {
+      return "No usable keywords — pass one or more words that must appear in the record.";
+    }
+    const joined = (...fields: (string | null | undefined)[]) => fields.filter((f) => typeof f === "string" && f.length > 0).join("\n").toLowerCase();
+    const matches = (text: string) => terms.every((term) => text.includes(term));
+    /** 摘录取最早命中关键词所在的字段;窗口前留省略号,宽度与提示词存根一致。 */
+    const excerptOf = (...fields: (string | null | undefined)[]): string => {
+      const present = fields.filter((f): f is string => typeof f === "string" && f.length > 0);
+      let source = present[0] ?? "";
+      let earliest = -1;
+      for (const field of present) {
+        const lower = field.toLowerCase();
+        for (const term of terms) {
+          const at = lower.indexOf(term);
+          if (at >= 0 && (earliest === -1 || at < earliest)) {
+            earliest = at;
+            source = field;
+          }
+        }
+      }
+      const start = earliest > 0 ? Math.max(0, earliest - 60) : 0;
+      return truncate((start > 0 ? "…" : "") + source.slice(start), SuperagentEngine.SEARCH_EXCERPT_CHARS);
+    };
+    interface Hit { at: string; line: string; }
+    const hits: Hit[] = [];
+    for (const trigger of state.triggers) {
+      if (!matches(joined(trigger.text, trigger.note))) continue;
+      hits.push({
+        at: trigger.receivedAt,
+        line: `- [${trigger.id} trigger ${trigger.kind} ${trigger.status}] ${trigger.sender}: ${excerptOf(trigger.text, trigger.note)}`,
+      });
+    }
+    for (const ticket of state.tickets) {
+      if (!matches(joined(ticket.title, ticket.mandate, ticket.report, ticket.lastError))) continue;
+      hits.push({
+        at: ticket.updatedAt,
+        line: `- [${ticket.id} ticket ${ticket.status}] "${ticket.title}": ${excerptOf(ticket.report, ticket.mandate, ticket.lastError, ticket.title)}`,
+      });
+    }
+    for (const thread of state.threads) {
+      if (!matches(joined(thread.title, thread.summary))) continue;
+      hits.push({
+        at: thread.updatedAt,
+        line: `- [${thread.id} thread ${thread.state}] "${thread.title}": ${excerptOf(thread.summary, thread.title)}`,
+      });
+    }
+    for (const decision of state.decisions) {
+      if (!matches(joined(decision.reply, decision.rationale))) continue;
+      hits.push({
+        at: decision.createdAt,
+        line: `- [${decision.id} decision ${decision.outcome}] ${excerptOf(decision.reply, decision.rationale)}`,
+      });
+    }
+    hits.sort((a, b) => b.at.localeCompare(a.at));
+    if (hits.length === 0) {
+      return `No records match all of: ${terms.join(" ")}. Try fewer or different keywords.`;
+    }
+    const shown = hits.slice(0, SuperagentEngine.SEARCH_HITS_LIMIT);
+    return [
+      `# Search results for [${terms.join(" ")}] — ${hits.length} match(es), newest first (up to ${SuperagentEngine.SEARCH_HITS_LIMIT} shown)`,
+      ...shown.map((hit) => hit.line),
+      "",
+      "Read any record in full with superagent_read <id>.",
+    ].join("\n");
+  }
+
+  /**
+   * Router 跨线程总览:活跃线程及其未完结票据存根(全部线程,不止当前评估线程)。
+   * 上限(10 线程 × 每线程 8 票)截断时如实标注,剩余的交给关键词检索。
+   */
   async listThreads(): Promise<string> {
     await this.store.ready;
     const state = this.store.get();
-    const active = state.threads
+    const activeSorted = state.threads
       .filter((t) => t.state === "active")
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-      .slice(0, 10);
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const active = activeSorted.slice(0, 10);
     if (active.length === 0) return "No active threads.";
     const lines = ["# Active threads (newest first, up to 10)"];
     for (const thread of active) {
       const pending = state.triggers.filter((t) => t.threadId === thread.id && t.status === "pending").length;
       lines.push(`- thread ${thread.id} "${thread.title}"${pending > 0 ? ` pendingTriggers=${pending}` : ""}`);
       if (thread.summary) lines.push(`  summary: ${truncate(thread.summary, 200)}`);
-      const tickets = state.tickets
-        .filter((t) => t.threadId === thread.id && !TERMINAL_TICKET_STATUSES.includes(t.status))
-        .slice(0, 8);
-      for (const ticket of tickets) {
+      const unfinished = state.tickets
+        .filter((t) => t.threadId === thread.id && !TERMINAL_TICKET_STATUSES.includes(t.status));
+      for (const ticket of unfinished.slice(0, 8)) {
         lines.push(`  - [${ticket.id}] "${ticket.title}" status=${ticket.status} subscribed=${ticket.subscribed}`);
       }
+      if (unfinished.length > 8) lines.push(`  (+${unfinished.length - 8} more unfinished tickets not shown)`);
     }
-    lines.push("", "Recall any record in full with superagent_read <id>.");
+    if (activeSorted.length > active.length) {
+      lines.push(`(${activeSorted.length - active.length} more active threads not shown — find them by a topic keyword with superagent_search)`);
+    }
+    lines.push("", "Find records by keyword with superagent_search; recall any record in full with superagent_read <id>.");
     return lines.join("\n");
   }
 
