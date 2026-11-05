@@ -70,6 +70,8 @@ const ROUTER_EVAL_TIMEOUT_MS = 10 * 60_000;
 const MAX_ACTION_ATTEMPTS = 3;
 /** 同一线程连续放弃的动作数达到上限后,不再自动回流失败触发,防 Router 循环。 */
 const MAX_ABANDONED_ACTIONS = 3;
+/** 评估异常(provider 未就绪/目录不可用等瞬时故障)的自动重排上限:15s 看门狗节奏 ≈ 5 分钟。 */
+const MAX_EVAL_ERRORS = 20;
 /** 单线程 filtered 留痕上限:高频群聊的准入丢弃不再膨胀状态文件。 */
 const MAX_FILTERED_TRIGGERS = 30;
 const PREFERRED_PROVIDERS = ["claude", "codex", "opencode"];
@@ -150,8 +152,14 @@ export class SuperagentEngine {
   private evalQueued = new Set<string>();
   private batchTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private watchedTickets = new Set<string>();
-  /** 线程评估连续失败计数(unparsed/异常),≥3 次后看门狗不再自动重排,防失控循环。 */
+  /**
+   * 线程评估的 unparsed 计数(模型输出质量),≥3 次后看门狗不再自动重排,
+   * 需人工「重新评估」——防 Router 持续劣化时的失控 token 循环。
+   * 与之分离:基础设施异常(provider 未就绪/目录不可用/网络)计入 evalErrors,
+   * 上限更高(瞬时故障应按看门狗节奏持续重查,对齐文章 §6)。
+   */
   private evalFailures = new Map<string, number>();
+  private evalErrors = new Map<string, number>();
   /** 同一线程连续放弃(重试耗尽)的动作计数,达到上限后不再自动回流失败触发。 */
   private actionFailures = new Map<string, number>();
   /** 待执行动作的串行链:保证同线程按裁决顺序执行,内联执行与看门狗补执行互不重叠。 */
@@ -544,7 +552,9 @@ export class SuperagentEngine {
       await this.runEval(next);
     } catch (error) {
       console.error("[superagent] eval failed", error);
-      this.evalFailures.set(next, (this.evalFailures.get(next) ?? 0) + 1);
+      // 异常走独立计数:瞬时故障(provider 未就绪等)按看门狗节奏持续重查,
+      // 不与 unparsed(模型输出问题)共用 3 次熔断。
+      this.evalErrors.set(next, (this.evalErrors.get(next) ?? 0) + 1);
       const message = error instanceof Error ? error.message : String(error);
       await this.store.update((state) => {
         const thread = state.threads.find((t) => t.id === next);
@@ -668,6 +678,7 @@ export class SuperagentEngine {
       return;
     }
     this.evalFailures.delete(threadId);
+    this.evalErrors.delete(threadId);
     const verdict = parsed.verdict;
 
     // 4. 执行裁决:每个动作一条 Decision,带副作用的动作另立案待执行记录,一次落盘
@@ -1254,7 +1265,7 @@ export class SuperagentEngine {
     this.lastWatchdogNote = note;
   }
 
-  /** 对账:错过完成 / 卡死启动 / 超时中断 / 评估重排(连续失败 ≥3 次的线程不再自动重排)。 */
+  /** 对账:错过完成 / 卡死启动 / 超时中断 / 评估重排(unparsed ≥3 熔断;瞬时异常按上限重查)。 */
   private async reconcile(): Promise<string | null> {
     await this.store.ready;
     const paseo = this.paseo;
@@ -1333,7 +1344,9 @@ export class SuperagentEngine {
     for (const threadId of pendingByThread) {
       const thread = state.threads.find((t) => t.id === threadId);
       if (!thread || thread.state === "closed") continue;
+      // unparsed 3 次熔断(模型输出问题,人工重试);瞬时异常给足重查窗口(≈5 分钟)。
       if ((this.evalFailures.get(threadId) ?? 0) >= 3) continue;
+      if ((this.evalErrors.get(threadId) ?? 0) >= MAX_EVAL_ERRORS) continue;
       const active =
         this.batchTimers.has(threadId) ||
         this.evalQueued.has(threadId) ||
@@ -1370,6 +1383,7 @@ export class SuperagentEngine {
     const state = this.store.get();
     if (!state.threads.some((t) => t.id === threadId)) throw new Error("thread not found");
     this.evalFailures.delete(threadId);
+    this.evalErrors.delete(threadId);
     this.actionFailures.delete(threadId);
     this.scheduleEval(threadId, 0);
   }

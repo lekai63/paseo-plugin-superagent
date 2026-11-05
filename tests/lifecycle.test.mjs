@@ -1512,3 +1512,37 @@ test("filtered drops are recorded with a reason without eval, direct delivery, o
   const capped = f.state.triggers.filter((entry) => entry.threadId === "thread" && entry.status === "filtered").length;
   assert.equal(capped, 30, "filtered records are capped per thread");
 });
+
+test("transient eval errors keep requeueing well past the unparsed circuit breaker", async (t) => {
+  const f = fixture(t, "waiting");
+  // 异常计数:drainEvalQueue 捕获 runEval 抛错(目录未配置),计入 evalErrors 而非 evalFailures。
+  f.values.workingDir = "";
+  pendingTrigger(f.state);
+  f.engine.evalQueued.add("thread");
+  await f.engine.drainEvalQueue();
+  assert.equal(f.engine.evalErrors.get("thread"), 1);
+  assert.equal(f.engine.evalFailures.get("thread"), undefined);
+  assert.equal(f.state.decisions.at(-1).outcome, "error");
+  assert.equal(f.state.triggers[0].status, "pending", "触发保留待重试");
+
+  // 看门狗重排门控:异常未达上限继续重排;unparsed 3 次与异常达上限都停。
+  f.values.workingDir = "/mock/repo";
+  f.engine.evalErrors.set("thread", 3);
+  f.calls.evals.length = 0;
+  await f.engine.reconcile();
+  assert.deepEqual(f.calls.evals, ["thread"], "transient errors below the cap keep requeueing");
+  f.engine.evalErrors.set("thread", 20);
+  f.calls.evals.length = 0;
+  await f.engine.reconcile();
+  assert.deepEqual(f.calls.evals, [], "errors at the cap stop auto-requeueing");
+  f.engine.evalErrors.delete("thread");
+  f.engine.evalFailures.set("thread", 3);
+  await f.engine.reconcile();
+  assert.deepEqual(f.calls.evals, [], "unparsed circuit breaker still stops requeueing");
+  // 成功评估与手动重评估都清两类计数。
+  f.engine.evalFailures.set("thread", 1);
+  f.engine.evalErrors.set("thread", 1);
+  await f.engine.forceEval("thread");
+  assert.equal(f.engine.evalFailures.get("thread"), undefined);
+  assert.equal(f.engine.evalErrors.get("thread"), undefined);
+});
