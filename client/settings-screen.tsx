@@ -558,6 +558,8 @@ interface Channel {
   title: string;
   hint: string;
   fields: ChannelField[];
+  /** 群聊观察模式开关(未 @ 的群消息作为上下文交给 Router);仅支持该模式的通道填写。 */
+  observe?: BooleanKey;
 }
 
 const CHANNELS: Channel[] = [
@@ -565,6 +567,7 @@ const CHANNELS: Channel[] = [
     enabled: "feishuEnabled",
     title: "飞书",
     hint: "官方长连接,免公网;私聊直接触发,群聊需 @机器人",
+    observe: "feishuObserve",
     fields: [
       { name: "feishuAppId", label: "App ID", placeholder: "cli_..." },
       { name: "feishuAppSecret", label: "App Secret", secret: true },
@@ -576,6 +579,7 @@ const CHANNELS: Channel[] = [
     enabled: "qqEnabled",
     title: "QQ",
     hint: "OneBot 11(NapCat)正向 WebSocket;群里需 @机器人",
+    observe: "qqObserve",
     fields: [
       { name: "qqEndpoint", label: "WebSocket 地址", placeholder: "ws://127.0.0.1:3001" },
       { name: "qqToken", label: "Access Token", hint: "没有设置可留空", secret: true },
@@ -614,6 +618,14 @@ function ChannelCard({ channel, ...field }: FieldContext & { channel: Channel })
   return (
     <SettingsCard>
       <SwitchField {...field} name={channel.enabled} label={channel.title} hint={channel.hint} />
+      {enabled && channel.observe ? (
+        <SwitchField
+          {...field}
+          name={channel.observe}
+          label="群聊观察模式"
+          hint="未 @ 机器人的群消息作为上下文交给 Router 判断,不再丢弃;关闭时记为已过滤留痕"
+        />
+      ) : null}
       {enabled
         ? channel.fields.map((f) => (
             <TextField

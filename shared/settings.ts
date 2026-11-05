@@ -71,7 +71,7 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 7,
+  version: 8,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
@@ -115,6 +115,11 @@ export const superagentSettings = defineSettings({
     feishuAllowUsers: z.string().trim().max(2000).default(""),
     /** 允许的会话 chat_id,逗号分隔(群聊需 @ 机器人)。 */
     feishuAllowChats: z.string().trim().max(2000).default(""),
+    /**
+     * 群聊观察模式:允许会话里未 @ 机器人的群消息不再丢弃,作为上下文触发交给
+     * Router 判断(§3.1 候选档);关闭时这类消息记为 filtered 留痕。
+     */
+    feishuObserve: z.boolean().default(false),
 
     // ---- QQ 触发源(OneBot 11,配合 NapCat 正向 WebSocket) ----
     qqEnabled: z.boolean().default(false),
@@ -125,6 +130,8 @@ export const superagentSettings = defineSettings({
     qqAllowUsers: z.string().trim().max(2000).default(""),
     /** 允许的群号,逗号分隔(群里需 @ 机器人)。 */
     qqAllowGroups: z.string().trim().max(2000).default(""),
+    /** 群聊观察模式(同 feishuObserve):未 @ 机器人的群消息作为上下文交给 Router。 */
+    qqObserve: z.boolean().default(false),
 
     // ---- 钉钉触发源(Stream 模式 WebSocket,免公网) ----
     dingtalkEnabled: z.boolean().default(false),
@@ -153,7 +160,8 @@ export const superagentSettings = defineSettings({
    * v1/v2 → v3:新字段由 schema 默认值补齐;v3 → v4:新增 agentToolProviders 同理;
    * v4 → v5:新增 workerDescription/workerProfiles 同理(无档位 = 与旧版一致的单一 Worker);
    * v5 → v6:新增 routerInstructions,留空沿用内置编排规则;
-   * v6 → v7:档位新增 workingDir(留空 = 全局 workingDir),旧档位由默认值补齐。
+   * v6 → v7:档位新增 workingDir(留空 = 全局 workingDir),旧档位由默认值补齐;
+   * v7 → v8:新增 feishuObserve/qqObserve(默认关闭,行为与旧版一致)。
    */
   migrate: (values) => values,
 });

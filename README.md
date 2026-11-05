@@ -43,7 +43,7 @@ steer/cancel/retry 的目标也可以是「其他活跃线程」里列出的票�
 | 模块 | 实现 |
 |---|---|
 | 双层架构 | Router = 常驻 agent(`superagent.role=router` 标签,provider 可配轻量模型,只裁决、不执行,唯一可用的工具是编排自身的只读回读);固定规则与 actions 示例只初始化一次。已确认支持 systemPrompt 的内置 claude/codex/opencode/omp 在创建时设置;ACP(如 zcode-acp)及其他 provider 通过首轮消息初始化。Worker = 每 Ticket 独立 agent + worktree 隔离 + `superagent.ticket` 标签,可按 Worker 档位让不同 Ticket 跑在不同模型上;层级在 app 的 Subagents track 可见。跨线程指挥:评估提示词列出其他活跃线程的未完结票据,steer/cancel/retry 可指向它们,裁决仍记录在本线程 |
-| 事件驱动 | Trigger 三源(手动/agent 工具/worker 汇报)+ 四 IM 通道;fast-path 程序过滤;Thread 归属;批窗口合并评估;订阅直通。正常续轮只带新触发(每条最多 4000 字,截断处标注回读指针)、任务状态快照、尚未读过的直通上下文(最近 8 条、每条最多 1000 字)。Chain of Recall:提示词里的触发/票据/线程/裁决均带 ID,历史存根也保留 ID,Router 用 `superagent_read` 按 ID 找回完整未截断记录、用 `superagent_list` 总览全部活跃线程;Worker 汇报回流时截断的文本附带票据回读指针。不重复用户首行标题或 Ticket 汇报正文;线程首次恢复时才补最多 8 条历史存根 |
+| 事件驱动 | Trigger 三源(手动/agent 工具/worker 汇报)+ 四 IM 通道;fast-path 程序过滤(白名单之外,未 @ 群消息记 filtered 留痕,观察模式下作上下文候选);Thread 归属;批窗口合并评估(窗口有界,不随后续消息重置);订阅 fan-out 直通。正常续轮只带新触发(每条最多 4000 字,截断处标注回读指针)、任务状态快照、尚未读过的直通上下文(最近 8 条、每条最多 1000 字)。Chain of Recall:提示词里的触发/票据/线程/裁决均带 ID,历史存根也保留 ID,Router 用 `superagent_read` 按 ID 找回完整未截断记录、用 `superagent_list` 总览全部活跃线程;Worker 汇报回流时截断的文本附带票据回读指针。不重复用户首行标题或 Ticket 汇报正文;线程首次恢复时才补最多 8 条历史存根 |
 | 面向人的交互 | Paseo app 即信道:推送、attention、权限流;任意 agent 会话内 `/superagent` 或 `superagent_dispatch` 工具委派,Router 答复经 sourceAgentId 回到原会话;Worker 会话可随时人工接管。直通误投自愈:Worker 调 `superagent_handback` 把不属于自己的消息转回 Router 重新路由(继承原 IM/agent 回投目标),`superagent_unsubscribe` 退订后续直通 |
 | 存算/环境分离 | 即 Paseo daemon 本身:daemon 在你的机器,客户端(relay E2EE)在任何地方;执行环境留在原地 |
 | Watchdog | 15s 对账巡检:launch 卡死重试、运行超时 reload+判败、idle 收割汇报、评估重排、Router 丢失重建 |
@@ -77,6 +77,8 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 在设置页「IM 触发源」打开对应开关并填入凭据与**白名单**(发送者/会话至少一项;全空不启动,防陌生人触发)。保存即热重载,无需重启 daemon。
 
+**分级准入**:白名单命中但未 @ 机器人的群消息(飞书/QQ)默认记为**已过滤**留痕(对话气泡显示「已过滤 · 群消息未 @ 机器人」,不评估、不直通、每线程上限 30 条);打开该通道的**群聊观察模式**后,这类消息改为上下文触发交给 Router 判断(可忽略,也可按需行动)——对齐文章「观察公共聊天、未被点名也可介入」的候选档。钉钉/企微的未 @ 群消息在平台侧就不会投递,无此档位。
+
 > 选型说明:调研过 [openclaw-china](https://github.com/BytePioneer-AI/openclaw-china)(MIT,TypeScript)——其 adapter 深度绑定 OpenClaw 宿主 runtime(消息路由/会话存储/流式回复均走宿主),无法脱离 OpenClaw 独立 import。因此本插件采用与其**相同的官方 SDK 矩阵**直接接入:飞书 `@larksuiteoapi/node-sdk`、钉钉 `dingtalk-stream`、企微 `@wecom/aibot-node-sdk`,全部官方 API、长连接、免公网。
 
 ### 飞书(官方长连接)
@@ -87,7 +89,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 4. 发布版本并在群里/私聊添加机器人;
 5. 设置页填:App ID、App Secret、允许的发送者 `open_id`(或会话 `chat_id`)。
 
-行为:私聊直接触发;群聊需 **@机器人**。同一聊天 = 同一 Thread(话题按 root 分线程)。答复以引用回复回到原消息。
+行为:私聊直接触发;群聊需 **@机器人**(或打开「群聊观察模式」收上下文)。同一聊天 = 同一 Thread(话题按 root 分线程)。答复以引用回复回到原消息。
 
 ### 钉钉(官方 Stream 模式,免公网)
 
@@ -110,7 +112,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 2. 网络配置开启**正向 WebSocket**(如 `ws://127.0.0.1:3001`),可设 Access Token;
 3. 设置页填:endpoint、token、允许的 QQ 号 / 群号。
 
-行为:私聊直接触发;群里需 @机器人。回复带引用,断线自动重连。(官方 QQ 机器人平台路线见 openclaw-china/qqbot,需开发者资质,暂未内置。)
+行为:私聊直接触发;群里需 @机器人(或打开「群聊观察模式」收上下文)。回复带引用,断线自动重连。(官方 QQ 机器人平台路线见 openclaw-china/qqbot,需开发者资质,暂未内置。)
 
 > 安全:IM 消息文本是不可信输入——Router 系统提示词已要求把触发文本当数据处理;白名单是第一道闸,凭据明文存于 `$PASEO_HOME/plugin-settings/superagent/`(0600)。微信公众号通道需要公网回调,插件暂未提供 HTTP 入口,列为限制。
 

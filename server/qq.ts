@@ -1,9 +1,10 @@
 import { truncate, type TriggerOrigin } from "../shared/model";
-import type { ImSource, InboundMessage } from "./im";
+import type { ImSource, InboundDrop, InboundMessage } from "./im";
 
 /**
  * QQ 触发源:OneBot 11 正向 WebSocket(NapCat / Lagrange 等实现)。
  * - 私聊直接响应;群聊仅在被 @ 机器人(QQ 号 = self_id)时响应。
+ * - 群聊观察模式(observeGroups):未 @ 的群消息不再丢弃,作为上下文交给 Router 判断。
  * - fast-path:allowUsers(QQ 号)/ allowGroups(群号)白名单。
  * - 回复带 reply 段引用原消息;断线指数退避重连。
  */
@@ -13,6 +14,8 @@ interface QqConfig {
   token: string;
   allowUsers: string[];
   allowGroups: string[];
+  /** 群聊观察模式:未 @ 机器人的群消息作为上下文触发(否则记 filtered 留痕)。 */
+  observeGroups: boolean;
 }
 
 interface OneBotEvent {
@@ -68,9 +71,9 @@ export class QqSource implements ImSource {
 
   constructor(private readonly config: QqConfig) {}
 
-  async start(onTrigger: (message: InboundMessage) => void): Promise<void> {
+  async start(onTrigger: (message: InboundMessage) => void, onDrop?: (drop: InboundDrop) => void): Promise<void> {
     this.stopped = false;
-    await this.connect(onTrigger);
+    await this.connect(onTrigger, onDrop);
   }
 
   async stop(): Promise<void> {
@@ -94,7 +97,7 @@ export class QqSource implements ImSource {
     await this.call(action, params);
   }
 
-  private connect(onTrigger: (message: InboundMessage) => void): Promise<void> {
+  private connect(onTrigger: (message: InboundMessage) => void, onDrop?: (drop: InboundDrop) => void): Promise<void> {
     return new Promise((resolve, reject) => {
       if (this.stopped) return reject(new Error("stopped"));
       const socket = new WebSocket(this.config.endpoint, this.config.token ? ["Bearer", this.config.token] : undefined);
@@ -107,7 +110,7 @@ export class QqSource implements ImSource {
         resolve();
       });
       socket.addEventListener("message", (event) => {
-        this.handleFrame(String(event.data), onTrigger);
+        this.handleFrame(String(event.data), onTrigger, onDrop);
       });
       socket.addEventListener("close", () => {
         this.rejectAllPending(new Error("QQ OneBot connection closed"));
@@ -117,7 +120,7 @@ export class QqSource implements ImSource {
         console.warn(`[superagent] QQ OneBot closed; reconnect in ${delay}ms`);
         setTimeout(() => {
           if (this.stopped) return;
-          this.connect(onTrigger).catch((error) => {
+          this.connect(onTrigger, onDrop).catch((error) => {
             console.error("[superagent] QQ OneBot reconnect failed", error);
           });
         }, delay);
@@ -129,7 +132,7 @@ export class QqSource implements ImSource {
     });
   }
 
-  private handleFrame(raw: string, onTrigger: (message: InboundMessage) => void): void {
+  private handleFrame(raw: string, onTrigger: (message: InboundMessage) => void, onDrop?: (drop: InboundDrop) => void): void {
     let frame: OneBotEvent & OneBotResponse;
     try {
       frame = JSON.parse(raw) as OneBotEvent & OneBotResponse;
@@ -146,12 +149,12 @@ export class QqSource implements ImSource {
       return;
     }
     if (frame.post_type !== "message") return;
-    const inbound = this.translate(frame);
+    const inbound = this.translate(frame, onDrop);
     if (inbound) onTrigger(inbound);
   }
 
-  /** 事件 → InboundMessage;fast-path 拒绝返回 null。 */
-  private translate(event: OneBotEvent): InboundMessage | null {
+  /** 事件 → InboundMessage;fast-path 拒绝返回 null;准入丢弃经 onDrop 留痕。 */
+  private translate(event: OneBotEvent, onDrop?: (drop: InboundDrop) => void): InboundMessage | null {
     const userId = event.user_id !== undefined ? String(event.user_id) : "";
     if (!userId) return null;
     if (!this.config.allowUsers.includes(userId)) return null;
@@ -161,7 +164,41 @@ export class QqSource implements ImSource {
     if (event.message_type === "group") {
       const groupId = event.group_id !== undefined ? String(event.group_id) : "";
       if (!groupId || !this.config.allowGroups.includes(groupId)) return null;
-      if (!addressed) return null;
+      // 群聊准入:被 @ 直接放行;未 @ 时观察模式作上下文候选,否则留痕丢弃。
+      if (!addressed) {
+        if (this.config.observeGroups) {
+          if (!text) return null;
+          return {
+            origin: {
+              channel: "qq",
+              chatId: `g:${groupId}`,
+              messageId: event.message_id !== undefined ? String(event.message_id) : null,
+              senderId: userId,
+              senderName: null,
+            },
+            threadKey: `qq:group:${groupId}`,
+            title: `QQ群 ${truncate(text, 40)}`,
+            text,
+            sender: `qq:${userId}`,
+            context: true,
+          };
+        }
+        onDrop?.({
+          origin: {
+            channel: "qq",
+            chatId: `g:${groupId}`,
+            messageId: event.message_id !== undefined ? String(event.message_id) : null,
+            senderId: userId,
+            senderName: null,
+          },
+          threadKey: `qq:group:${groupId}`,
+          title: `QQ群 ${truncate(text, 40)}`,
+          text,
+          sender: `qq:${userId}`,
+          reason: "群消息未 @ 机器人",
+        });
+        return null;
+      }
       if (!text) return null;
       const origin: TriggerOrigin = {
         channel: "qq",

@@ -70,6 +70,8 @@ const ROUTER_EVAL_TIMEOUT_MS = 10 * 60_000;
 const MAX_ACTION_ATTEMPTS = 3;
 /** 同一线程连续放弃的动作数达到上限后,不再自动回流失败触发,防 Router 循环。 */
 const MAX_ABANDONED_ACTIONS = 3;
+/** 单线程 filtered 留痕上限:高频群聊的准入丢弃不再膨胀状态文件。 */
+const MAX_FILTERED_TRIGGERS = 30;
 const PREFERRED_PROVIDERS = ["claude", "codex", "opencode"];
 
 /**
@@ -247,12 +249,33 @@ export class SuperagentEngine {
 
   // ---------------------------------------------------------------- intake
 
-  /** 事件入口:fast-path → Thread 归属 → 订阅直通 | 排队评估。 */
+  /** 事件入口:fast-path → Thread 归属 → 订阅 fan-out 直通 | 排队评估。 */
   async dispatch(input: DispatchInput): Promise<{ threadId: string; triggerId: string; directDelivered: boolean; note: string | null }> {
+    const outcome = await this.intake(input, { status: "pending" });
+    if (!outcome) throw new Error("empty task");
+    return outcome;
+  }
+
+  /**
+   * 准入丢弃留痕(§3.1 过滤档):与 dispatch 同一线程归属,但状态记 filtered、
+   * 带原因备注,不评估、不直通,也不重开已关闭的线程;每线程留痕有上限,
+   * 防高频群聊把状态刷满。UI 气泡上显示「已过滤 · 原因」。
+   */
+  async dispatchFiltered(input: DispatchInput, reason: string): Promise<void> {
+    await this.intake(input, { status: "filtered", note: truncate(reason, 200) });
+  }
+
+  private async intake(
+    input: DispatchInput,
+    admission: { status: "pending" | "filtered"; note?: string },
+  ): Promise<{ threadId: string; triggerId: string; directDelivered: boolean; note: string | null } | null> {
     await this.store.ready;
     const settings = this.settingsValues;
     const text = input.task.trim().slice(0, settings.triggerMaxChars);
-    if (!text) throw new Error("empty task");
+    if (!text) {
+      if (admission.status === "pending") throw new Error("empty task");
+      return null;
+    }
 
     const state = this.store.get();
     let thread: Thread | undefined;
@@ -263,8 +286,8 @@ export class SuperagentEngine {
       // IM 触发:同一聊天固定 Thread,订阅直通与 Router 记忆跨消息延续。
       thread = state.threads.find((t) => t.key === input.threadKey);
     }
-    if (thread && thread.state === "closed") {
-      // 关闭线程上的新事件重新激活线程。
+    if (thread && thread.state === "closed" && admission.status === "pending") {
+      // 关闭线程上的新事件重新激活线程(被过滤的消息不重开)。
       await this.store.update((next) => {
         const target = next.threads.find((t) => t.id === thread!.id);
         if (target) {
@@ -292,6 +315,32 @@ export class SuperagentEngine {
     }
     const threadKey = thread.key;
     const threadId = thread.id;
+
+    if (admission.status === "filtered") {
+      // 留痕上限:超过后静默丢弃,不再膨胀状态。
+      const filteredCount = state.triggers.filter((t) => t.threadId === threadId && t.status === "filtered").length;
+      if (filteredCount >= MAX_FILTERED_TRIGGERS) return null;
+      await this.store.update((next) => {
+        if (!next.threads.some((t) => t.id === threadId)) {
+          next.threads.push(thread!);
+        }
+        next.triggers.push({
+          id: triggerId,
+          kind: input.origin ? input.origin.channel : input.kind === "agent" ? "agent" : "manual",
+          sender,
+          threadKey,
+          text,
+          context: input.context ?? false,
+          replyToAgentId: input.replyToAgentId ?? null,
+          origin: input.origin ?? null,
+          receivedAt: now,
+          status: "filtered",
+          note: admission.note ?? null,
+          threadId,
+        });
+      });
+      return null;
+    }
 
     // 订阅直通(fan-out):活跃订阅且有会话的 Worker 全部收到本条消息;
     // 一个可用会话都没有(无订阅,或订阅仍在启动)才交 Router 评估。

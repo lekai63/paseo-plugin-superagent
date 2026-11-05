@@ -96,16 +96,34 @@ export default function contribute(server: PluginServerContext) {
         sender: message.sender,
         origin: message.origin,
         threadKey: message.threadKey,
+        context: message.context,
       })
       .catch((error) => {
         console.error("[superagent] IM trigger dispatch failed", error);
       });
   });
+  // 准入丢弃留痕(§3.1):白名单命中但被规则挡下的消息记 filtered,不再静默丢弃。
+  im.setDropHandler((drop) => {
+    void engine
+      .dispatchFiltered(
+        {
+          title: drop.title,
+          task: drop.text,
+          sender: drop.sender,
+          origin: drop.origin,
+          threadKey: drop.threadKey,
+        },
+        drop.reason,
+      )
+      .catch((error) => {
+        console.error("[superagent] IM filtered-record failed", error);
+      });
+  });
 
   function imSignature(values: SuperagentSettingsValues): string {
     return JSON.stringify({
-      f: [values.feishuEnabled, values.feishuAppId, values.feishuAppSecret, values.feishuAllowUsers, values.feishuAllowChats],
-      q: [values.qqEnabled, values.qqEndpoint, values.qqToken, values.qqAllowUsers, values.qqAllowGroups],
+      f: [values.feishuEnabled, values.feishuAppId, values.feishuAppSecret, values.feishuAllowUsers, values.feishuAllowChats, values.feishuObserve],
+      q: [values.qqEnabled, values.qqEndpoint, values.qqToken, values.qqAllowUsers, values.qqAllowGroups, values.qqObserve],
       d: [values.dingtalkEnabled, values.dingtalkClientId, values.dingtalkClientSecret, values.dingtalkAllowUsers, values.dingtalkAllowChats],
       w: [values.wecomEnabled, values.wecomBotId, values.wecomSecret, values.wecomAllowUsers, values.wecomAllowChats],
     });
@@ -130,6 +148,7 @@ export default function contribute(server: PluginServerContext) {
               appSecret: values.feishuAppSecret,
               allowUsers: users,
               allowChats: chats,
+              observeGroups: values.feishuObserve,
             }),
           ),
         );
@@ -151,6 +170,7 @@ export default function contribute(server: PluginServerContext) {
               token: values.qqToken,
               allowUsers: users,
               allowGroups: groups,
+              observeGroups: values.qqObserve,
             }),
           ),
         );

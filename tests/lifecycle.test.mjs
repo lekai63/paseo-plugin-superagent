@@ -1476,3 +1476,39 @@ test("the eval batch window is armed once and not reset by later triggers", asyn
   // 触发后定时器清空(线程无 pending 触发,runEval 立即返回)。
   await until(() => !f.engine.batchTimers.has("thread"));
 });
+
+test("filtered drops are recorded with a reason without eval, direct delivery, or reopening", async (t) => {
+  const f = fixture(t, "running");  // running+subscribed:普通消息会直通,filtered 不允许
+  const origin = { channel: "feishu", chatId: "oc_g", senderId: "ou_1" };
+  await f.engine.dispatchFiltered(
+    { title: "飞书群 闲聊", task: "群里闲聊,没有 @ 机器人", sender: "feishu:ou_1", origin, threadKey: "feishu:chat:oc_g" },
+    "群消息未 @ 机器人",
+  );
+  const trigger = f.state.triggers.find((entry) => entry.status === "filtered");
+  assert.ok(trigger, "filtered trigger stored");
+  assert.equal(trigger.kind, "feishu");
+  assert.equal(trigger.note, "群消息未 @ 机器人");
+  assert.deepEqual(f.calls.evals, [], "no Router evaluation");
+  assert.deepEqual(f.calls.sends, [], "no direct delivery to the subscribed worker");
+  assert.ok(f.state.threads.some((thread) => thread.key === "feishu:chat:oc_g"), "thread attributed for the record");
+
+  // 关闭的线程不被 filtered 重开;留痕有上限。
+  await f.engine.dispatchFiltered(
+    { title: "t", task: `overflow ${trigger.id}`, sender: "u", threadId: "thread" },
+    "群消息未 @ 机器人",
+  );
+  const onThread = f.state.triggers.filter((entry) => entry.threadId === "thread" && entry.status === "filtered");
+  assert.equal(onThread.length, 1);
+  f.state.threads.find((thread) => thread.id === "thread").state = "closed";
+  await f.engine.dispatchFiltered({ title: "t", task: "after close", sender: "u", threadId: "thread" }, "群消息未 @ 机器人");
+  assert.equal(
+    f.state.triggers.find((thread2) => thread2.id === "thread")?.state ?? f.state.threads.find((thread3) => thread3.id === "thread").state,
+    "closed",
+    "a filtered message does not reopen a closed thread",
+  );
+  for (let index = 0; index < 40; index++) {
+    await f.engine.dispatchFiltered({ title: "t", task: `chatter ${index}`, sender: "u", threadId: "thread" }, "群消息未 @ 机器人");
+  }
+  const capped = f.state.triggers.filter((entry) => entry.threadId === "thread" && entry.status === "filtered").length;
+  assert.equal(capped, 30, "filtered records are capped per thread");
+});

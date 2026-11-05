@@ -10,11 +10,29 @@ export interface InboundMessage {
   title: string;
   text: string;
   sender: string;
+  /** 上下文补充(观察模式的未 @ 群消息):不单独要求行动,Router 只做判断。 */
+  context?: boolean;
 }
+
+/**
+ * fast-path 丢弃留痕(§3.1):白名单已命中但被准入规则挡下的消息(如群聊未 @)。
+ * 携带完整触发信息,引擎记为 filtered 触发,不再静默丢弃。
+ */
+export interface InboundDrop {
+  origin: TriggerOrigin;
+  threadKey: string;
+  title: string;
+  text: string;
+  sender: string;
+  reason: string;
+}
+
+export type TriggerHandler = (message: InboundMessage) => void;
+export type DropHandler = (drop: InboundDrop) => void;
 
 export interface ImSource {
   readonly channel: TriggerOrigin["channel"];
-  start(onTrigger: (message: InboundMessage) => void): Promise<void>;
+  start(onTrigger: TriggerHandler, onDrop?: DropHandler): Promise<void>;
   stop(): Promise<void>;
   send(origin: TriggerOrigin, text: string): Promise<void>;
 }
@@ -22,10 +40,16 @@ export interface ImSource {
 /** 多源管理:按设置启停各 channel,并作为引擎的 ReplySink。 */
 export class ImManager implements ReplySink {
   private sources = new Map<string, ImSource>();
-  private onTrigger: ((message: InboundMessage) => void) | null = null;
+  private onTrigger: TriggerHandler | null = null;
+  private onDrop: DropHandler | null = null;
 
-  setHandler(onTrigger: (message: InboundMessage) => void): void {
+  setHandler(onTrigger: TriggerHandler): void {
     this.onTrigger = onTrigger;
+  }
+
+  /** 准入丢弃的留痕回调:engine.dispatchFiltered 的入口。 */
+  setDropHandler(onDrop: DropHandler): void {
+    this.onDrop = onDrop;
   }
 
   has(channel: string): boolean {
@@ -36,7 +60,10 @@ export class ImManager implements ReplySink {
     const existing = this.sources.get(source.channel);
     if (existing) await this.stopChannel(source.channel);
     this.sources.set(source.channel, source);
-    await source.start((message) => this.onTrigger?.(message));
+    await source.start(
+      (message) => this.onTrigger?.(message),
+      (drop) => this.onDrop?.(drop),
+    );
     console.log(`[superagent] IM source started: ${source.channel}`);
   }
 

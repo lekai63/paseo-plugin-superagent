@@ -1,9 +1,10 @@
 import { truncate, type TriggerOrigin } from "../shared/model";
-import type { ImSource, InboundMessage } from "./im";
+import type { DropHandler, ImSource, InboundDrop, InboundMessage } from "./im";
 
 /**
  * 飞书触发源:官方 SDK 长连接(WSClient),无需公网回调。
  * - 私聊直接响应;群聊仅在被 @ 机器人时响应(去 @ 后取剩余文本)。
+ * - 群聊观察模式(observeGroups):未 @ 的群消息不再丢弃,作为上下文交给 Router 判断。
  * - fast-path:allowUsers(open_id)/ allowChats(chat_id)白名单,命中即放行。
  * - 回复用 message.reply 引用回复,来源消息去重(message_id 环形集)。
  *
@@ -27,6 +28,8 @@ interface FeishuConfig {
   appSecret: string;
   allowUsers: string[];
   allowChats: string[];
+  /** 群聊观察模式:未 @ 机器人的群消息作为上下文触发(否则记 filtered 留痕)。 */
+  observeGroups: boolean;
 }
 
 interface LarkMessageEvent {
@@ -56,7 +59,7 @@ export class FeishuSource implements ImSource {
 
   constructor(private readonly config: FeishuConfig) {}
 
-  async start(onTrigger: (message: InboundMessage) => void): Promise<void> {
+  async start(onTrigger: (message: InboundMessage) => void, onDrop?: (drop: InboundDrop) => void): Promise<void> {
     this.stopped = false;
     const lark = await loadLark();
     // 说明:SDK 未包装 GET /bot/v3/info,群聊判定退化为"任意 @"——
@@ -75,7 +78,7 @@ export class FeishuSource implements ImSource {
     });
     const dispatcher = new lark.EventDispatcher({}).register({
       "im.message.receive_v1": async (data: LarkMessageEvent) => {
-        const inbound = this.translate(data);
+        const inbound = this.translate(data, onDrop);
         if (inbound) onTrigger(inbound);
       },
     });
@@ -118,8 +121,8 @@ export class FeishuSource implements ImSource {
     return this.client;
   }
 
-  /** 事件 → InboundMessage;fast-path 拒绝返回 null。 */
-  private translate(data: LarkMessageEvent): InboundMessage | null {
+  /** 事件 → InboundMessage;fast-path 拒绝返回 null;准入丢弃经 onDrop 留痕。 */
+  private translate(data: LarkMessageEvent, onDrop?: (drop: InboundDrop) => void): InboundMessage | null {
     if (this.stopped) return null;
     const message = data.message;
     const senderOpenId = data.sender?.sender_id?.open_id;
@@ -146,12 +149,33 @@ export class FeishuSource implements ImSource {
       return null;
     }
     const mentions = message.mentions ?? [];
-    if (message.chat_type === "group" && mentions.length === 0) return null;
+    const isGroup = message.chat_type === "group";
+    // 群聊准入:被 @ 直接放行;未 @ 时观察模式作上下文候选,否则留痕丢弃。
+    const observe = isGroup && mentions.length === 0;
+    if (observe && !this.config.observeGroups) {
+      onDrop?.({
+        origin: {
+          channel: "feishu",
+          chatId: message.chat_id,
+          messageId: message.message_id,
+          senderId: senderOpenId,
+          senderName: null,
+        },
+        threadKey: message.root_id
+          ? `feishu:chat:${message.chat_id}:root:${message.root_id}`
+          : `feishu:chat:${message.chat_id}`,
+        title: `飞书群 ${truncate(text, 40)}`,
+        text,
+        sender: `feishu:${senderOpenId}`,
+        reason: "群消息未 @ 机器人",
+      });
+      return null;
+    }
     // 去掉所有 @_user_N 占位。
     text = text.replace(/@_user_\d+/g, "").trim();
     if (!text) return null;
 
-    const chatLabel = message.chat_type === "group" ? "飞书群" : "飞书私聊";
+    const chatLabel = isGroup ? "飞书群" : "飞书私聊";
     const origin: TriggerOrigin = {
       channel: "feishu",
       chatId: message.chat_id,
@@ -168,6 +192,7 @@ export class FeishuSource implements ImSource {
       title: `${chatLabel} ${truncate(text, 40)}`,
       text,
       sender: `feishu:${senderOpenId}`,
+      context: observe || undefined,
     };
   }
 }
