@@ -1,6 +1,6 @@
 # paseo-plugin-superagent
 
-要求 Paseo daemon 与各端客户端均为 0.15.0 或更新版本。
+要求 Paseo daemon 与各端客户端均为 0.15.0 或更新版本,插件服务端使用 Node.js 20 或更新版本。MCP 入口采用 SDK v2,同时兼容 `2026-07-28` 的逐请求协议和旧版 stateless Streamable HTTP 协议。
 
 Paseo 的 Router/Worker 双层编排插件。按《Super-agent 设计探索》的架构思路,在 Paseo 原语之上实现事件驱动的 super-agent 编排层,**不依赖 DeepSeek Harness**:
 
@@ -9,6 +9,7 @@ Paseo 的 Router/Worker 双层编排插件。按《Super-agent 设计探索》�
 - **Worker 档位**:除默认 Worker 外可配置具名档位(不同模型/用途),每个档位还可指定自己的工作目录,让该档位的 Worker 在别的仓库或目录里工作;
 - **订阅直通(fan-out,多对多)**:线程有活跃订阅 Worker 时,后续事件绕过 Router 程序直通**全部**订阅 Worker(零 LLM);一个可用会话都没有才交 Router 评估。Router 的 `subscribe` 动作可让别的线程里已在干活的 Worker **也跟随**当前线程(一个 Worker 订阅多个线程),跟随来的消息带 `[thread …]` 前缀,汇报回流到它订阅的每个线程;Worker 可用 `superagent_unsubscribe`(可指定 `threadId` 只退一个线程)退订、`superagent_handback` 把误投消息转回 Router;
 - **语义慢路径**:观察模式旁听到的未 @ 群消息(context-only)不直通 Worker,一律交 Router 判断(默认忽略,与某个任务相关时 steer,符合主动策略时才行动);
+- **权限与提问回流**:Worker 的权限请求、计划确认和结构化提问立即落盘并通知 Router。Router 根据已有授权/上下文用 `respond` 正式审批或回答;需要人的决定时,把具体操作/问题和选项回投原聊天或委派会话。请求未解决期间,线程后续消息先交 Router 判断,不向 Worker 广播,也不通过普通 steer 隐式清除请求。请求按 ID 去重,重载后由程序对账补收;等待输入期间暂停运行超时处理,响应后重新观察完成状态;
 - **引用归线程 + 相邻消息内联**:IM 消息引用(回复)了已知的触发或 Router 答复(按通道回执记下的消息 id)时,归入被引用消息所在的线程,并把被引用内容内联给 Router/Worker;评估时附带本批之前 Router 没看过的最近 5 条未 @ 群聊(准入层 filtered 留痕,滚动保留 30 条);
 - **投机执行**(可选,默认关):Router 依据「Router 规则」里写的主动策略对没人明确提出的事项后台派 `speculative` Worker 静默尝试(不订阅线程、同时最多 2 个),汇报首行 `DISCARD:` 由引擎静默丢弃并回收 Worker,`DELIVER:` 才交 Router 简短转述;
 - **跨线程指挥**:每次评估除本线程票据外,还列出其他活跃线程的未完结票据存根,steer/cancel/retry 可跨线程执行(全局协调);
@@ -41,7 +42,7 @@ steer/cancel/retry/subscribe 的目标也可以是「其他活跃线程」里列
 LLM 看门狗(独立会话,定时)── 巡检摘要 ──► nudge/interrupt/cancel/retry/reeval/escalate(上报经 Router 告诉人)
 ```
 
-状态(`$PASEO_HOME/plugin-data/superagent/state.json`,原子写):`threads / triggers / tickets / decisions / pendingActions` + kv。所有副作用(创建 agent、发消息)发生在落盘之后;裁决的副作用动作(steer/cancel/retry/stop)先立案成 `pendingActions` 记录、执行成功后移除,看门狗负责崩溃后按序补执行与失败重试(有次数上限,耗尽后失败回流成触发交 Router 重新决策)。
+状态(`$PASEO_HOME/plugin-data/superagent/state.json`,原子写):`threads / triggers / tickets / decisions / pendingActions` + kv。Ticket 的 `pendingRequests` 保留待处理请求及问题选项。所有副作用(创建 agent、发消息)发生在落盘之后;裁决的副作用动作(steer/respond/cancel/retry/stop)先立案成 `pendingActions` 记录、执行成功后移除,看门狗负责崩溃后按序补执行与失败重试(有次数上限,耗尽后失败回流成触发交 Router 重新决策)。`respond` 绑定 Worker 会话和请求 ID,重复执行不会误答其他请求,也不扩大持久授权范围。
 
 ## 与文章五模块的对应
 

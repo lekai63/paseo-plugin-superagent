@@ -41,6 +41,7 @@ const USER_KINDS: readonly Trigger["kind"][] = ["manual", "agent", "feishu", "qq
 const DECISION_ICONS: Record<Decision["outcome"], string> = {
   dispatch: "Bot",
   steer: "CornerDownRight",
+  respond: "ShieldCheck",
   cancel: "CircleSlash",
   retry: "RotateCcw",
   reply: "MessageSquare",
@@ -55,6 +56,7 @@ const DECISION_ICONS: Record<Decision["outcome"], string> = {
 const DECISION_LABELS: Partial<Record<Decision["outcome"], string>> = {
   dispatch: "派发 Worker",
   steer: "转向 Worker",
+  respond: "处理 Worker 请求",
   cancel: "取消任务",
   retry: "重试任务",
   ignore: "Router 忽略了这条消息",

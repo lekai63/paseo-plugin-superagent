@@ -102,7 +102,7 @@ export type OrchestrationPermission =
  * 编排 agent 的权限策略(agent.permission.before):
  *   Router/看门狗只裁决不执行(§2.1 "甚至可以不配备 Bash")——自身的只读回读工具放行,
  *   其余工具、计划与模式切换一律拒绝,避免 Router 停在权限等待里堵住评估队列;
- *   Worker 的会话控制工具(退订/转回)放行,其余照常交给人审批。
+ *   Worker 的会话控制工具(退订/转回)放行,其余由引擎通知 Router 决策/转告人。
  * 返回 null 表示不干预。
  */
 export function orchestrationPermission(

@@ -16,6 +16,8 @@ export function outcomeLabel(outcome: Decision["outcome"]): string {
       return "派发";
     case "steer":
       return "转向";
+    case "respond":
+      return "处理请求";
     case "cancel":
       return "取消";
     case "retry":

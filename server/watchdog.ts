@@ -43,6 +43,9 @@ const WATCHDOG_RULES = [
   "  repeated unparsed Router output).",
   "- escalate: tell the Router — who tells the human — that something needs a human decision, for",
   "  example a permission request waiting for a long time or a recurring infrastructure failure.",
+  "  Pending permissions/questions are already sent to the Router immediately by the engine.",
+  "  Do not nudge or interrupt a Worker just because it is waiting for input; escalate only if",
+  "  the Router/human response appears stuck.",
   "Most patrols need no action: return an empty actions list. A long-running ticket that shows",
   "steady progress is fine. Never repeat the same action on a ticket two patrols in a row unless",
   "the situation got worse.",
@@ -119,6 +122,7 @@ export interface PatrolTicket {
   /** Worker 会话状态(running/idle/error/…),读不到时为空。 */
   sessionStatus: string | null;
   pendingPermissions: number;
+  pendingRequests?: readonly unknown[];
   /** 自上次巡检以来新增的时间线条目;首次巡检为空。 */
   newEntries: number | null;
   /** 距最近一次时间线变化的分钟数(读不到为空)。 */
@@ -161,6 +165,7 @@ export function composePatrolPrompt(digest: PatrolDigest, instructions: string |
     lines.push(`thread: ${ticket.threadId}${ticket.threadTitle ? ` "${truncate(ticket.threadTitle, 80)}"` : ""}`);
     const session = ticket.sessionStatus ?? "unknown";
     lines.push(`worker session: ${session}${ticket.pendingPermissions > 0 ? `; waiting for ${ticket.pendingPermissions} permission request(s)` : ""}`);
+    if (ticket.pendingRequests?.length) lines.push("pending requests (excerpt):", truncate(JSON.stringify(ticket.pendingRequests), 4000));
     lines.push(activityLine(ticket));
     if (ticket.lastError) lines.push(`last error: ${truncate(ticket.lastError, 300)}`);
     lines.push("mandate (excerpt):", "```text", truncate(ticket.mandate, 600), "```");

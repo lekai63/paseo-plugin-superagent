@@ -23,7 +23,9 @@ import {
   type Trigger,
   type TriggerOrigin,
   type WatchdogState,
+  WorkerRequestSchema,
 } from "../shared/model";
+import { orchestrationPermission } from "./agent-mcp";
 import {
   DEFAULT_WORKER_PROFILE,
   DEFAULT_WORKSPACE_TITLE,
@@ -94,11 +96,28 @@ const CHATTER_CONTEXT = 5;
 const QUEUED_BEFORE_START = "queued before the engine started";
 const PREFERRED_PROVIDERS = ["claude", "codex", "opencode"];
 
+function clearWorkerRequests(state: SuperagentState, ticket: Ticket): void {
+  ticket.pendingRequests = [];
+  for (const trigger of state.triggers) {
+    if (trigger.workerRequest?.ticketId === ticket.id && trigger.status === "pending") {
+      trigger.status = "filtered";
+      trigger.note = "Worker request no longer pending";
+    }
+  }
+}
+
 /**
  * 带副作用的裁决动作立案成可恢复记录(steer/cancel/retry/stop);
  * dispatch 的补执行由 pending 票据 + 看门狗承担,reply/ignore 无副作用。
  */
-function planPendingAction(threadId: string, decisionId: string, action: RouterAction): PendingAction | null {
+function planPendingAction(threadId: string, decisionId: string, action: RouterAction, workerAgentId?: string | null): PendingAction | null {
+  if (action.action === "respond") {
+    return {
+      id: newId("act"), threadId, decisionId, kind: "respond", ticketId: action.ticketId,
+      workerAgentId: workerAgentId ?? null, requestId: action.requestId, response: action.response,
+      attempts: 0, createdAt: new Date().toISOString(),
+    };
+  }
   if (action.action === "steer") {
     return {
       id: newId("act"),
@@ -172,7 +191,8 @@ export class SuperagentEngine {
   private currentEvalThread: string | null = null;
   private evalQueued = new Set<string>();
   private batchTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private watchedTickets = new Set<string>();
+  private watchedTickets = new Map<string, symbol>();
+  private permissionChains = new Map<string, Promise<boolean>>();
   /**
    * 线程评估的 unparsed 计数(模型输出质量),≥3 次后看门狗不再自动重排,
    * 需人工「重新评估」——防 Router 持续劣化时的失控 token 循环。
@@ -273,6 +293,7 @@ export class SuperagentEngine {
     this.watchdogTimer = null;
     for (const timer of this.batchTimers.values()) clearTimeout(timer);
     this.batchTimers.clear();
+    this.watchedTickets.clear();
     this.primed = false;
     await this.deliveryChain;
     await this.store.flush();
@@ -472,6 +493,95 @@ export class SuperagentEngine {
     return state.tickets.filter((t) => subscribesTo(t, threadId) && SUBSCRIBED_STATUSES.includes(t.status));
   }
 
+  private threadHasWorkerRequests(threadId: string): boolean {
+    return this.store.get().tickets.some((ticket) => !TERMINAL_TICKET_STATUSES.includes(ticket.status)
+      && (ticket.threadId === threadId || followsOf(ticket).includes(threadId)) && ticket.pendingRequests?.length);
+  }
+
+  /** 不依赖权限 hook 是否先到达:用户回复前读回请求,避免普通 send 清掉尚未回答的问题。 */
+  private async refreshThreadRequests(threadId: string): Promise<void> {
+    for (const ticket of this.store.get().tickets) {
+      if (ticket.workerAgentId && !TERMINAL_TICKET_STATUSES.includes(ticket.status)
+        && (ticket.threadId === threadId || followsOf(ticket).includes(threadId))) {
+        await this.syncWorkerPermissions(ticket.workerAgentId);
+      }
+    }
+  }
+
+  /** hook、watcher、恢复与定时对账共用;请求与通知一次落盘,重复事件不会重复通知。 */
+  async syncWorkerPermissions(agentId: string): Promise<boolean> {
+    const pending = (this.permissionChains.get(agentId) ?? Promise.resolve(false))
+      .catch(() => false).then(() => this.readWorkerPermissions(agentId));
+    this.permissionChains.set(agentId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.permissionChains.get(agentId) === pending) this.permissionChains.delete(agentId);
+    }
+  }
+
+  private async readWorkerPermissions(agentId: string): Promise<boolean> {
+    await this.store.ready;
+    const ticket = this.store.get().tickets.find((item) => item.workerAgentId === agentId);
+    if (!ticket || TERMINAL_TICKET_STATUSES.includes(ticket.status)) return false;
+    const snapshot = await this.requirePaseo().agents.ref(agentId).refresh();
+    if (!snapshot) return Boolean(ticket.pendingRequests?.length);
+    const requests = (snapshot.agent.archivedAt ? [] : snapshot.agent.pendingPermissions ?? [])
+      .filter((request) => !orchestrationPermission("worker", request))
+      .map((request) => WorkerRequestSchema.parse(request));
+    if (JSON.stringify(ticket.pendingRequests ?? []) === JSON.stringify(requests)) return requests.length > 0;
+    const now = new Date().toISOString();
+    const notifyThreads = new Set<string>();
+    await this.store.update((next) => {
+      const target = next.tickets.find((item) => item.id === ticket.id);
+      if (!target || target.workerAgentId !== agentId || TERMINAL_TICKET_STATUSES.includes(target.status)) return;
+      const previous = target.pendingRequests ?? [];
+      const added = requests.filter((request) => !previous.some((old) => old.id === request.id));
+      target.pendingRequests = requests;
+      if (previous.length && !requests.length) {
+        // 等人输入的时间不计入下一段执行的超时预算。
+        target.startedAt = now;
+        target.updatedAt = now;
+      }
+      if (requests.length && target.status === "waiting") target.status = "running";
+      for (const trigger of next.triggers) {
+        if (trigger.workerRequest?.agentId === agentId && trigger.status === "pending"
+          && !requests.some((request) => request.id === trigger.workerRequest?.requestId)) {
+          trigger.status = "filtered";
+          trigger.note = "Worker request already resolved";
+        }
+      }
+      for (const request of added) {
+        for (const threadId of this.reportThreads(target)) {
+          const thread = next.threads.find((item) => item.id === threadId && item.state === "active");
+          if (!thread) continue;
+          const origin = next.triggers.filter((item) => item.threadId === threadId && !item.workerRequest)
+            .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
+            .find((item) => item.status !== "filtered" && (item.origin || item.replyToAgentId));
+          next.triggers.push({
+            id: newId("trg"), kind: "engine", sender: `worker:${target.id}`, threadId, threadKey: thread.key,
+            workerRequest: { ticketId: target.id, agentId, requestId: request.id },
+            text: `Worker "${target.title}" needs a ${request.kind} response. ticketId=${target.id} requestId=${request.id}\n`
+              + `Use respond for this request; use reply to ask the human when context/authorization is insufficient.\n`
+              + truncate(JSON.stringify(request), 6000) + `\nFull current requests: superagent_read ${target.id}`,
+            context: false, origin: origin?.origin ?? null, replyToAgentId: origin?.replyToAgentId ?? null,
+            receivedAt: now, status: "pending", note: null,
+          });
+          notifyThreads.add(threadId);
+        }
+      }
+    });
+    for (const threadId of notifyThreads) this.scheduleEval(threadId, 0);
+    return Boolean(this.store.get().tickets.find((item) => item.id === ticket.id)?.pendingRequests?.length);
+  }
+
+  /** 人工或 Router 响应后继续追踪;不把一条普通消息当成权限响应。 */
+  async workerPermissionResolved(agentId: string): Promise<void> {
+    if (await this.syncWorkerPermissions(agentId)) return;
+    const ticket = this.store.get().tickets.find((item) => item.workerAgentId === agentId);
+    if (ticket?.status === "running") this.watchTicket(ticket.id);
+  }
+
   /**
    * 相邻消息内联(§3.3):本批之前、Router 上次看过的事件之后,同一线程里被准入层过滤的
    * 未 @ 群聊(最近几条)。Router 由此看到"@ 之前大家在聊什么",无需工具往返。
@@ -524,6 +634,8 @@ export class SuperagentEngine {
    * 全部失败才退回评估路径,失败原因逐个留备注。
    */
   private async deliverDirect(trigger: Trigger, tickets: Ticket[]): Promise<boolean> {
+    await this.refreshThreadRequests(trigger.threadId!);
+    if (this.threadHasWorkerRequests(trigger.threadId!)) return false;
     const prefix = trigger.context ? "[context] " : "";
     const quoted = trigger.quote?.text
       ? `> quoting ${trigger.quote.sender ?? "an earlier message"}: ${truncate(trigger.quote.text.replace(/\s+/g, " "), 300)}\n`
@@ -570,6 +682,9 @@ export class SuperagentEngine {
     const ticket = this.store.get().tickets.find((t) => t.id === ticketId);
     if (!ticket?.workerAgentId) {
       return { ok: false, error: `ticket ${ticketId} has no worker to receive messages` };
+    }
+    if (await this.syncWorkerPermissions(ticket.workerAgentId)) {
+      return { ok: false, error: `ticket ${ticketId} is awaiting input; use respond with its requestId, not steer` };
     }
     try {
       await paseo.agents.ref(ticket.workerAgentId).send(text, { activeTurnBehavior: mode });
@@ -667,6 +782,7 @@ export class SuperagentEngine {
   private async runEval(threadId: string): Promise<void> {
     await this.store.ready;
     const paseo = this.requirePaseo();
+    await this.refreshThreadRequests(threadId);
     let state = this.store.get();
     const thread = state.threads.find((t) => t.id === threadId);
     if (!thread || thread.state === "closed") return;
@@ -774,6 +890,14 @@ export class SuperagentEngine {
       await recordUnparsed(mandateBlock);
       return;
     }
+    for (const action of parsed.verdict.actions) {
+      if (action.action !== "respond") continue;
+      const target = state.tickets.find((ticket) => ticket.id === action.ticketId);
+      if (!target?.pendingRequests?.some((request) => request.id === action.requestId)) {
+        await recordUnparsed(`respond must name a current pending request: ticketId=${action.ticketId} requestId=${action.requestId}`);
+        return;
+      }
+    }
     this.evalFailures.delete(threadId);
     this.evalErrors.delete(threadId);
     const verdict = parsed.verdict;
@@ -814,6 +938,7 @@ export class SuperagentEngine {
           mandate: action.mandate,
           status: "pending",
           workerAgentId: null,
+          pendingRequests: [],
           workspaceId: null,
           ownsWorkspace: null,
           branchName: null,
@@ -840,6 +965,8 @@ export class SuperagentEngine {
         if (!summary) summary = action.reply;
       } else if (action.action === "steer") {
         decision.rationale = truncate(action.text, 300);
+      } else if (action.action === "respond") {
+        decision.rationale = `request ${action.requestId}: ${truncate(JSON.stringify(action.response), 1000)}`;
       } else if (action.action === "subscribe") {
         const target = state.tickets.find((t) => t.id === action.ticketId);
         if (!target || TERMINAL_TICKET_STATUSES.includes(target.status)) {
@@ -855,7 +982,8 @@ export class SuperagentEngine {
       }
       if ("ticketId" in action && action.ticketId) decision.ticketId = action.ticketId;
       decisions.push(decision);
-      actionRecords.push(planPendingAction(threadId, decision.id, action));
+      actionRecords.push(planPendingAction(threadId, decision.id, action,
+        "ticketId" in action ? state.tickets.find((ticket) => ticket.id === action.ticketId)?.workerAgentId : null));
       if (action.action === "stop") break;
     }
     const decidedAt = decisions[0]?.createdAt ?? new Date().toISOString();
@@ -1087,6 +1215,9 @@ export class SuperagentEngine {
   private async enqueueActionFailure(record: PendingAction, error: string): Promise<void> {
     const thread = this.store.get().threads.find((t) => t.id === record.threadId);
     if (!thread) return;
+    const source = this.store.get().triggers.filter((trigger) => trigger.threadId === record.threadId)
+      .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
+      .find((trigger) => trigger.status !== "filtered" && (trigger.origin || trigger.replyToAgentId));
     const detail =
       record.kind === "steer" && record.text
         ? `Undelivered instruction for ${record.ticketId}: "${truncate(record.text, 400)}"`
@@ -1100,8 +1231,8 @@ export class SuperagentEngine {
         threadKey: thread.key,
         text: `[engine] Router ${record.kind} action failed after ${record.attempts} attempts: ${truncate(error, 300)}.\n${detail}`,
         context: false,
-        replyToAgentId: null,
-        origin: null,
+        replyToAgentId: source?.replyToAgentId ?? null,
+        origin: source?.origin ?? null,
         receivedAt: now,
         status: "pending",
         note: null,
@@ -1116,6 +1247,50 @@ export class SuperagentEngine {
     record: PendingAction,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const paseo = this.requirePaseo();
+    if (record.kind === "respond") {
+      const ticket = this.store.get().tickets.find((item) => item.id === record.ticketId);
+      if (!ticket || TERMINAL_TICKET_STATUSES.includes(ticket.status)) return { ok: true };
+      if (!record.workerAgentId || ticket.workerAgentId !== record.workerAgentId) {
+        return { ok: false, error: "Worker changed since the response was planned; refusing to answer another session" };
+      }
+      if (!record.requestId || !record.response) return { ok: false, error: "Missing requestId/response" };
+      await this.syncWorkerPermissions(record.workerAgentId);
+      const request = this.store.get().tickets.find((item) => item.id === ticket.id)?.pendingRequests
+        ?.find((item) => item.id === record.requestId);
+      // 人工已答复或崩溃前已经成功发送:幂等完成,不重发或误发给另一个请求。
+      if (!request) {
+        await this.workerPermissionResolved(record.workerAgentId);
+        return { ok: true };
+      }
+      if (record.response.selectedActionId) {
+        const actions = request.actions as { id: string; behavior: string }[] | undefined;
+        if (!Array.isArray(actions) || !actions.some((action) => action.id === record.response?.selectedActionId
+          && action.behavior === record.response?.behavior)) {
+          return { ok: false, error: "selectedActionId must match a request action and its allow/deny behavior" };
+        }
+      }
+      if (request.kind === "question" && record.response.behavior === "allow") {
+        const answers = record.response.updatedInput?.answers;
+        const validAnswer = (answer: unknown) => typeof answer === "string" ? Boolean(answer.trim())
+          : Array.isArray(answer) && answer.length > 0 && answer.every((value) => typeof value === "string" && value.trim());
+        if (!answers || typeof answers !== "object" || Array.isArray(answers) || !Object.keys(answers).length
+          || !Object.values(answers).every(validAnswer)) {
+          return { ok: false, error: "Question responses require nonempty updatedInput.answers keyed by question header" };
+        }
+        const input = request.input as { questions?: { header?: string; question?: string }[] } | undefined;
+        if (Array.isArray(input?.questions) && input.questions.some((question) => {
+          const key = question.header || question.question;
+          return key && !validAnswer((answers as Record<string, unknown>)[key]);
+        })) return { ok: false, error: "Answer every question using its header (question text when no header)" };
+      }
+      try {
+        await paseo.agents.ref(record.workerAgentId).respondToPermission({ requestId: record.requestId, response: record.response });
+        await this.workerPermissionResolved(record.workerAgentId);
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
     if (record.kind === "steer") {
       // 跨线程 steer:目标票据可能属于其他线程(裁决记录仍挂在本线程)。
       return this.applySteer(record.ticketId ?? "", record.text ?? "", record.mode ?? "steer");
@@ -1233,6 +1408,7 @@ export class SuperagentEngine {
           next.threads.find((t) => t.id === target.threadId)?.state !== "active"
         ) return;
         target.workerAgentId = launch.agentId;
+        clearWorkerRequests(next, target);
         target.workspaceId = launch.workspaceId;
         target.ownsWorkspace = launch.ownsWorkspace;
         target.branchName = launch.branchName;
@@ -1295,23 +1471,32 @@ export class SuperagentEngine {
     const state = this.store.get();
     const ticket = state.tickets.find((t) => t.id === ticketId);
     if (!ticket?.workerAgentId) return;
-    this.watchedTickets.add(ticketId);
+    const token = Symbol(ticketId);
+    this.watchedTickets.set(ticketId, token);
     const agentId = ticket.workerAgentId;
+    const attempt = ticket.attempts;
     void (async () => {
       try {
         const result = await this.requirePaseo().agents.ref(agentId).waitForFinish(
           this.settingsValues.workerTimeoutMin * 60_000,
         );
-        // idle = 本轮正常结束;error = 失败。
-        // timeout 交给看门狗按运行上限处置;permission 是在等人批权限,轮次未完。
+        if (this.watchedTickets.get(ticketId) !== token) return;
+        this.watchedTickets.delete(ticketId);
+        const current = this.store.get().tickets.find((item) => item.id === ticketId);
+        if (!this.primed || current?.workerAgentId !== agentId || current.attempts !== attempt) return;
+        // permission 是一次 wait 的返回值,并不继续观察。先上报请求,响应后重新挂观察。
+        if (await this.syncWorkerPermissions(agentId)) return;
         if (result.status === "idle") {
           await this.settleTicketRun(ticketId, null);
         } else if (result.status === "error") {
           await this.settleTicketRun(ticketId, result.error ?? "turn failed");
+        } else if (result.status === "permission") {
+          // 请求已在 hook/人工中解决,当前 wait 的 permission 结果已经过时。
+          this.watchTicket(ticketId);
         }
       } catch (error) {
         console.error("[superagent] worker watch failed", error);
-        this.watchedTickets.delete(ticketId);
+        if (this.watchedTickets.get(ticketId) === token) this.watchedTickets.delete(ticketId);
       }
     })();
   }
@@ -1323,6 +1508,7 @@ export class SuperagentEngine {
     const state = this.store.get();
     const ticket = state.tickets.find((t) => t.id === ticketId);
     if (!ticket || !["running", "launching"].includes(ticket.status)) return;
+    if (ticket.workerAgentId && await this.syncWorkerPermissions(ticket.workerAgentId)) return;
     const attempt = ticket.attempts;
     const startedAt = ticket.startedAt;
     const workerAgentId = ticket.workerAgentId;
@@ -1570,6 +1756,7 @@ export class SuperagentEngine {
     for (const ticket of unfinished) {
       let sessionStatus: string | null = null;
       let pendingPermissions = 0;
+      let pendingRequests: readonly unknown[] = [];
       let latestSeq: number | null = null;
       let latestAt: number | null = null;
       let latestMessage: string | null = null;
@@ -1579,6 +1766,7 @@ export class SuperagentEngine {
           const snapshot = await ref.refresh();
           sessionStatus = snapshot?.agent.status ?? null;
           pendingPermissions = snapshot?.agent.pendingPermissions?.length ?? 0;
+          pendingRequests = snapshot?.agent.pendingPermissions ?? [];
           const timeline = await ref.timeline.refetch({ direction: "tail", limit: 30 });
           for (const entry of timeline.entries) {
             const seq = (entry as { seqEnd?: number }).seqEnd ?? entry.seqStart;
@@ -1615,6 +1803,7 @@ export class SuperagentEngine {
         mandate: ticket.mandate,
         sessionStatus,
         pendingPermissions,
+        pendingRequests,
         newEntries: before && latestSeq !== null ? Math.max(0, latestSeq - before.seq) : null,
         quietMin: latestAt !== null ? minutes(latestAt) : seen[ticket.id] ? minutes(Date.parse(seen[ticket.id].at)) : null,
         latestMessage,
@@ -1774,10 +1963,17 @@ export class SuperagentEngine {
           acted += 1;
           await this.settleLaunchFailure(ticket.id, "launch stuck (watchdog)");
         }
-      } else if (ticket.status === "running" && ticket.workerAgentId) {
+      } else if (["running", "waiting"].includes(ticket.status) && ticket.workerAgentId) {
         try {
           const handle = paseo.agents.ref(ticket.workerAgentId);
+          // 权限/问题优先于 idle 与硬超时。支持错过 hook、插件重载和非阻塞问题。
+          if (await this.syncWorkerPermissions(ticket.workerAgentId)) continue;
+          if (ticket.status !== "running") continue;
           const refetched = await handle.refresh();
+          if (refetched?.agent.pendingPermissions?.length) {
+            await this.syncWorkerPermissions(ticket.workerAgentId);
+            continue;
+          }
           const status = refetched?.agent.status;
           const archived = Boolean(refetched?.agent.archivedAt);
           const startedAt = ticket.startedAt ? Date.parse(ticket.startedAt) : Date.now();
@@ -1803,6 +1999,8 @@ export class SuperagentEngine {
               console.error("[superagent] worker timeout reload failed", error);
             }
             await this.settleTicketRun(ticket.id, `exceeded ${this.settingsValues.workerTimeoutMin}min runtime`);
+          } else if (status === "running") {
+            this.watchTicket(ticket.id);
           }
         } catch (error) {
           console.error("[superagent] watchdog refresh failed", ticket.workerAgentId, error);
@@ -1886,9 +2084,11 @@ export class SuperagentEngine {
       const target = next.tickets.find((t) => t.id === ticketId);
       if (!target) return;
       target.status = "canceled";
+      clearWorkerRequests(next, target);
       target.subscribed = false;
       target.updatedAt = new Date().toISOString();
     });
+    this.watchedTickets.delete(ticketId);
     await retireWorker(paseo, ticket, true);
   }
 
@@ -1905,12 +2105,14 @@ export class SuperagentEngine {
       if (!target) return;
       target.status = "pending";
       target.attempts = 0;
+      clearWorkerRequests(next, target);
       target.report = null;
       target.lastError = null;
       target.subscribed = true;
       target.updatedAt = new Date().toISOString();
     });
     // 旧 Worker 与其独占工作区随重试作废:先落盘重置再回收,旧实例不会被新票据引用。
+    this.watchedTickets.delete(ticketId);
     if (ticket.workerAgentId) await retireWorker(paseo, ticket, true);
     await this.startTicket(ticketId);
   }
@@ -1935,6 +2137,7 @@ export class SuperagentEngine {
       for (const ticket of next.tickets) {
         if (ticket.threadId === threadId && !["completed", "failed", "canceled"].includes(ticket.status)) {
           ticket.status = "canceled";
+          clearWorkerRequests(next, ticket);
           ticket.subscribed = false;
           ticket.updatedAt = now;
         } else if (ticket.threadId !== threadId && followsOf(ticket).includes(threadId)) {
@@ -2018,6 +2221,7 @@ export class SuperagentEngine {
         `workerAgent: ${ticket.workerAgentId ?? "(none)"}`,
         ticket.startedAt ? `startedAt: ${ticket.startedAt}` : null,
         ticket.lastError ? `lastError: ${ticket.lastError}` : null,
+        ticket.pendingRequests?.length ? `\n## Pending Worker requests\n${JSON.stringify(ticket.pendingRequests, null, 2)}` : null,
         "",
         "## mandate",
         ticket.mandate,

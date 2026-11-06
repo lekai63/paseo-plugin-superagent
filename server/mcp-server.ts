@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
 import { z } from "zod";
 import type { DispatchInput } from "./engine";
 
@@ -17,8 +17,8 @@ import type { DispatchInput } from "./engine";
  *   Router/看门狗    superagent_list / superagent_read / superagent_search(跨线程可见 + Chain of Recall 回读)
  *   Worker          superagent_unsubscribe / superagent_handback(退订与转回)
  *
- * 形态对齐 daemon 自身的 agent MCP 端点(/mcp/agents):stateless——每个 HTTP 请求新建
- * server+transport,响应关闭即回收,不保留跨请求状态。安全模型:仅绑 127.0.0.1,URL 带
+ * SDK v2 的 createMcpHandler 同时服务 2026-07-28 与 legacy stateless 协议,每个请求
+ * 创建独立的 MCP server,由 SDK 回收。安全模型:仅绑 127.0.0.1,URL 带
  * 进程生命周期内随机的路径段作为共享密钥;callerAgentId 经 query 传入,用于答复回投。
  *
  * 已知限制:插件重载后端口与密钥都会变化,已打开的 agent 会话里缓存的旧 URL 在下次
@@ -290,18 +290,6 @@ function registerToolsFor(
   registerDispatchTool(mcp, engine, caller.agentId);
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req) {
-    size += (chunk as Buffer).length;
-    if (size > MAX_BODY_BYTES) throw new Error("request body too large");
-    chunks.push(chunk as Buffer);
-  }
-  const text = Buffer.concat(chunks).toString("utf8").trim();
-  return text ? JSON.parse(text) : undefined;
-}
-
 function listen(server: Server, host: string): Promise<number> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -332,6 +320,21 @@ export async function startDispatchMcpServer(
   const host = options.host ?? "127.0.0.1";
   const secret = randomBytes(24).toString("hex");
   const path = `/${secret}/mcp`;
+  const onerror = (error: Error) => console.error("[superagent] dispatch mcp transport error", error);
+  const handler = createMcpHandler(({ requestInfo }) => {
+    if (!requestInfo) throw new Error("MCP HTTP request context is missing");
+    const url = new URL(requestInfo.url);
+    const roleParam = url.searchParams.get("role");
+    const role = roleParam === "router" || roleParam === "worker" ? roleParam : null;
+    const mcp = new McpServer({ name: "superagent-dispatch", version: "1.0.0" });
+    registerToolsFor(mcp, engine, {
+      agentId: url.searchParams.get("callerAgentId"),
+      role,
+      ticketId: role === "worker" ? url.searchParams.get("ticket") : null,
+    });
+    return mcp;
+  }, { legacy: "stateless", maxRequestBodySize: MAX_BODY_BYTES, onerror });
+  const serveMcp = toNodeHandler(handler, { maxRequestBodySize: MAX_BODY_BYTES, onerror });
   const server = createServer((req, res) => {
     void handleRequest(req, res).catch((error) => {
       console.error("[superagent] dispatch mcp request failed", error);
@@ -369,26 +372,7 @@ export async function startDispatchMcpServer(
       );
       return;
     }
-    const callerAgentId = url.searchParams.get("callerAgentId");
-    const roleParam = url.searchParams.get("role");
-    const role = roleParam === "router" || roleParam === "worker" ? roleParam : null;
-    const ticketId = role === "worker" ? url.searchParams.get("ticket") : null;
-    const body = await readJsonBody(req);
-    const mcp = new McpServer({ name: "superagent-dispatch", version: "1.0.0" });
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-      enableDnsRebindingProtection: false,
-    });
-    transport.onerror = (error) => {
-      console.error("[superagent] dispatch mcp transport error", error);
-    };
-    registerToolsFor(mcp, engine, { agentId: callerAgentId, role, ticketId });
-    res.on("close", () => {
-      void transport.close();
-      void mcp.close();
-    });
-    await mcp.connect(transport);
-    await transport.handleRequest(req, res, body);
+    await serveMcp(req, res);
   }
 
   const port = await listen(server, host);
@@ -408,7 +392,11 @@ export async function startDispatchMcpServer(
     async stop() {
       if (stopped) return;
       stopped = true;
-      await close(server);
+      try {
+        await handler.close();
+      } finally {
+        await close(server);
+      }
     },
   };
 }

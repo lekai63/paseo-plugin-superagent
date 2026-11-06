@@ -257,17 +257,26 @@ export default function contribute(server: PluginServerContext) {
   });
 
   // 编排 agent 的权限策略:Router/看门狗只裁决不执行(非自身工具一律拒绝),
-  // Worker 的退订/转回工具自动放行;其余权限照常交给人。
+  // Worker 的退订/转回工具自动放行;其余请求交 Router 决策或转告用户。
   const removePermissionHook = server.addHook("agent.permission.before", async ({ agent, request }, context) => {
     engine.prime(context.paseo);
     await store.ready;
     const decision = orchestrationPermission(engine.orchestrationRole(agent.id), request);
-    if (!decision) return;
+    if (!decision) {
+      if (engine.orchestrationRole(agent.id) === "worker") await engine.syncWorkerPermissions(agent.id);
+      return;
+    }
     try {
       await context.paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: decision });
     } catch (error) {
       console.error("[superagent] permission response failed", error);
     }
+  });
+
+  const removePermissionResolvedHook = server.addHook("agent.permission.after", async ({ agent }, context) => {
+    engine.prime(context.paseo);
+    await store.ready;
+    if (engine.orchestrationRole(agent.id) === "worker") await engine.workerPermissionResolved(agent.id);
   });
 
   // hook 仅用于 prime(无头重启后到首个 RPC 之间保持引擎活着)。
@@ -282,6 +291,7 @@ export default function contribute(server: PluginServerContext) {
     for (const remove of hookRemovers) remove();
     removeSessionOpen();
     removePermissionHook();
+    removePermissionResolvedHook();
     void dispatchEndpoint?.stop();
     void im.stopAll();
     void engine.stop();

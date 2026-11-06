@@ -63,6 +63,8 @@ export const TriggerSchema = z.object({
   /** fast-path 丢弃原因或投递备注。 */
   note: z.string().nullish(),
   threadId: z.string().nullish(),
+  /** 权限通知的关联键:用于去重、撤销已解决的通知,不与普通汇报混淆。 */
+  workerRequest: z.object({ ticketId: z.string(), agentId: z.string(), requestId: z.string() }).nullish(),
   /**
    * IM 消息引用(回复)的那条消息(§3.3 Inline):在本地记录里找到时内联其摘要与 ID,
    * 找不到时只保留平台消息 id。text 已截断,全文按 triggerId 回读。
@@ -119,6 +121,29 @@ export const SUBSCRIBED_STATUSES: readonly TicketStatus[] = ["running", "waiting
 /** 已结束的 Ticket:不再占用 Worker,关闭线程时不会被取消。 */
 export const TERMINAL_TICKET_STATUSES: readonly TicketStatus[] = ["completed", "failed", "canceled"];
 
+/** 保留 provider 的问题、选项、命令和动作原文;不在 shared 引入宿主运行时。 */
+export const WorkerRequestSchema = z.object({
+  id: z.string().min(1),
+  name: z.string(),
+  kind: z.string(),
+}).passthrough();
+export type WorkerRequest = z.infer<typeof WorkerRequestSchema>;
+
+/** 仅响应本次请求,不支持扩大后续请求的持久授权范围。 */
+export const WorkerResponseSchema = z.discriminatedUnion("behavior", [
+  z.object({
+    behavior: z.literal("allow"),
+    selectedActionId: z.string().optional(),
+    updatedInput: z.record(z.string(), z.unknown()).optional(),
+  }).strict(),
+  z.object({
+    behavior: z.literal("deny"),
+    selectedActionId: z.string().optional(),
+    message: z.string().optional(),
+    interrupt: z.boolean().optional(),
+  }).strict(),
+]);
+
 export const TicketSchema = z.object({
   id: z.string().min(1),
   threadId: z.string().min(1),
@@ -127,6 +152,7 @@ export const TicketSchema = z.object({
   mandate: z.string(),
   status: z.enum(TICKET_STATUSES),
   workerAgentId: z.string().nullish(),
+  pendingRequests: z.array(WorkerRequestSchema).default([]),
   workspaceId: z.string().nullish(),
   /**
    * 该 Ticket 是否独占 workspaceId 指向的工作区(worktree 隔离 = true;共享隔离的
@@ -164,6 +190,7 @@ export type Ticket = z.infer<typeof TicketSchema>;
 export const DECISION_OUTCOMES = [
   "dispatch",
   "steer",
+  "respond",
   "cancel",
   "retry",
   "reply",
@@ -201,6 +228,12 @@ export const MAX_SPECULATIVE_TICKETS = 2;
  * 由引擎按序执行;旧版单裁决格式({decision:...})在 parseVerdict 里归一成 actions。
  */
 export const RouterActionSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("respond"),
+    ticketId: z.string().min(1),
+    requestId: z.string().min(1),
+    response: WorkerResponseSchema,
+  }),
   z.object({
     action: z.literal("dispatch"),
     title: z.string().min(1).max(120),
@@ -275,6 +308,8 @@ export function verdictPlaceholderIssue(verdict: RouterVerdict): string | null {
       if (PLACEHOLDER_TICKET_ID.test(action.ticketId) || PLACEHOLDER_ELLIPSIS.test(action.text)) {
         field = "steer ticketId/text";
       }
+    } else if (action.action === "respond") {
+      if (PLACEHOLDER_TICKET_ID.test(action.ticketId) || PLACEHOLDER_ELLIPSIS.test(action.requestId)) field = "respond ticketId/requestId";
     } else if (action.action === "cancel" || action.action === "retry" || action.action === "subscribe") {
       if (PLACEHOLDER_TICKET_ID.test(action.ticketId)) field = `${action.action} ticketId`;
     } else if (action.action === "reply") {
@@ -307,8 +342,12 @@ export const PendingActionSchema = z.object({
   threadId: z.string().min(1),
   /** 关联的 Decision(审计与失败备注定位)。 */
   decisionId: z.string().min(1),
-  kind: z.enum(["steer", "cancel", "retry", "stop"]),
+  kind: z.enum(["steer", "respond", "cancel", "retry", "stop"]),
   ticketId: z.string().nullish(),
+  /** 响应绑定到当时的 Worker,不能在重试换 Worker 后误答新的会话。 */
+  workerAgentId: z.string().nullish(),
+  requestId: z.string().nullish(),
+  response: WorkerResponseSchema.nullish(),
   /** steer 的指令文本。 */
   text: z.string().nullish(),
   /** steer 的模式;其余动作为空。 */

@@ -77,6 +77,22 @@ const ROUTER_RULES = [
   "  Follow-up messages on a thread with subscribed workers go straight to EVERY subscribed",
   "  worker, not to you; you only see them afterwards as context already delivered. On such a",
   "  thread the messages that still reach you are context-only, handed back, or failed deliveries.",
+  "  Exception: while any Worker on this thread has a pending permission/question, human messages",
+  "  come to you for interpretation and are never broadcast to Workers as ordinary instructions.",
+  "- respond: resolve one pending Worker permission/question using its exact ticketId and requestId.",
+  '  For a permission, use "response":{"behavior":"allow"} or {"behavior":"deny","message":"reason"}.',
+  "  Approve only when the human's existing authorization covers the specific operation; do not",
+  "  invent consent or override a denial. If authorization is unclear, immediately reply to the",
+  "  human with the concrete operation and the decision needed. Do not silently ignore a request.",
+  "  For a question, answer from established context when possible; otherwise reply with the",
+  "  question and its options, then wait for the human's answer. Never invent personal preferences.",
+  '  Answer with "response":{"behavior":"allow","updatedInput":{"answers":{"<header>":"answer"}}}.',
+  "  Use each question's header as the answer key (question text if no header); use an array of",
+  "  strings for multi-select. Keep the response compatible with the request's input and actions.",
+  "  Claude questions require string values even for multi-select: join selected labels with commas.",
+  "  A human reply can answer one or several listed requests: match the context and ticket before",
+  "  responding. Use reply to clarify ambiguity. Never use steer as a substitute for respond.",
+  "  The current pending request list is authoritative; old notifications may already be resolved.",
   "- cancel: stop exactly one ticket of this or another active thread (its Worker is retired",
   "  and the thread stays open for more work). Prefer this over stop when only one task should",
   "  end. Also cancel a waiting ticket once its conversation is clearly over, so its lingering",
@@ -311,6 +327,7 @@ export function composeRouterInstructions(
     lines.push('{"actions":[{"action":"dispatch","title":"...","mandate":"...","speculative":true}]}');
   }
   lines.push('{"actions":[{"action":"steer","ticketId":"tkt_...","text":"...","mode":"steer or interrupt"}]}');
+  lines.push('{"actions":[{"action":"respond","ticketId":"tkt_...","requestId":"...","response":{"behavior":"allow"}}]}');
   lines.push('{"actions":[{"action":"cancel","ticketId":"tkt_...","rationale":"..."}]}');
   lines.push('{"actions":[{"action":"retry","ticketId":"tkt_..."}]}');
   lines.push('{"actions":[{"action":"subscribe","ticketId":"tkt_..."}]}');
@@ -365,6 +382,16 @@ export function composeEvalPrompt({
     lines.push("## Tickets of other threads that also follow this thread (follow-ups reach them directly)");
     for (const ticket of followers) {
       lines.push(`- [${ticket.id}] "${ticket.title}" status=${ticket.status} home-thread=${ticket.threadId}${profileTag(ticket)}`);
+    }
+    lines.push("");
+  }
+  const pendingRequests = [...activeTickets, ...followers].filter((ticket) => ticket.pendingRequests?.length);
+  if (pendingRequests.length) {
+    lines.push("## Pending Worker permissions/questions (current; resolve with respond or ask the human with reply)");
+    for (const ticket of pendingRequests) {
+      lines.push(`ticketId: ${ticket.id} workerAgentId: ${ticket.workerAgentId}`);
+      lines.push("```json", truncate(JSON.stringify(ticket.pendingRequests), 8000), "```");
+      lines.push(`Full request details: superagent_read ${ticket.id}`);
     }
     lines.push("");
   }

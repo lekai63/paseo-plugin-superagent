@@ -39,6 +39,18 @@ test("Router verdicts accept subscribe actions and the speculative dispatch flag
   assert.ok("error" in parseVerdict('{"actions":[{"action":"subscribe","ticketId":"tkt_..."}]}'), "placeholder ids are rejected");
 });
 
+test("Router responses preserve question answers and reject placeholder IDs or persistent permission expansion", () => {
+  const response = { behavior: "allow", updatedInput: { answers: { Features: ["One", "Two"] } } };
+  const parsed = parseVerdict(JSON.stringify({ actions: [{ action: "respond", ticketId: "tkt_a", requestId: "ask-1", response }] }));
+  assert.deepEqual(parsed.verdict.actions[0].response, response);
+  for (const change of [
+    { requestId: "..." }, { ticketId: "tkt_..." },
+    { response: { behavior: "allow", updatedPermissions: [{ type: "allowAll" }] } },
+  ]) {
+    assert.ok("error" in parseVerdict(JSON.stringify({ actions: [{ action: "respond", ticketId: "tkt_a", requestId: "ask-1", response, ...change }] })));
+  }
+});
+
 test("the eval prompt lists followers, quotes, overheard chatter and ticket tags", () => {
   const state = emptyState();
   const thread = { id: "thr_b", title: "B", state: "active" };

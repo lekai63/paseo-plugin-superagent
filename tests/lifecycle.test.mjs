@@ -51,6 +51,7 @@ function fixture(t, status = "running", subscribed = true) {
   const calls = {
     sends: [], watches: [], archives: [], workspaceArchives: [], creates: 0, workspaceCreateOptions: [], evals: [],
     routerCreates: [], workerCreates: [], prompts: [], watchdogCreates: [], patrols: [],
+    permissionResponses: [],
   };
   const controls = {
     send: async () => {},
@@ -65,18 +66,28 @@ function fixture(t, status = "running", subscribed = true) {
     routerTimeline: async () => ({ entries: [] }),
     /** worktree 创建后工作区 descriptor 报告的实际分支;null 表示未报告(退回请求名)。 */
     workspaceBranch: null,
+    pendingPermissions: new Map(),
+    sessionStatuses: new Map(),
+    respond: async (id, { requestId }) => {
+      controls.pendingPermissions.set(id, (controls.pendingPermissions.get(id) ?? []).filter((request) => request.id !== requestId));
+    },
   };
   const finishes = [];
   const handles = new Map();
   const ref = (id) => {
     if (!handles.has(id)) handles.set(id, {
       id,
-      refresh: async () => ({ agent: { status: id === "router" || id.includes("watchdog") ? "idle" : "running", archivedAt: null,
+      refresh: async () => ({ agent: { status: controls.sessionStatuses.get(id) ?? (id === "router" || id.includes("watchdog") ? "idle" : "running"), archivedAt: null,
+        pendingPermissions: controls.pendingPermissions.get(id) ?? [],
         persistence: id.includes("router") && controls.routerSessionId ? { sessionId: controls.routerSessionId } : null } }),
       current: () => ({ persistence: controls.routerSessionId ? { sessionId: controls.routerSessionId } : null }),
       send: async (text, options) => {
         calls.sends.push({ id, text, options });
         await controls.send(text, options);
+      },
+      respondToPermission: async (options) => {
+        calls.permissionResponses.push({ id, ...options });
+        await controls.respond(id, options);
       },
       run: async (prompt) => {
         if (id.includes("watchdog")) {
@@ -194,6 +205,253 @@ async function evaluateRouter(f, text = "new event") {
   await f.engine.runEval("thread");
   return f.calls.prompts.at(-1);
 }
+
+const toolRequest = { id: "permission-shell", provider: "codex", name: "shell", kind: "tool", input: { command: "git status" } };
+const questionRequest = {
+  id: "permission-question", provider: "codex", name: "request_user_input", kind: "question",
+  input: { questions: [{ header: "Color", question: "Which color?", options: [{ label: "Blue" }, { label: "Green" }] }] },
+};
+
+test("Worker permissions are notified once with full details and the original reply destination", async t => {
+  const f = fixture(t);
+  const origin = { channel: "qq", chatId: "chat", senderId: "user" };
+  f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user", text: "original task", origin, status: "delivered", receivedAt: oldTime });
+  f.controls.pendingPermissions.set("worker", [toolRequest, questionRequest]);
+  await Promise.all([f.engine.syncWorkerPermissions("worker"), f.engine.syncWorkerPermissions("worker")]);
+  const notifications = f.state.triggers.filter(trigger => trigger.workerRequest);
+  assert.equal(notifications.length, 2);
+  assert.deepEqual(f.ticket.pendingRequests, [toolRequest, questionRequest]);
+  assert.deepEqual(notifications[0].origin, origin);
+  assert.match(notifications[0].text, /git status/);
+  assert.match(notifications[1].text, /Which color\?[\s\S]*Green/);
+  assert.deepEqual(f.calls.evals, ["thread"]);
+});
+
+test("a permission wait releases its watcher and a formal response reattaches it", async t => {
+  const f = fixture(t);
+  f.engine.watchTicket("ticket");
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  f.finishes[0].resolve({ status: "permission" });
+  await until(() => f.ticket.pendingRequests?.length === 1);
+  assert.equal(f.engine.watchedTickets.has("ticket"), false);
+  assert.equal(f.ticket.status, "running");
+  f.controls.verdict = { actions: [{ action: "respond", ticketId: "ticket", requestId: toolRequest.id, response: { behavior: "allow" } }] };
+  await f.engine.runEval("thread");
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "allow" } }]);
+  assert.equal(f.calls.sends.length, 0);
+  assert.equal(f.state.pendingActions.length, 0);
+  assert.equal(f.calls.watches.length, 2);
+  f.finishes[1].resolve({ status: "idle" });
+  await until(() => f.state.triggers.some(trigger => trigger.kind === "report"));
+  assert.equal(f.ticket.report, "work completed");
+});
+
+test("question clarification goes to IM and the human answer is filled through respond", async t => {
+  const f = fixture(t);
+  const origin = { channel: "qq", chatId: "chat", senderId: "user" };
+  f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user", text: "original task", origin, status: "delivered", receivedAt: oldTime });
+  const sent = [];
+  f.engine.setReplySink({ send: async (target, text) => { sent.push({ target, text }); } });
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  f.controls.verdict = { actions: [{ action: "reply", reply: "请选择颜色：Blue 或 Green。" }] };
+  await f.engine.runEval("thread");
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].target, origin);
+  assert.match(sent[0].text, /Blue/);
+  const result = await f.engine.dispatch({ threadId: "thread", task: "Green", origin });
+  assert.equal(result.directDelivered, false);
+  assert.equal(f.calls.sends.length, 0, "no plain message clears the pending question");
+  const response = { behavior: "allow", updatedInput: { answers: { Color: "Green" } } };
+  f.controls.verdict = { actions: [{ action: "respond", ticketId: "ticket", requestId: questionRequest.id, response }] };
+  await f.engine.runEval("thread");
+  assert.deepEqual(f.calls.permissionResponses[0].response, response);
+  assert.match(f.calls.prompts.at(-1), /Pending Worker permissions\/questions[\s\S]*Which color/);
+  assert.equal(f.ticket.pendingRequests.length, 0);
+});
+
+test("a pending question prevents reply fan-out to other Workers even when its hook was missed", async t => {
+  const f = fixture(t);
+  f.state.tickets.push({ ...f.ticket, id: "other-ticket", workerAgentId: "worker-b" });
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  const result = await f.engine.dispatch({ threadId: "thread", task: "Green" });
+  assert.equal(result.directDelivered, false);
+  assert.equal(f.calls.sends.length, 0);
+  assert.equal(f.state.triggers.find(trigger => trigger.id === result.triggerId).status, "pending");
+});
+
+test("permission notifications reach followed conversations with their own reply destinations", async t => {
+  const f = fixture(t);
+  f.state.threads.push({ ...f.state.threads[0], id: "followed", key: "manual:followed" });
+  f.ticket.follows = ["followed"];
+  f.state.triggers.push({ id: "original", threadId: "followed", kind: "agent", replyToAgentId: "caller", status: "delivered", receivedAt: oldTime });
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  const trigger = f.state.triggers.find(trigger => trigger.workerRequest && trigger.threadId === "followed");
+  assert.equal(trigger.replyToAgentId, "caller");
+  const result = await f.engine.dispatch({ threadId: "followed", task: "Blue" });
+  assert.equal(result.directDelivered, false);
+  assert.equal(f.calls.sends.length, 0);
+});
+
+test("an idle session with a pending async question is neither completed nor timed out", async t => {
+  const f = fixture(t);
+  f.controls.sessionStatuses.set("worker", "idle");
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  await f.engine.reconcile();
+  assert.equal(f.ticket.status, "running");
+  assert.equal(f.ticket.report, null);
+  assert.equal(f.state.triggers.filter(trigger => trigger.workerRequest).length, 1);
+  f.controls.sessionStatuses.set("worker", "running");
+  await f.engine.reconcile();
+  assert.equal(f.ticket.attempts, 1, "waiting for a human does not exhaust runtime or retries");
+  assert.equal(f.calls.sends.length, 0);
+});
+
+test("manual resolution removes stale notifications, resets the deadline, and resumes observation", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  f.controls.pendingPermissions.set("worker", []);
+  await f.engine.workerPermissionResolved("worker");
+  assert.equal(f.ticket.pendingRequests.length, 0);
+  assert.equal(f.state.triggers[0].status, "filtered");
+  assert.ok(Date.parse(f.ticket.startedAt) > Date.parse(oldTime));
+  assert.deepEqual(f.calls.watches, ["worker"]);
+  f.finishes[0].resolve({ status: "idle" });
+  await until(() => f.ticket.status === "waiting");
+});
+
+test("restart recovers pending requests and retries a durable question response without duplicates", async t => {
+  let f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  const response = { behavior: "allow", updatedInput: { answers: { Color: "Blue" } } };
+  f.controls.respond = async () => { throw new Error("connection lost"); };
+  f.controls.verdict = { actions: [{ action: "respond", ticketId: "ticket", requestId: questionRequest.id, response }] };
+  await f.engine.runEval("thread");
+  assert.equal(f.state.pendingActions.length, 1);
+  assert.deepEqual(SuperagentStateSchema.parse(f.state).pendingActions[0].response, response);
+  const saved = SuperagentStateSchema.parse(JSON.parse(JSON.stringify(f.state)));
+  f = fixture(t);
+  Object.assign(f.state, saved);
+  f.ticket = f.state.tickets[0];
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  f.controls.respond = async () => { throw new Error("connection lost"); };
+  const count = f.state.triggers.length;
+  await f.engine.recover();
+  await f.engine.actionChain;
+  assert.equal(f.state.triggers.length, count, "restored requests are not announced again");
+  f.controls.respond = async (id, { requestId }) => {
+    f.controls.pendingPermissions.set(id, f.controls.pendingPermissions.get(id).filter(request => request.id !== requestId));
+  };
+  await f.engine.runPendingAction(f.state.pendingActions[0].id);
+  assert.equal(f.state.pendingActions.length, 0);
+  assert.equal(f.ticket.pendingRequests.length, 0);
+});
+
+test("exhausted permission responses return an error to the Router with the original IM destination", async t => {
+  const f = fixture(t);
+  const origin = { channel: "qq", chatId: "chat", senderId: "user" };
+  f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user", text: "original task", origin, status: "delivered", receivedAt: oldTime });
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  f.controls.respond = async () => { throw new Error("response rejected"); };
+  f.controls.verdict = { actions: [{ action: "respond", ticketId: "ticket", requestId: toolRequest.id, response: { behavior: "allow" } }] };
+  await f.engine.runEval("thread");
+  const actionId = f.state.pendingActions[0].id;
+  await f.engine.runPendingAction(actionId);
+  await f.engine.runPendingAction(actionId);
+  assert.equal(f.calls.permissionResponses.length, 3);
+  assert.equal(f.state.pendingActions.length, 0);
+  const failure = f.state.triggers.find(trigger => trigger.sender === "engine");
+  assert.match(failure.text, /response rejected/);
+  assert.deepEqual(failure.origin, origin);
+  assert.equal(f.ticket.pendingRequests.length, 1);
+});
+
+test("replaying an already answered response never answers a different request", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  f.state.pendingActions.push({ id: "respond-old", threadId: "thread", decisionId: "old", kind: "respond", ticketId: "ticket",
+    workerAgentId: "worker", requestId: "already-answered", response: { behavior: "allow" }, attempts: 0, createdAt: oldTime });
+  await f.engine.runPendingAction("respond-old");
+  assert.equal(f.calls.permissionResponses.length, 0);
+  assert.equal(f.state.pendingActions.length, 0);
+  assert.equal(f.ticket.pendingRequests[0].id, questionRequest.id);
+});
+
+test("a persisted response is bound to the original Worker session", async t => {
+  const f = fixture(t);
+  f.state.pendingActions.push({ id: "respond-old", threadId: "thread", decisionId: "old", kind: "respond", ticketId: "ticket",
+    workerAgentId: "retired-worker", requestId: toolRequest.id, response: { behavior: "allow" }, attempts: 0, createdAt: oldTime });
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.runPendingAction("respond-old");
+  assert.equal(f.calls.permissionResponses.length, 0);
+  assert.equal(f.state.pendingActions[0].attempts, 1);
+});
+
+test("steer cannot implicitly dismiss a pending request and allow needs an actual question answer", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  const result = await f.engine.applySteer("ticket", "continue", "steer");
+  assert.equal(result.ok, false);
+  assert.match(result.error, /use respond/);
+  assert.equal(f.calls.sends.length, 0);
+  f.controls.verdict = { actions: [{ action: "respond", ticketId: "ticket", requestId: questionRequest.id, response: { behavior: "allow" } }] };
+  await f.engine.runEval("thread");
+  assert.equal(f.calls.permissionResponses.length, 0);
+  assert.equal(f.ticket.pendingRequests.length, 1);
+});
+
+test("Worker session-control tool permissions stay automatic and do not notify the Router", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [{ ...toolRequest, name: "mcp__superagent__superagent_handback" }]);
+  assert.equal(await f.engine.syncWorkerPermissions("worker"), false);
+  assert.equal(f.state.triggers.length, 0);
+});
+
+test("a denied permission reaches the exact request and leaves other concurrent requests pending", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest, questionRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  const response = { behavior: "deny", message: "Do not run this command" };
+  f.controls.verdict = { actions: [{ action: "respond", ticketId: "ticket", requestId: toolRequest.id, response }] };
+  await f.engine.runEval("thread");
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response }]);
+  assert.deepEqual(f.ticket.pendingRequests, [questionRequest]);
+  assert.equal(f.calls.watches.length, 0, "one answered request does not spin on another pending request");
+});
+
+test("a malformed answer or selected action is held for correction without dismissing the request", async t => {
+  for (const response of [
+    { behavior: "allow", updatedInput: { answers: {} } },
+    { behavior: "allow", updatedInput: { answers: { Color: " " } } },
+    { behavior: "allow", updatedInput: { answers: { WrongHeader: "Blue" } } },
+    { behavior: "allow", selectedActionId: "unknown", updatedInput: { answers: { Color: "Blue" } } },
+  ]) {
+    const f = fixture(t);
+    f.controls.pendingPermissions.set("worker", [questionRequest]);
+    await f.engine.syncWorkerPermissions("worker");
+    f.controls.verdict = { actions: [{ action: "respond", ticketId: "ticket", requestId: questionRequest.id, response }] };
+    await f.engine.runEval("thread");
+    assert.equal(f.calls.permissionResponses.length, 0);
+    assert.equal(f.ticket.pendingRequests.length, 1);
+    assert.equal(f.state.pendingActions.length, 1);
+  }
+});
+
+test("canceling a blocked Worker clears its pending input and cannot answer a future Worker", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  await f.engine.cancelTicket("ticket");
+  assert.equal(f.ticket.pendingRequests.length, 0);
+  assert.equal(f.state.triggers.find(trigger => trigger.workerRequest).status, "filtered");
+  const result = await f.engine.dispatch({ threadId: "thread", task: "new task" });
+  assert.equal(result.directDelivered, false);
+  assert.equal(f.calls.permissionResponses.length, 0);
+});
 
 test("ACP Router bootstraps once, then sends only new events without duplicate user text", async (t) => {
   const f = fixture(t, "waiting");
