@@ -480,7 +480,7 @@ function ProfileCard({
         error={errors.name ?? null}
       />
       <ModelPicker
-        label="Provider / Model"
+        label="Provider"
         hint="从 daemon 的 provider 快照中选取;清单缺失时可手动填写 provider/model"
         placeholder="codex/gpt-5.5"
         value={row.provider}
@@ -643,18 +643,13 @@ function ModelPicker({
 
   const { provider, model } = splitProviderModel(value);
   const entry = snapshot.entries.find((candidate) => candidate.provider === provider);
-  // 已禁用的 provider 排在可用项之后但保留可选:选定后引擎启动校验会给出明确报错,
-  // 过滤掉则用户无法预先配置(旧手填也允许)。
-  const offered = [
-    ...snapshot.entries.filter((candidate) => candidate.enabled !== false),
-    ...snapshot.entries.filter((candidate) => candidate.enabled === false),
-  ];
+  // 已禁用的 provider 不进候选;仅当已保存的值正好是它时保留为选项,避免被静默清掉。
+  const enabled = snapshot.entries.filter((candidate) => candidate.enabled !== false);
   const providerOptions = [
     ...(emptyLabel ? [{ label: emptyLabel, value: "" }] : []),
-    ...offered.map((candidate) => ({ label: providerOptionLabel(candidate), value: candidate.provider })),
-    // 当前值里的 provider 完全不在快照(自定义或已卸载):保留为选项,避免显示成裸 id。
-    ...(provider && !snapshot.entries.some((candidate) => candidate.provider === provider)
-      ? [{ label: `${provider}(本机未提供)`, value: provider }]
+    ...enabled.map((candidate) => ({ label: providerOptionLabel(candidate), value: candidate.provider })),
+    ...(provider && !enabled.some((candidate) => candidate.provider === provider)
+      ? [{ label: entry ? providerOptionLabel(entry) : `${provider}(本机未提供)`, value: provider }]
       : []),
   ];
   const models = entry?.models ?? [];
@@ -682,7 +677,7 @@ function ModelPicker({
           error={error ?? null}
         />
         <SettingsSelect
-          label={`${label} · Model`}
+          label="Model"
           hint="选项 id 原样写入;「默认模型」只填 provider,由引擎按快照取默认"
           value={model}
           options={modelOptions}
@@ -710,7 +705,7 @@ function ModelPicker({
         // key 绑定 provider,切换 provider 时输入框重挂载以显示新值。
         <SettingsInput
           key={provider}
-          label={`${label} · Model(手动)`}
+          label="Model(手动)"
           hint={entry ? "该 provider 未上报模型清单,手动填写 provider 或 provider/model" : "该 provider 不在 daemon 清单中,请手动核对"}
           placeholder={placeholder ?? "provider/model"}
           initialValue={value}
