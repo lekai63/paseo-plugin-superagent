@@ -23,7 +23,7 @@ import {
   type SuperagentSettingsValues,
   type WorkerProfile,
 } from "../shared/settings";
-import { STATE_QUERY_KEY } from "./query";
+import { STATE_QUERY_KEY, useProviderSnapshot, type ProviderSnapshotEntry } from "./query";
 import { fontSize, radius, space } from "./ui";
 
 /**
@@ -48,6 +48,9 @@ type StringKey = { [K in keyof Values]: Values[K] extends string ? K : never }[k
 type BooleanKey = { [K in keyof Values]: Values[K] extends boolean ? K : never }[keyof Values];
 
 const NUMBER_KEYS = Object.keys(NUMBER_LIMITS) as NumberSettingKey[];
+
+/** 模型选择的候选来源:daemon provider 快照的加载状态。 */
+type SnapshotState = { entries?: ProviderSnapshotEntry[]; status: "loading" | "ready" | "error" };
 
 function toForm(values: Values): FormValues {
   const form = { ...values } as Record<string, unknown>;
@@ -215,8 +218,16 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
       ? `Worker 无法启动:${cached.workingDirIssue}`
       : null;
 
+  // 模型候选:与引擎启动校验同源的 provider 快照;不可用时模型字段回退为手工输入。
+  const providers = useProviderSnapshot(hostId);
+  const snapshot: SnapshotState = providers.isError
+    ? { status: "error" }
+    : providers.data
+      ? { status: "ready", entries: providers.data }
+      : { status: "loading" };
+
   const disabled = settings.saving;
-  const field = { form, errors, set, disabled };
+  const field = { form, errors, set, disabled, snapshot };
 
   let saveLabel = "所有修改已保存";
   if (dirty) saveLabel = errorCount > 0 ? `有 ${errorCount} 处需要修正` : "有未保存的修改";
@@ -256,17 +267,17 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
 
       <SettingsSection
         title="模型"
-        info="格式为 provider 或 provider/model,model id 以 `paseo provider models <provider>` 列出的为准。留空时按 claude → codex → opencode 的顺序自动选择。"
+        info="从 daemon 的 provider 快照中选取(与启动时校验同源),model id 由选项原样带入,不会出现反斜杠转义或笔误;清单读取失败时可退回手工填写 provider 或 provider/model。留空时按 claude → codex → opencode 的顺序自动选择。"
       >
         <SettingsCard>
-          <TextField
+          <ModelField
             {...field}
             name="routerProvider"
             label="Router"
             hint="只做评估与分派,轻量模型即可"
-            placeholder="自动选择"
+            emptyLabel="自动选择"
           />
-          <TextField
+          <ModelField
             {...field}
             name="workerProvider"
             label={form.workerProfiles.length > 0 ? "默认 Worker" : "Worker"}
@@ -275,7 +286,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
                 ? "Router 没有指定档位、或指定的档位不存在时使用"
                 : "负责真正干活,建议用最强的模型"
             }
-            placeholder="自动选择"
+            emptyLabel="自动选择"
           />
           {form.workerProfiles.length > 0 ? (
             <TextField
@@ -331,6 +342,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             row={row}
             errors={profileErrors[index] ?? {}}
             disabled={disabled}
+            snapshot={snapshot}
             onChange={setProfile}
             onRemove={removeProfile}
           />
@@ -373,7 +385,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
           <SwitchField {...field} name="watchdogEnabled" label="LLM 看门狗" hint="独立巡检会话,判断 Worker 的进展与偏离" />
           {form.watchdogEnabled ? (
             <>
-              <TextField {...field} name="watchdogProvider" label="看门狗模型" hint="留空沿用 Router 的模型" placeholder="同 Router" />
+              <ModelField {...field} name="watchdogProvider" label="看门狗模型" hint="留空沿用 Router 的模型" emptyLabel="同 Router" />
               <TextField {...field} name="watchdogIntervalMin" label="巡检间隔(分钟)" hint="没有进行中的任务、也没有异常时跳过,不调用模型" />
             </>
           ) : null}
@@ -445,12 +457,14 @@ function ProfileCard({
   row,
   errors,
   disabled,
+  snapshot,
   onChange,
   onRemove,
 }: {
   row: ProfileRow;
   errors: ProfileErrors[number];
   disabled: boolean;
+  snapshot: SnapshotState;
   onChange(key: string, field: ProfileField, value: string): void;
   onRemove(key: string): void;
 }) {
@@ -465,14 +479,16 @@ function ProfileCard({
         disabled={disabled}
         error={errors.name ?? null}
       />
-      <SettingsInput
+      <ModelPicker
         label="Provider / Model"
-        hint="格式同上方的 Worker,保存后启动时会对照 provider 列表校验"
+        hint="从 daemon 的 provider 快照中选取;清单缺失时可手动填写 provider/model"
         placeholder="codex/gpt-5.5"
-        initialValue={row.provider}
-        onChangeText={(value) => onChange(row.key, "provider", value)}
+        value={row.provider}
+        onChange={(value) => onChange(row.key, "provider", value)}
         disabled={disabled}
         error={errors.provider ?? null}
+        snapshot={snapshot}
+        emptyLabel="未选择"
       />
       <SettingsInput
         label="工作目录(可选)"
@@ -508,6 +524,7 @@ interface FieldContext {
   errors: FormErrors;
   set<K extends keyof FormValues>(key: K, value: FormValues[K]): void;
   disabled: boolean;
+  snapshot: SnapshotState;
 }
 
 type TextFieldName = StringKey | NumberSettingKey;
@@ -560,6 +577,172 @@ function SwitchField({
       value={form[name]}
       onValueChange={(value) => set(name, value)}
       disabled={disabled}
+    />
+  );
+}
+
+/** 与引擎 resolveProviderSelection 相同的切分:第一个 `/` 前是 provider,其余是 model id。 */
+function splitProviderModel(value: string): { provider: string; model: string } {
+  const separator = value.indexOf("/");
+  if (separator === -1) return { provider: value.trim(), model: "" };
+  return { provider: value.slice(0, separator).trim(), model: value.slice(separator + 1).trim() };
+}
+
+function providerOptionLabel(entry: ProviderSnapshotEntry): string {
+  const label = entry.label && entry.label !== entry.provider ? `${entry.label}(${entry.provider})` : entry.provider;
+  if (entry.enabled === false) return `${label}(已禁用)`;
+  if (entry.status === "loading") return `${label}(加载中)`;
+  if (entry.status !== "ready") return `${label}(未就绪)`;
+  return label;
+}
+
+/**
+ * Provider/Model 选择:候选来自 daemon 的 provider 快照,选中即写入准确 id
+ * (含 ACP 系带反斜杠的 model id),从根本上避免手填转义错误。
+ * 快照不可用、或所选 provider 没有上报模型清单时,回退为手工输入。
+ */
+function ModelPicker({
+  label,
+  hint,
+  placeholder,
+  error,
+  disabled,
+  value,
+  onChange,
+  snapshot,
+  emptyLabel,
+}: {
+  label: string;
+  hint?: string;
+  placeholder?: string;
+  error?: string | null;
+  disabled?: boolean;
+  value: string;
+  onChange(value: string): void;
+  snapshot: SnapshotState;
+  /** 留空选项的文案;不提供时字段必填。 */
+  emptyLabel?: string;
+}) {
+  if (!snapshot.entries) {
+    const stateHint =
+      snapshot.status === "loading"
+        ? "正在读取 daemon 的 provider 列表,也可先手动填写 provider 或 provider/model"
+        : "无法读取 daemon 的 provider 列表(连接异常或版本过旧),请手动填写 provider 或 provider/model";
+    return (
+      <SettingsInput
+        label={label}
+        hint={hint ? `${hint};${stateHint}` : stateHint}
+        placeholder={placeholder ?? "provider/model"}
+        initialValue={value}
+        onChangeText={onChange}
+        disabled={disabled}
+        error={error ?? null}
+      />
+    );
+  }
+
+  const { provider, model } = splitProviderModel(value);
+  const entry = snapshot.entries.find((candidate) => candidate.provider === provider);
+  // 已禁用的 provider 排在可用项之后但保留可选:选定后引擎启动校验会给出明确报错,
+  // 过滤掉则用户无法预先配置(旧手填也允许)。
+  const offered = [
+    ...snapshot.entries.filter((candidate) => candidate.enabled !== false),
+    ...snapshot.entries.filter((candidate) => candidate.enabled === false),
+  ];
+  const providerOptions = [
+    ...(emptyLabel ? [{ label: emptyLabel, value: "" }] : []),
+    ...offered.map((candidate) => ({ label: providerOptionLabel(candidate), value: candidate.provider })),
+    // 当前值里的 provider 完全不在快照(自定义或已卸载):保留为选项,避免显示成裸 id。
+    ...(provider && !snapshot.entries.some((candidate) => candidate.provider === provider)
+      ? [{ label: `${provider}(本机未提供)`, value: provider }]
+      : []),
+  ];
+  const models = entry?.models ?? [];
+  if (provider && models.length > 0) {
+    const fallback = models.find((candidate) => candidate.isDefault) ?? models[0];
+    const modelOptions = [
+      { label: `默认模型(${fallback.label || fallback.id})`, value: "" },
+      ...models.map((candidate) => ({ label: candidate.label || candidate.id, value: candidate.id })),
+      ...(model && !models.some((candidate) => candidate.id === model)
+        ? [{ label: `${model}(不在清单)`, value: model }]
+        : []),
+    ];
+    return (
+      <>
+        <SettingsSelect
+          label={label}
+          hint={hint}
+          value={provider}
+          options={providerOptions}
+          onValueChange={(next) => {
+            // 重选同一 provider 时保留原值,不清掉已选 model。
+            if (next !== provider) onChange(next);
+          }}
+          disabled={disabled}
+          error={error ?? null}
+        />
+        <SettingsSelect
+          label={`${label} · Model`}
+          hint="选项 id 原样写入;「默认模型」只填 provider,由引擎按快照取默认"
+          value={model}
+          options={modelOptions}
+          onValueChange={(next) => onChange(next ? `${provider}/${next}` : provider)}
+          disabled={disabled}
+        />
+      </>
+    );
+  }
+  return (
+    <>
+      <SettingsSelect
+        label={label}
+        hint={hint}
+        value={provider}
+        options={providerOptions}
+        onValueChange={(next) => {
+          if (next !== provider) onChange(next);
+        }}
+        disabled={disabled}
+        error={error ?? null}
+      />
+      {provider ? (
+        // 该 provider 未上报模型清单(如部分 ACP/custom provider):手填完整值。
+        // key 绑定 provider,切换 provider 时输入框重挂载以显示新值。
+        <SettingsInput
+          key={provider}
+          label={`${label} · Model(手动)`}
+          hint={entry ? "该 provider 未上报模型清单,手动填写 provider 或 provider/model" : "该 provider 不在 daemon 清单中,请手动核对"}
+          placeholder={placeholder ?? "provider/model"}
+          initialValue={value}
+          onChangeText={onChange}
+          disabled={disabled}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function ModelField({
+  form,
+  errors,
+  set,
+  disabled,
+  snapshot,
+  name,
+  label,
+  hint,
+  emptyLabel,
+}: FieldContext & { name: StringKey; label: string; hint?: string; emptyLabel?: string }) {
+  return (
+    <ModelPicker
+      label={label}
+      hint={hint}
+      value={form[name]}
+      onChange={(value) => set(name, value)}
+      disabled={disabled}
+      error={errors[name] ?? null}
+      snapshot={snapshot}
+      emptyLabel={emptyLabel}
     />
   );
 }

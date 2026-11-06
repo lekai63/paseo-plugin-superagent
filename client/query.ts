@@ -20,6 +20,32 @@ export function useSuperagentState(hostId: string, input: RpcInput<typeof supera
   });
 }
 
+/** 设置页的模型选择候选:与引擎启动校验同源的 daemon provider 快照。 */
+export interface ProviderSnapshotEntry {
+  provider: string;
+  status: string;
+  enabled?: boolean;
+  label?: string;
+  models?: ReadonlyArray<{ id: string; label: string; isDefault?: boolean }> | null;
+}
+
+/**
+ * 读取 daemon 的 provider 快照(含每个 provider 的 model 清单),供设置页下拉选择。
+ * 快照不可用(旧 daemon、连接异常)时调用方回退为手工输入;列表较稳,缓存一分钟。
+ */
+export function useProviderSnapshot(hostId: string) {
+  const paseo = usePaseo();
+  return useQuery({
+    queryKey: ["superagent", "providers", hostId],
+    queryFn: async (): Promise<ProviderSnapshotEntry[]> => {
+      await paseo.providers.waitForReady({ timeoutMs: 8000 }).catch(() => undefined);
+      return (await paseo.providers.snapshot()).entries;
+    },
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
 export interface AgentObservation {
   agent?: ExecutionAgent | null;
   loading: boolean;
