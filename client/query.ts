@@ -32,14 +32,30 @@ export interface ProviderSnapshotEntry {
 /**
  * 读取 daemon 的 provider 快照(含每个 provider 的 model 清单),供设置页下拉选择。
  * 快照不可用(旧 daemon、连接异常)时调用方回退为手工输入;列表较稳,缓存一分钟。
+ *
+ * App 宿主共享给插件的连接以 wire 模式取快照:`entries` 为空数组,内容在
+ * `compactSnapshot.entries` 里(宿主自家 UI 自行展开)。compact 条目保留了
+ * provider/status/enabled/label 与模型清单(缺 thinking 详情,选择器用不到),
+ * 这里归一成同一种形状。wire 模式下 SDK 的 waitForReady 看到的 entries 恒为空、
+ * 不会等待发现,故自行按 status 轮询。
  */
 export function useProviderSnapshot(hostId: string) {
   const paseo = usePaseo();
   return useQuery({
     queryKey: ["superagent", "providers", hostId],
     queryFn: async (): Promise<ProviderSnapshotEntry[]> => {
-      await paseo.providers.waitForReady({ timeoutMs: 8000 }).catch(() => undefined);
-      return (await paseo.providers.snapshot()).entries;
+      const read = async () => {
+        const payload = await paseo.providers.snapshot();
+        return payload.entries.length > 0
+          ? ([...payload.entries] as ProviderSnapshotEntry[])
+          : ((payload.compactSnapshot?.entries ?? []) as ProviderSnapshotEntry[]);
+      };
+      let entries = await read();
+      for (let attempt = 0; attempt < 6 && entries.some((entry) => entry.status === "loading"); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        entries = await read();
+      }
+      return entries;
     },
     staleTime: 60_000,
     retry: 1,
