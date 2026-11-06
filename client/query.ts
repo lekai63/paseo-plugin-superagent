@@ -27,6 +27,7 @@ export interface ProviderSnapshotEntry {
   enabled?: boolean;
   label?: string;
   models?: ReadonlyArray<{ id: string; label: string; isDefault?: boolean }> | null;
+  modes?: ReadonlyArray<{ id: string; label: string; description?: string }> | null;
 }
 
 /**

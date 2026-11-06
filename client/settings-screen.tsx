@@ -60,7 +60,7 @@ function toForm(values: Values): FormValues {
 }
 
 function stripProfileKeys(rows: ProfileRow[]): WorkerProfile[] {
-  return rows.map(({ name, provider, description, workingDir }) => ({ name, provider, description, workingDir }));
+  return rows.map(({ name, provider, modeId, description, workingDir }) => ({ name, provider, modeId, description, workingDir }));
 }
 
 /** 草稿比较用的序列化:去掉档位行的本地 key。 */
@@ -178,14 +178,23 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
   }, [base.revision, dirty, form, settings.revision, settings.values]);
 
   const set = useCallback(<K extends keyof FormValues>(key: K, value: FormValues[K]) => {
-    setForm((current) => ({ ...current, [key]: value }));
+    setForm((current) => ({
+      ...current,
+      [key]: value,
+      ...(key === "workerProvider" && splitProviderModel(current.workerProvider).provider !== splitProviderModel(String(value)).provider
+        ? { workerModeId: "" } : {}),
+    }));
   }, []);
 
   const nextProfileKey = useRef(0);
   const setProfile = useCallback((key: string, field: ProfileField, value: string) => {
     setForm((current) => ({
       ...current,
-      workerProfiles: current.workerProfiles.map((row) => (row.key === key ? { ...row, [field]: value } : row)),
+      workerProfiles: current.workerProfiles.map((row) => (row.key === key ? {
+        ...row, [field]: value,
+        ...(field === "provider" && splitProviderModel(row.provider).provider !== splitProviderModel(value).provider
+          ? { modeId: "" } : {}),
+      } : row)),
     }));
   }, []);
   const addProfile = useCallback(() => {
@@ -193,7 +202,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
     const key = `new-${nextProfileKey.current}`;
     setForm((current) => ({
       ...current,
-      workerProfiles: [...current.workerProfiles, { key, name: "", provider: "", description: "", workingDir: "" }],
+      workerProfiles: [...current.workerProfiles, { key, name: "", provider: "", modeId: "", description: "", workingDir: "" }],
     }));
   }, []);
   const removeProfile = useCallback((key: string) => {
@@ -288,6 +297,15 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             }
             emptyLabel="自动选择"
           />
+          <ModePicker
+            label="Worker 模式(可选)"
+            providerSelection={form.workerProvider}
+            value={form.workerModeId}
+            onChange={(value) => set("workerModeId", value)}
+            disabled={disabled}
+            error={errors.workerModeId ?? null}
+            snapshot={snapshot}
+          />
           {form.workerProfiles.length > 0 ? (
             <TextField
               {...field}
@@ -334,7 +352,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
 
       <SettingsSection
         title="Worker 档位"
-        info="让不同类型的任务跑在不同模型上。Router 派发时按用途说明为每个任务选一个档位;没有选、或选了不存在的名字时用默认 Worker。Router 只能使用这里列出的模型。档位可另填专属工作目录,让该档位的 Worker 在别的仓库或目录里工作。"
+        info="让不同类型的任务跑在不同模型上。Router 派发时按用途说明为每个任务选一个档位;没有选、或选了不存在的名字时用默认 Worker。每个档位可选择该 provider 提供的模式,留空沿用 Paseo 默认,也可另填专属工作目录。模式和模型的修改用于新建或重试的 Worker。"
       >
         {form.workerProfiles.map((row, index) => (
           <ProfileCard
@@ -490,6 +508,15 @@ function ProfileCard({
         snapshot={snapshot}
         emptyLabel="未选择"
       />
+      <ModePicker
+        label="模式(可选)"
+        providerSelection={row.provider}
+        value={row.modeId}
+        onChange={(value) => onChange(row.key, "modeId", value)}
+        disabled={disabled}
+        error={errors.modeId ?? null}
+        snapshot={snapshot}
+      />
       <SettingsInput
         label="工作目录(可选)"
         hint="该档位 Worker 的专属基础目录,可与上方的工作目录不同;留空使用它。共享目录隔离时以其档位名单独建工作区"
@@ -594,6 +621,51 @@ function providerOptionLabel(entry: ProviderSnapshotEntry): string {
   if (entry.status === "loading") return `${label}(加载中)`;
   if (entry.status !== "ready") return `${label}(未就绪)`;
   return label;
+}
+
+/** 模式来自 provider 快照(含 ACP 动态发现),空值始终表示不传 modeId。 */
+function ModePicker({
+  label, providerSelection, value, onChange, disabled, error, snapshot,
+}: {
+  label: string;
+  providerSelection: string;
+  value: string;
+  onChange(value: string): void;
+  disabled: boolean;
+  error: string | null;
+  snapshot: SnapshotState;
+}) {
+  const { provider } = splitProviderModel(providerSelection);
+  const entry = snapshot.entries?.find((candidate) => candidate.provider === provider);
+  const modes = entry?.modes ?? [];
+  const selected = modes.find((mode) => mode.id === value);
+  const options = [
+    { label: "Paseo 默认", value: "" },
+    ...modes.map((mode) => ({ label: mode.label || mode.id, value: mode.id })),
+    ...(value && !selected ? [{ label: `${value}(已保存,当前未上报)`, value }] : []),
+  ];
+  const hint = !provider
+    ? "先选择 Worker 的 provider,即可查看其模式;留空沿用 Paseo 默认"
+    : snapshot.status === "loading" || entry?.status === "loading"
+      ? "正在读取该 provider 的模式;留空沿用 Paseo 默认"
+      : snapshot.status === "error"
+        ? "无法读取模式列表,可稍后重新打开设置;已保存的选择会保留"
+        : value && !selected
+          ? "该 provider 当前未上报已保存的模式,请核对或选择 Paseo 默认"
+          : modes.length === 0
+            ? "该 provider 未上报可选模式,留空沿用 Paseo 默认"
+            : selected?.description ?? "留空沿用 Paseo 默认;所选模式用于新建或重试的 Worker";
+  return (
+    <SettingsSelect
+      label={label}
+      hint={hint}
+      value={value}
+      options={options}
+      onValueChange={onChange}
+      disabled={disabled}
+      error={error}
+    />
+  );
 }
 
 /**

@@ -40,6 +40,8 @@ export const WorkerProfileSchema = z.object({
     .refine((name) => name !== DEFAULT_WORKER_PROFILE, `"${DEFAULT_WORKER_PROFILE}" 留给默认 Worker`),
   /** `provider` 或 `provider/model`,与 workerProvider 同一格式。 */
   provider: z.string().trim().min(1, "需要填写 provider").max(120),
+  /** provider 上报的模式 ID;留空不覆盖 Paseo 默认模式。 */
+  modeId: z.string().trim().max(500).default(""),
   /** 用途说明:原样写进 Router 提示词,是 Router 选档位的唯一依据。 */
   description: z.string().trim().min(1, "需要写明用途,Router 靠它选择档位").max(300),
   /** 该档位 Worker 的专属基础目录(绝对路径);留空用全局 workingDir。 */
@@ -72,7 +74,7 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 9,
+  version: 10,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
@@ -80,6 +82,8 @@ export const superagentSettings = defineSettings({
     routerInstructions: z.string().trim().max(MAX_ROUTER_INSTRUCTIONS_CHARS).default(""),
     /** 默认 Worker:dispatch 未指定档位(或档位不存在)时使用。 */
     workerProvider: z.string().trim().max(120).default(""),
+    /** 默认 Worker 的模式;留空不覆盖 Paseo 默认模式。 */
+    workerModeId: z.string().trim().max(500).default(""),
     /** 默认 Worker 的用途说明;配置了其他档位时写进 Router 提示词,留空用通用说明。 */
     workerDescription: z.string().trim().max(300).default(""),
     /** 默认 Worker 之外的具名档位,Router 按用途说明为每个 dispatch 选择。 */
@@ -179,7 +183,8 @@ export const superagentSettings = defineSettings({
    * v5 → v6:新增 routerInstructions,留空沿用内置编排规则;
    * v6 → v7:档位新增 workingDir(留空 = 全局 workingDir),旧档位由默认值补齐;
    * v7 → v8:新增 feishuObserve/qqObserve(默认关闭,行为与旧版一致);
-   * v8 → v9:新增 speculativeEnabled 与 watchdog* 字段(默认关闭,行为与旧版一致)。
+   * v8 → v9:新增 speculativeEnabled 与 watchdog* 字段(默认关闭,行为与旧版一致);
+   * v9 → v10:新增 workerModeId 与档位 modeId(留空沿用 Paseo 默认模式)。
    */
   migrate: (values) => values,
 });

@@ -12,6 +12,23 @@ export interface ProviderSnapshotEntryLike {
   enabled?: boolean;
   status?: string;
   models?: ReadonlyArray<{ id: string; isDefault?: boolean }> | null;
+  modes?: ReadonlyArray<{ id: string }> | null;
+}
+
+/** 显式模式必须属于当前 provider;清单尚未就绪时交由 Paseo 在创建时校验。 */
+export function validateProviderMode(
+  selection: string,
+  modeId: string,
+  entries: ReadonlyArray<ProviderSnapshotEntryLike>,
+): void {
+  if (!modeId) return;
+  const provider = selection.split("/", 1)[0];
+  const entry = entries.find((candidate) => candidate.provider === provider);
+  if (!entry || entry.status !== "ready" || !entry.modes) return;
+  if (!entry.modes.some((mode) => mode.id === modeId)) {
+    const available = entry.modes.map((mode) => mode.id).join(", ") || "none";
+    throw new Error(`mode "${modeId}" is not offered by provider "${provider}" (available: ${available})`);
+  }
 }
 
 export type ProviderSelectionResult =

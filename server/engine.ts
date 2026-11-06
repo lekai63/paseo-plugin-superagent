@@ -47,7 +47,7 @@ import {
 } from "./router";
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
 import type { ToolOutcome } from "./mcp-server";
-import { matchWorkerProfile, resolveProviderSelection } from "./providers";
+import { matchWorkerProfile, resolveProviderSelection, validateProviderMode } from "./providers";
 import { ensureSharedWorkspace } from "./workspace";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 import { splitImReply } from "./im-replies";
@@ -1336,8 +1336,9 @@ export class SuperagentEngine {
 
     let workerProvider: string;
     let profile: string | null;
+    let modeId: string;
     try {
-      ({ provider: workerProvider, profile } = await this.resolveTicketWorker(ticket, state));
+      ({ provider: workerProvider, profile, modeId } = await this.resolveTicketWorker(ticket, state));
       if (!workerProvider) throw new Error("no available provider for workers");
     } catch (error) {
       // 设置错误时 Ticket 保持 pending(看门狗会重试),但把原因写进 lastError 供 UI 展示。
@@ -1385,6 +1386,7 @@ export class SuperagentEngine {
       const workingDirIssue = await this.inspectDir(workingDir);
       if (workingDirIssue) throw new Error(workingDirIssue);
       const env: WorkerLaunchEnv = {
+        modeId,
         workingDir,
         isolation: this.settingsValues.workerIsolation,
         instructionFiles: await this.instructionFilesFor(workingDir),
@@ -2555,8 +2557,8 @@ export class SuperagentEngine {
       routerAgentId: state.kv.routerAgentId ?? null,
       routerProvider: state.kv.routerProvider || settings.routerProvider || null,
       workerProvider: state.kv.workerProvider || settings.workerProvider || null,
-      workerProfiles: settings.workerProfiles.map(({ name, provider, description, workingDir }) => ({
-        name, provider, description, workingDir: workingDir ?? "",
+      workerProfiles: settings.workerProfiles.map(({ name, provider, modeId, description, workingDir }) => ({
+        name, provider, modeId: modeId ?? "", description, workingDir: workingDir ?? "",
       })),
       threads,
       recentResults: recentResults(state, options.threadId),
@@ -2696,17 +2698,40 @@ export class SuperagentEngine {
   private async resolveTicketWorker(
     ticket: Ticket,
     state: SuperagentState,
-  ): Promise<{ provider: string; profile: string | null }> {
+  ): Promise<{ provider: string; profile: string | null; modeId: string }> {
     const name = ticket.profile;
     if (name) {
       const profile = this.settingsValues.workerProfiles.find((candidate) => candidate.name === name);
       if (profile) {
         const provider = await this.validateConfiguredProvider(`worker profile "${name}"`, profile.provider);
-        return { provider, profile: name };
+        const modeId = await this.validateWorkerMode(`worker profile "${name}"`, provider, profile.modeId);
+        return { provider, profile: name, modeId };
       }
       console.warn(`[superagent] worker profile "${name}" of ticket ${ticket.id} is no longer configured; using the default worker`);
     }
-    return { provider: await this.resolveProvider("worker", state.kv.workerProvider), profile: null };
+    const provider = await this.resolveProvider("worker", state.kv.workerProvider);
+    const modeId = await this.validateWorkerMode("worker", provider, this.settingsValues.workerModeId);
+    return { provider, profile: null, modeId };
+  }
+
+  private async validateWorkerMode(role: string, provider: string, configured: string | undefined): Promise<string> {
+    const modeId = configured?.trim() ?? "";
+    if (!modeId) return "";
+    let entries;
+    try {
+      const paseo = this.requirePaseo();
+      await paseo.providers.waitForReady({ timeoutMs: 20_000 }).catch(() => undefined);
+      entries = (await paseo.providers.snapshot()).entries;
+    } catch (error) {
+      console.error("[superagent] provider snapshot unavailable; using configured mode as-is", error);
+      return modeId;
+    }
+    try {
+      validateProviderMode(provider, modeId, entries);
+    } catch (error) {
+      throw new Error(`${role} mode setting is invalid: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return modeId;
   }
 
   /**

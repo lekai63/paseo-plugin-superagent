@@ -103,6 +103,19 @@ test("v6 profiles without a working directory parse with an empty default", () =
   assert.equal(explicit.workerProfiles[0].workingDir, "/srv/other");
 });
 
+test("v9 settings keep Paseo defaults and explicit provider modes round-trip", () => {
+  const legacy = superagentSettings.schema.parse({ workerProfiles: PROFILES });
+  assert.equal(legacy.workerModeId, "");
+  assert.deepEqual(legacy.workerProfiles.map((profile) => profile.modeId), ["", ""]);
+  const configured = superagentSettings.schema.parse({
+    workerModeId: " full-access ",
+    workerProfiles: [{ ...PROFILES[0], modeId: " ask " }],
+  });
+  assert.equal(configured.workerModeId, "full-access");
+  assert.equal(configured.workerProfiles[0].modeId, "ask");
+  assert.deepEqual(superagentSettings.schema.parse(configured), configured);
+});
+
 test("ticket lines name a non-default profile so the Router can steer and retry knowingly", () => {
   const state = emptyState();
   const ticket = (id, status, profile) => ({

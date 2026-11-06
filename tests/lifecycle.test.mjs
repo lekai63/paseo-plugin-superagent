@@ -10,10 +10,11 @@ import { SETTINGS_DEFAULTS } from "../shared/settings.ts";
 const oldTime = "2020-01-01T00:00:00.000Z";
 
 const PROVIDER_ENTRIES = [
-  { provider: "codex", enabled: true, status: "ready", models: [{ id: "test", isDefault: true }] },
+  { provider: "codex", enabled: true, status: "ready", models: [{ id: "test", isDefault: true }], modes: [{ id: "full-access" }, { id: "read-only" }] },
   {
     provider: "zcode-acp", enabled: true, status: "ready",
     models: [{ id: "builtin:plan\\GLM-Flash", isDefault: false }, { id: "builtin:plan\\GLM", isDefault: true }],
+    modes: [{ id: "ask" }, { id: "agent" }],
   },
 ];
 
@@ -1446,6 +1447,51 @@ test("retry keeps the ticket's profile and picks up that profile's current model
   assert.equal(f.ticket.profile, "glm");
   assert.equal(f.calls.workerCreates[0].config.provider, "zcode-acp/builtin:plan\\GLM-Flash");
   assert.equal(f.ticket.provider, "zcode-acp/builtin:plan\\GLM-Flash");
+});
+
+test("default worker mode is applied before its initial prompt, while blank leaves Paseo in control", async (t) => {
+  for (const modeId of ["", "full-access"]) {
+    const f = fixture(t, "pending");
+    f.values.workerModeId = modeId;
+    await f.engine.startTicket("ticket");
+    const options = f.calls.workerCreates[0];
+    assert.ok(options.prompt, "mode and initial task are sent in the same create request");
+    if (modeId) assert.equal(options.config.modeId, modeId);
+    else assert.equal(Object.hasOwn(options.config, "modeId"), false);
+  }
+});
+
+test("named profiles use only their own mode and retry picks up mode changes", async (t) => {
+  const f = fixture(t, "pending");
+  f.ticket.profile = "glm";
+  f.values.workerModeId = "full-access";
+  f.values.workerProfiles = [{ ...WORKER_PROFILES[0], modeId: "ask" }];
+  await f.engine.startTicket("ticket");
+  assert.equal(f.calls.workerCreates[0].config.modeId, "ask");
+  f.values.workerProfiles = [{ ...WORKER_PROFILES[0], modeId: "agent" }];
+  f.ticket.status = "failed";
+  await f.engine.retryTicket("ticket");
+  assert.equal(f.calls.workerCreates[1].config.modeId, "agent");
+  f.values.workerProfiles = [{ ...WORKER_PROFILES[0], modeId: "" }];
+  f.ticket.status = "failed";
+  await f.engine.retryTicket("ticket");
+  assert.equal(Object.hasOwn(f.calls.workerCreates[2].config, "modeId"), false, "blank profile mode does not inherit the default worker mode");
+  f.values.workerProfiles = [];
+  f.ticket.status = "failed";
+  await f.engine.retryTicket("ticket");
+  assert.equal(f.calls.workerCreates[3].config.provider, "codex/test");
+  assert.equal(f.calls.workerCreates[3].config.modeId, "full-access");
+});
+
+test("unsupported worker modes remain pending with a useful error and create no workspace", async (t) => {
+  const f = fixture(t, "pending");
+  f.values.workerProfiles = [{ ...WORKER_PROFILES[0], modeId: "full-access" }];
+  f.ticket.profile = "glm";
+  await assert.rejects(f.engine.startTicket("ticket"), /worker profile "glm" mode setting is invalid: mode "full-access" is not offered by provider "zcode-acp"/);
+  assert.equal(f.ticket.status, "pending");
+  assert.match(f.ticket.lastError, /available: ask, agent/);
+  assert.equal(f.calls.creates, 0);
+  assert.equal(f.calls.workerCreates.length, 0);
 });
 
 test("a profile removed from settings launches on the default worker", async (t) => {

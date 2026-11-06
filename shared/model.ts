@@ -447,6 +447,7 @@ export const SuperagentSnapshotSchema = z.object({
   /** 默认 Worker 之外的具名档位(设置原样,UI 展示用)。 */
   workerProfiles: z.array(z.object({
     name: z.string(), provider: z.string(), description: z.string(),
+    modeId: z.string().default(""),
     /** 档位专属基础目录;空 = 用全局 workingDir。 */
     workingDir: z.string().default(""),
   })),

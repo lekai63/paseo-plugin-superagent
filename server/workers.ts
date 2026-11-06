@@ -137,6 +137,8 @@ export interface WorkerLaunch {
 
 /** Ticket 的执行环境:引擎按档位解析基础目录后传入,launchWorker 不再读全局设置。 */
 export interface WorkerLaunchEnv {
+  /** 显式选择的 provider 模式;省略时由 Paseo 决定。 */
+  modeId?: string;
   /** 该 Ticket 的基础目录(档位专属目录已覆盖全局 workingDir)。 */
   workingDir: string;
   isolation: "worktree" | "shared";
@@ -214,6 +216,7 @@ export async function launchWorker(
     const agent = await workspace.agents.create({
       config: {
         provider,
+        ...(env.modeId ? { modeId: env.modeId } : {}),
         systemPrompt: WORKER_SYSTEM_PROMPT,
       },
       title: ticket.title,

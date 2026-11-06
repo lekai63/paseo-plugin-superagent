@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resolveProviderSelection } from "../server/providers.ts";
+import { resolveProviderSelection, validateProviderMode } from "../server/providers.ts";
 
 const entries = [
   { provider: "codex", enabled: true, status: "ready", models: [{ id: "gpt", isDefault: false }, { id: "gpt-mini", isDefault: true }] },
@@ -47,4 +47,20 @@ test("unknown and disabled providers are rejected", () => {
 test("providers without a model list accept an explicit model but need one", () => {
   assert.deepEqual(resolveProviderSelection("custom/m", entries), { selection: "custom/m" });
   assert.match(resolveProviderSelection("custom", entries).error, /reports no models \(status: loading\)/);
+});
+
+test("mode IDs are validated against their own provider, including ACP URL IDs", () => {
+  const acpMode = "https://agentclientprotocol.com/protocol/session-modes#agent";
+  const catalog = [
+    { provider: "codex", status: "ready", modes: [{ id: "full-access" }] },
+    { provider: "custom-acp", status: "ready", modes: [{ id: "ask" }, { id: acpMode }] },
+    { provider: "no-modes", status: "ready", modes: [] },
+  ];
+  assert.doesNotThrow(() => validateProviderMode("custom-acp/model/with/slashes", acpMode, catalog));
+  assert.doesNotThrow(() => validateProviderMode("codex/gpt", "", catalog));
+  assert.throws(() => validateProviderMode("custom-acp/model", "full-access", catalog), /not offered by provider "custom-acp"/);
+  assert.throws(() => validateProviderMode("no-modes/model", "ask", catalog), /available: none/);
+  // Discovery failures must not silently replace the explicitly selected mode with a default.
+  assert.doesNotThrow(() => validateProviderMode("custom-acp/model", acpMode, []));
+  assert.doesNotThrow(() => validateProviderMode("custom-acp/model", acpMode, [{ provider: "custom-acp", status: "loading", modes: [] }]));
 });
