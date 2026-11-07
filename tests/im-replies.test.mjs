@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { splitImReply } from "../server/im-replies.ts";
+import { deliveryPreview, splitImReply } from "../server/im-replies.ts";
 import { RouterVerdictSchema } from "../shared/model.ts";
 
 const body = (part) => part.replace(/^\[\d+\/\d+\] /, "");
@@ -41,4 +41,11 @@ test("Router verdicts accept full replies beyond the former 2000 character limit
   const text = "完整长答复".repeat(900);
   const verdict = RouterVerdictSchema.parse({ actions: [{ action: "reply", reply: text }] });
   assert.equal(verdict.actions[0].reply, text);
+});
+
+test("delivery preview shows the reply text without part numbers or markdown", () => {
+  assert.equal(deliveryPreview(["[1/3] ## 统计完成\n\n**zip** 定位在 `审批`", "[2/3] x"]), "统计完成 zip 定位在 审批");
+  assert.equal(deliveryPreview(["短回复"]), "短回复");
+  assert.equal(deliveryPreview([]), "");
+  assert.equal(deliveryPreview(["字".repeat(200)], 10), `${"字".repeat(9)}…`);
 });

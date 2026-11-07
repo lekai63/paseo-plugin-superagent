@@ -50,7 +50,7 @@ import type { ToolOutcome } from "./mcp-server";
 import { matchWorkerProfile, resolveProviderSelection, validateProviderMode } from "./providers";
 import { ensureSharedWorkspace } from "./workspace";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
-import { splitImReply } from "./im-replies";
+import { deliveryPreview, splitImReply } from "./im-replies";
 import {
   composePatrolPrompt,
   composeWatchdogInstructions,
@@ -2580,6 +2580,7 @@ export class SuperagentEngine {
         .map(({ id, threadId, origin, parts, nextPart, status, updatedAt }) => ({
           id, threadId, title: state.threads.find((thread) => thread.id === threadId)?.title ?? threadId,
           channel: origin.channel, totalParts: parts.length, nextPart, status, updatedAt,
+          preview: deliveryPreview(parts),
         })),
       engine: {
         running: this.primed,

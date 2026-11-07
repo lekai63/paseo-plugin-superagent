@@ -26,7 +26,7 @@ import {
   superagentUnsubscribeRpc,
 } from "../shared/rpc";
 import { superagentSettings, type SuperagentSettingsValues } from "../shared/settings";
-import { ImDeliveries } from "./im-deliveries";
+import { ImDeliveries, undeliveredReplies } from "./im-deliveries";
 import { STATE_QUERY_KEY, useExecutionAgents, type AgentObservation } from "./query";
 import { Button, ConfirmButton, ExpandableText, GroupLabel, StatTile, StatusBadge, fontSize, radius, space, toneColor, type Theme } from "./ui";
 
@@ -425,6 +425,7 @@ function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSi
   const running = snapshot.tickets.filter((ticket) => ACTIVE_TICKET_STATUSES.includes(ticket.status)).length;
   const failed = snapshot.tickets.filter((ticket) => ticket.status === "failed").length;
   const pending = snapshot.threads.reduce((sum, thread) => sum + thread.pendingTriggers, 0);
+  const undelivered = undeliveredReplies(snapshot.imDeliveries);
   const sources = ["App", settings?.agentToolEnabled ? "Agent 委派" : null,
     ...CHANNEL_LABELS.map(([key, label]) => (settings?.[key] ? label : null))].filter(Boolean).join(" · ");
   let watchdog = "引擎未启动,首次派发或任意 agent 事件后自动启动";
@@ -479,10 +480,10 @@ function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSi
           </View>
         ) : null}
       </View>
-      {snapshot.imDeliveries.length ? (
+      {undelivered.length ? (
         <View style={{ gap: space.sm }}>
-          <GroupLabel theme={theme}>IM 答复投递</GroupLabel>
-          <ImDeliveries deliveries={snapshot.imDeliveries} theme={theme} hostId={hostId} />
+          <GroupLabel theme={theme}>{`未送达的 IM 回复(${undelivered.length})`}</GroupLabel>
+          <ImDeliveries deliveries={undelivered} theme={theme} hostId={hostId} />
         </View>
       ) : null}
       <View style={{ flexDirection: "row" }}>

@@ -620,6 +620,7 @@ test("IM sends the complete long reply sequentially and persists each acknowledg
   const snapshot = f.engine.snapshot();
   assert.equal(snapshot.imDeliveries[0].totalParts, sent.length);
   assert.equal(snapshot.imDeliveries[0].status, "sent");
+  assert.match(snapshot.imDeliveries[0].preview, /^完整结果👩🏽‍💻 完整结果/, "the card names the reply itself, not the thread");
   assert.doesNotMatch(JSON.stringify(snapshot.imDeliveries), /private-webhook|origin|parts"/);
 });
 

@@ -467,6 +467,8 @@ export const SuperagentSnapshotSchema = z.object({
     id: z.string(), threadId: z.string(), title: z.string(), channel: TriggerOriginSchema.shape.channel,
     totalParts: z.number().int(), nextPart: z.number().int(), status: ImDeliverySchema.shape.status,
     updatedAt: z.string(),
+    /** 回复正文的一行摘要:卡片靠它认出是哪条回复(线程标题是首条消息,认不出)。 */
+    preview: z.string().default(""),
   })).default([]),
   /** 包含已关闭线程的最近结果,供 Router 区域展示。 */
   recentResults: z.array(ThreadResultSchema.extend({

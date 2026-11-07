@@ -1,3 +1,6 @@
+import { markdownPreview } from "../shared/labels";
+import { truncate } from "../shared/model";
+
 /** 完整答复按单条上限拆分;正文不删字,序号也计入上限。 */
 export function splitImReply(text: string, maxChars: number): string[] {
   if (!Number.isInteger(maxChars) || maxChars < 16) throw new Error("IM message limit must be at least 16");
@@ -40,4 +43,10 @@ function splitBodies(text: string, limit: number): string[] {
     offset = end;
   }
   return chunks;
+}
+
+/** 投递卡片上的回复摘要:取首段正文,去掉分段序号与 Markdown 记号,压成一行。 */
+export function deliveryPreview(parts: string[], max = 120): string {
+  const first = (parts[0] ?? "").replace(/^\[\d+\/\d+\] /, "");
+  return truncate(markdownPreview(first).replace(/\s+/g, " ").trim(), max);
 }
