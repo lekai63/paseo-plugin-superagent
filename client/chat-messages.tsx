@@ -14,7 +14,9 @@ import { userStatusLabel, type ChatEntry } from "../shared/chat";
 import { TYPE, bubbleStep, proseScale, type ProseScale, type TypeStep } from "../shared/design";
 import { elapsedTime } from "../shared/execution";
 import { fullStamp, markdownPreview, stampTime, ticketStatusLabel, type Tone } from "../shared/labels";
+import { extractFileLinks, type FileLink } from "../shared/file-links";
 import { RunningDot } from "./agent-status-icon";
+import { FileLinkList, FilePreviewModal } from "./file-preview";
 import { useHostAppearance } from "./host-font-scale";
 import { ROW, TOUCH, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
 import { CopyButton, TextButton, toneColor } from "./ui";
@@ -24,7 +26,8 @@ import { CopyButton, TextButton, toneColor } from "./ui";
  * - 内容列宽度跟随 Paseo 的「内容宽度」设置(默认 820),正文字号跟随「正文字号」;
  * - 用户消息是右侧气泡(圆角 16、右上 2 的尾角、正文字号 × 1.4 行高),下方一行放用户来源、
  *   状态、时间与复制;
- * - Router 答复是不带气泡的宿主 Markdown,下方是页脚:复制 · Router · 时间;
+ * - Router 答复是不带气泡的宿主 Markdown,下方是页脚:复制 · Router · 时间;答复里链接到的
+ *   文件列在正文与页脚之间,点开在弹层里预览(宿主 Markdown 在插件页面里点文件链接没有反应);
  * - 编排动作是 26/28 高的紧凑行:已结束的行退后一步(次要色),运行中的行用 statusDot 蓝色运行点(与标签栏的运行环同色),
  *   悬停/展开时恢复全对比;展开的正文是一块无边框的浅底。连续的行只隔 4。
  */
@@ -80,6 +83,7 @@ function gapBefore(previous: ChatEntry | undefined, entry: ChatEntry): number {
 }
 
 export function ChatMessages({
+  hostId,
   entries,
   tickets,
   pendingText,
@@ -90,6 +94,8 @@ export function ChatMessages({
   metrics,
   empty,
 }: {
+  /** 文件预览按宿主隔离缓存。 */
+  hostId: string;
   entries: ChatEntry[];
   tickets: Ticket[];
   /** 已提交、尚未出现在快照里的消息。 */
@@ -119,60 +125,64 @@ export function ChatMessages({
     scrollRef.current?.scrollToEnd({ animated: true });
   }, [pendingText]);
 
+  const [preview, setPreview] = useState<FileLink | null>(null);
   const ticketById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
   const hasContent = entries.length > 0 || Boolean(pendingText);
   const last = entries[entries.length - 1];
   return (
-    <ScrollView
-      ref={scrollRef}
-      style={{ flex: 1 }}
-      contentContainerStyle={{ flexGrow: 1, paddingHorizontal: metrics.compact ? space.md : space.lg, paddingTop: space.lg, paddingBottom: space.lg }}
-      onScroll={onScroll}
-      scrollEventThrottle={64}
-      onContentSizeChange={() => {
-        if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
-      }}
-      // 输入框增高、窗口变矮时视口变小:跟随状态下保持贴底。
-      onLayout={() => {
-        if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
-      }}
-      keyboardShouldPersistTaps="handled"
-    >
-      <View style={{ flexGrow: 1, width: "100%", maxWidth: metrics.maxWidth, alignSelf: "center", paddingHorizontal: space.sm }}>
-        {!hasContent && empty ? empty : null}
-        {truncated ? (
-          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: space.xs + 2, marginBottom: space.lg }}>
-            <Icon name="History" size={12} color={theme.colors.foregroundMuted} />
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight }}>
-              只显示最近的记录
-            </Text>
-          </View>
-        ) : null}
-        {entries.map((entry, index) => (
-          <View key={entry.id} style={{ marginTop: gapBefore(entries[index - 1], entry) }}>
-            {entry.kind === "user" ? (
-              <UserBubble entry={entry} theme={theme} metrics={metrics} />
-            ) : entry.kind === "reply" ? (
-              <ReplyMessage text={entry.text} at={entry.at} theme={theme} metrics={metrics} />
-            ) : (
-              <EventRow entry={entry} ticket={entry.ticketId ? ticketById.get(entry.ticketId) : undefined} theme={theme}
-                navigation={navigation} metrics={metrics} />
-            )}
-          </View>
-        ))}
-        {pendingText ? (
-          <View style={{ marginTop: entries.length ? (last?.kind === "user" ? space.sm : space.xl) : 0 }}>
-            <UserBubble entry={{ kind: "user", id: "pending", at: "", text: pendingText, source: null, status: "pending", note: null }}
-              theme={theme} metrics={metrics} sending />
-          </View>
-        ) : null}
-        {working ? (
-          <View style={{ marginTop: !hasContent ? 0 : pendingText || last?.kind === "user" ? space.lg : last?.kind === "event" ? ROW.stackGap : space.md }}>
-            <WorkingRow working={working} theme={theme} metrics={metrics} />
-          </View>
-        ) : null}
-      </View>
-    </ScrollView>
+    <>
+      <ScrollView
+        ref={scrollRef}
+        style={{ flex: 1 }}
+        contentContainerStyle={{ flexGrow: 1, paddingHorizontal: metrics.compact ? space.md : space.lg, paddingTop: space.lg, paddingBottom: space.lg }}
+        onScroll={onScroll}
+        scrollEventThrottle={64}
+        onContentSizeChange={() => {
+          if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+        }}
+        // 输入框增高、窗口变矮时视口变小:跟随状态下保持贴底。
+        onLayout={() => {
+          if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+        }}
+        keyboardShouldPersistTaps="handled"
+      >
+        <View style={{ flexGrow: 1, width: "100%", maxWidth: metrics.maxWidth, alignSelf: "center", paddingHorizontal: space.sm }}>
+          {!hasContent && empty ? empty : null}
+          {truncated ? (
+            <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: space.xs + 2, marginBottom: space.lg }}>
+              <Icon name="History" size={12} color={theme.colors.foregroundMuted} />
+              <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight }}>
+                只显示最近的记录
+              </Text>
+            </View>
+          ) : null}
+          {entries.map((entry, index) => (
+            <View key={entry.id} style={{ marginTop: gapBefore(entries[index - 1], entry) }}>
+              {entry.kind === "user" ? (
+                <UserBubble entry={entry} theme={theme} metrics={metrics} />
+              ) : entry.kind === "reply" ? (
+                <ReplyMessage text={entry.text} at={entry.at} theme={theme} metrics={metrics} onOpenFile={setPreview} />
+              ) : (
+                <EventRow entry={entry} ticket={entry.ticketId ? ticketById.get(entry.ticketId) : undefined} theme={theme}
+                  navigation={navigation} metrics={metrics} onOpenFile={setPreview} />
+              )}
+            </View>
+          ))}
+          {pendingText ? (
+            <View style={{ marginTop: entries.length ? (last?.kind === "user" ? space.sm : space.xl) : 0 }}>
+              <UserBubble entry={{ kind: "user", id: "pending", at: "", text: pendingText, source: null, status: "pending", note: null }}
+                theme={theme} metrics={metrics} sending />
+            </View>
+          ) : null}
+          {working ? (
+            <View style={{ marginTop: !hasContent ? 0 : pendingText || last?.kind === "user" ? space.lg : last?.kind === "event" ? ROW.stackGap : space.md }}>
+              <WorkingRow working={working} theme={theme} metrics={metrics} />
+            </View>
+          ) : null}
+        </View>
+      </ScrollView>
+      <FilePreviewModal target={preview} hostId={hostId} theme={theme} onClose={() => setPreview(null)} />
+    </>
   );
 }
 
@@ -230,13 +240,22 @@ function UserBubble({ entry, theme, metrics, sending = false }: { entry: UserEnt
 
 // ---------------------------------------------------------------- Router
 
-/** Router 的答复:无气泡的宿主 Markdown,下方一行页脚(better-paseo 的 turn footer):复制 · Router · 时间。 */
-function ReplyMessage({ text, at, theme, metrics }: { text: string; at: string; theme: Theme; metrics: ChatMetrics }) {
+/**
+ * Router 的答复:无气泡的宿主 Markdown,链接到的文件列成一排可预览的药丸,下方一行页脚
+ * (better-paseo 的 turn footer):复制 · Router · 时间。
+ */
+function ReplyMessage({ text, at, theme, metrics, onOpenFile }: {
+  text: string;
+  at: string;
+  theme: Theme;
+  metrics: ChatMetrics;
+  onOpenFile(link: FileLink): void;
+}) {
   const muted = theme.colors.foregroundMuted;
   const footerText = { fontSize: TYPE.button.size, lineHeight: TYPE.button.lineHeight, color: muted };
   return (
     <View>
-      <Markdown>{text}</Markdown>
+      <MarkdownWithFiles text={text} theme={theme} metrics={metrics} onOpenFile={onOpenFile} />
       <View style={{ flexDirection: "row", alignItems: "center", minHeight: 24, marginTop: space.sm, gap: space.sm }}>
         <View style={{ marginHorizontal: -space.xs }}>
           <CopyButton theme={theme} text={text} label="复制答复" touch={metrics.touch} />
@@ -360,12 +379,13 @@ function RowMeta({ children, color, label }: { children: string; color: string; 
 const ACTIVE_STATUSES: readonly Ticket["status"][] = ["launching", "running"];
 
 /** 编排动作行:派发、汇报、转向等;点开看正文。派发行跟随 Ticket 的实时状态,可打开 Worker 会话。 */
-function EventRow({ entry, ticket, theme, navigation, metrics }: {
+function EventRow({ entry, ticket, theme, navigation, metrics, onOpenFile }: {
   entry: EventEntry;
   ticket?: Ticket;
   theme: Theme;
   navigation: Navigation;
   metrics: ChatMetrics;
+  onOpenFile(link: FileLink): void;
 }) {
   const tokens = chatTokens(theme);
   const [open, setOpen] = useState(false);
@@ -430,7 +450,7 @@ function EventRow({ entry, ticket, theme, navigation, metrics }: {
         <View style={{ marginTop: 2, marginBottom: space.xs + 2, paddingVertical: space.sm, paddingHorizontal: space.md, borderRadius: radius.block,
           backgroundColor: tokens.row.body }}>
           {entry.markdown ? (
-            <Markdown>{entry.text}</Markdown>
+            <MarkdownWithFiles text={entry.text} theme={theme} metrics={metrics} onOpenFile={onOpenFile} />
           ) : (
             <Text selectable style={{ color: tokens.row.bodyText, fontSize: metrics.prose.secondary.size, lineHeight: metrics.prose.secondary.lineHeight }}>
               {entry.text}
@@ -445,6 +465,26 @@ function EventRow({ entry, ticket, theme, navigation, metrics }: {
             {preview}
           </Text>
         </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+/** 宿主 Markdown 正文,下方列出其中链接到的文件(Router 答复与展开的汇报共用)。 */
+function MarkdownWithFiles({ text, theme, metrics, onOpenFile }: {
+  text: string;
+  theme: Theme;
+  metrics: ChatMetrics;
+  onOpenFile(link: FileLink): void;
+}) {
+  const links = useMemo(() => extractFileLinks(text), [text]);
+  return (
+    <View>
+      <Markdown>{text}</Markdown>
+      {links.length ? (
+        <View style={{ marginTop: space.sm }}>
+          <FileLinkList links={links} theme={theme} touch={metrics.touch} onOpen={onOpenFile} />
+        </View>
       ) : null}
     </View>
   );

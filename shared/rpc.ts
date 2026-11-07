@@ -3,6 +3,7 @@ import { defineRpc } from "@getpaseo/plugin";
 import { SuperagentSnapshotSchema } from "./model";
 import { ChatTabsSchema } from "./chat-tabs";
 import { WeixinStatusSchema } from "./weixin";
+import { FilePreviewSchema } from "./file-preview";
 
 /**
  * 插件 RPC 契约。客户端经 `useRpc` 调用;server/handlers.ts 实现同名 handler。
@@ -87,6 +88,16 @@ export const superagentSaveChatTabsRpc = defineRpc({
   name: "superagent.save_chat_tabs",
   input: ChatTabsSchema,
   output: OkSchema,
+});
+
+/**
+ * 对话页的文件预览:Router 答复里链接到的任意绝对路径,只读。文本截断到上限,图片以
+ * base64 返回,目录列出条目;读不了时返回 kind=error 而不是抛错。
+ */
+export const superagentReadFileRpc = defineRpc({
+  name: "superagent.read_file",
+  input: z.object({ path: z.string().min(1).max(4096) }),
+  output: FilePreviewSchema,
 });
 
 /** 微信通道状态:已保存的 bot 账号、扫码登录进度与长轮询状态。 */

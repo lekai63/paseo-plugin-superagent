@@ -22,11 +22,13 @@ import { WecomSource } from "./server/wecom";
 import { WeixinSource } from "./server/weixin";
 import { WeixinLogin } from "./server/weixin-login";
 import { clearWeixinAccount, loadWeixinAccount, saveWeixinAccount } from "./server/weixin-store";
+import { readFilePreview } from "./server/file-preview";
 import {
   superagentCancelTicketRpc,
   superagentCloseThreadRpc,
   superagentDispatchRpc,
   superagentForceEvalRpc,
+  superagentReadFileRpc,
   superagentRetryTicketRpc,
   superagentRetryImDeliveryRpc,
   superagentSaveChatTabsRpc,
@@ -67,6 +69,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(superagentCloseThreadRpc, withPrime(createCloseThreadHandler(engine)));
   server.handle(superagentUnsubscribeRpc, withPrime(createUnsubscribeHandler(engine)));
   server.handle(superagentSaveChatTabsRpc, withPrime(createSaveChatTabsHandler(engine)));
+  // 对话页文件预览:只读、限量,不经引擎。
+  server.handle(superagentReadFileRpc, withPrime((input) => readFilePreview(input.path)));
 
   // agent 委派与编排工具入口:插件自持的本地 MCP endpoint(按调用方角色下发
   // superagent_dispatch / Router 回读 / Worker 退订转回工具),经 session_open 注入。

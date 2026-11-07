@@ -242,6 +242,7 @@ export function ChatScreen(props: ChatScreenProps) {
         ) : (
           <ChatMessages
             key={threadId ?? "new"}
+            hostId={host.id}
             entries={entries}
             tickets={detailData?.tickets ?? []}
             pendingText={pendingText}
