@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
+  Platform,
   Pressable,
   Text,
   View,
@@ -16,7 +17,8 @@ import { elapsedTime } from "../shared/execution";
 import { fullStamp, markdownPreview, stampTime, ticketStatusLabel, type Tone } from "../shared/labels";
 import { extractFileLinks, type FileLink } from "../shared/file-links";
 import { RunningDot } from "./agent-status-icon";
-import { FileLinkList, FilePreviewModal } from "./file-preview";
+import { FileLinkList, FilePreviewModal, useFileKinds, type FileTarget } from "./file-preview";
+import type { FileKind } from "../shared/file-preview";
 import { useHostAppearance } from "./host-font-scale";
 import { ROW, TOUCH, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
 import { CopyButton, TextButton, toneColor } from "./ui";
@@ -125,7 +127,19 @@ export function ChatMessages({
     scrollRef.current?.scrollToEnd({ animated: true });
   }, [pendingText]);
 
-  const [preview, setPreview] = useState<FileLink | null>(null);
+  const [preview, setPreview] = useState<FileTarget | null>(null);
+  // 答复与汇报正文里的文件链接:按条目提取一次,类型一次查完。
+  const fileLinks = useMemo(() => {
+    const byEntry = new Map<string, FileLink[]>();
+    for (const entry of entries) {
+      if (entry.kind !== "reply" && !(entry.kind === "event" && entry.markdown && entry.text)) continue;
+      const links = extractFileLinks(entry.text ?? "");
+      if (links.length) byEntry.set(entry.id, links);
+    }
+    return byEntry;
+  }, [entries]);
+  const fileKinds = useFileKinds(hostId, fileLinks.values());
+  const files = (id: string): FileRefs => ({ links: fileLinks.get(id) ?? NO_LINKS, kinds: fileKinds, onOpen: setPreview });
   const ticketById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
   const hasContent = entries.length > 0 || Boolean(pendingText);
   const last = entries[entries.length - 1];
@@ -161,10 +175,10 @@ export function ChatMessages({
               {entry.kind === "user" ? (
                 <UserBubble entry={entry} theme={theme} metrics={metrics} />
               ) : entry.kind === "reply" ? (
-                <ReplyMessage text={entry.text} at={entry.at} theme={theme} metrics={metrics} onOpenFile={setPreview} />
+                <ReplyMessage text={entry.text} at={entry.at} theme={theme} metrics={metrics} files={files(entry.id)} />
               ) : (
                 <EventRow entry={entry} ticket={entry.ticketId ? ticketById.get(entry.ticketId) : undefined} theme={theme}
-                  navigation={navigation} metrics={metrics} onOpenFile={setPreview} />
+                  navigation={navigation} metrics={metrics} files={files(entry.id)} />
               )}
             </View>
           ))}
@@ -181,7 +195,8 @@ export function ChatMessages({
           ) : null}
         </View>
       </ScrollView>
-      <FilePreviewModal target={preview} hostId={hostId} theme={theme} onClose={() => setPreview(null)} />
+      <FilePreviewModal target={preview} hostId={hostId} theme={theme} wide={Platform.OS === "web" && !metrics.compact}
+        onClose={() => setPreview(null)} />
     </>
   );
 }
@@ -244,18 +259,18 @@ function UserBubble({ entry, theme, metrics, sending = false }: { entry: UserEnt
  * Router 的答复:无气泡的宿主 Markdown,链接到的文件列成一排可预览的药丸,下方一行页脚
  * (better-paseo 的 turn footer):复制 · Router · 时间。
  */
-function ReplyMessage({ text, at, theme, metrics, onOpenFile }: {
+function ReplyMessage({ text, at, theme, metrics, files }: {
   text: string;
   at: string;
   theme: Theme;
   metrics: ChatMetrics;
-  onOpenFile(link: FileLink): void;
+  files: FileRefs;
 }) {
   const muted = theme.colors.foregroundMuted;
   const footerText = { fontSize: TYPE.button.size, lineHeight: TYPE.button.lineHeight, color: muted };
   return (
     <View>
-      <MarkdownWithFiles text={text} theme={theme} metrics={metrics} onOpenFile={onOpenFile} />
+      <MarkdownWithFiles text={text} theme={theme} metrics={metrics} files={files} />
       <View style={{ flexDirection: "row", alignItems: "center", minHeight: 24, marginTop: space.sm, gap: space.sm }}>
         <View style={{ marginHorizontal: -space.xs }}>
           <CopyButton theme={theme} text={text} label="复制答复" touch={metrics.touch} />
@@ -379,13 +394,13 @@ function RowMeta({ children, color, label }: { children: string; color: string; 
 const ACTIVE_STATUSES: readonly Ticket["status"][] = ["launching", "running"];
 
 /** 编排动作行:派发、汇报、转向等;点开看正文。派发行跟随 Ticket 的实时状态,可打开 Worker 会话。 */
-function EventRow({ entry, ticket, theme, navigation, metrics, onOpenFile }: {
+function EventRow({ entry, ticket, theme, navigation, metrics, files }: {
   entry: EventEntry;
   ticket?: Ticket;
   theme: Theme;
   navigation: Navigation;
   metrics: ChatMetrics;
-  onOpenFile(link: FileLink): void;
+  files: FileRefs;
 }) {
   const tokens = chatTokens(theme);
   const [open, setOpen] = useState(false);
@@ -450,7 +465,7 @@ function EventRow({ entry, ticket, theme, navigation, metrics, onOpenFile }: {
         <View style={{ marginTop: 2, marginBottom: space.xs + 2, paddingVertical: space.sm, paddingHorizontal: space.md, borderRadius: radius.block,
           backgroundColor: tokens.row.body }}>
           {entry.markdown ? (
-            <MarkdownWithFiles text={entry.text} theme={theme} metrics={metrics} onOpenFile={onOpenFile} />
+            <MarkdownWithFiles text={entry.text} theme={theme} metrics={metrics} files={files} />
           ) : (
             <Text selectable style={{ color: tokens.row.bodyText, fontSize: metrics.prose.secondary.size, lineHeight: metrics.prose.secondary.lineHeight }}>
               {entry.text}
@@ -470,20 +485,28 @@ function EventRow({ entry, ticket, theme, navigation, metrics, onOpenFile }: {
   );
 }
 
+/** 条目正文里链接到的文件、它们的类型与打开预览的回调。 */
+interface FileRefs {
+  links: readonly FileLink[];
+  kinds: Readonly<Record<string, FileKind>> | undefined;
+  onOpen(target: FileTarget): void;
+}
+
+const NO_LINKS: readonly FileLink[] = [];
+
 /** 宿主 Markdown 正文,下方列出其中链接到的文件(Router 答复与展开的汇报共用)。 */
-function MarkdownWithFiles({ text, theme, metrics, onOpenFile }: {
+function MarkdownWithFiles({ text, theme, metrics, files }: {
   text: string;
   theme: Theme;
   metrics: ChatMetrics;
-  onOpenFile(link: FileLink): void;
+  files: FileRefs;
 }) {
-  const links = useMemo(() => extractFileLinks(text), [text]);
   return (
     <View>
       <Markdown>{text}</Markdown>
-      {links.length ? (
-        <View style={{ marginTop: space.sm }}>
-          <FileLinkList links={links} theme={theme} touch={metrics.touch} onOpen={onOpenFile} />
+      {files.links.length ? (
+        <View style={{ marginTop: space.md - 2 }}>
+          <FileLinkList links={files.links} kinds={files.kinds} theme={theme} touch={metrics.touch} onOpen={files.onOpen} />
         </View>
       ) : null}
     </View>

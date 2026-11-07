@@ -6,88 +6,152 @@ import { Icon, Loading, Markdown, Modal } from "@getpaseo/plugin/client/ui";
 import { basename, extensionOf, lineSuffix, type FileLink } from "../shared/file-links";
 import {
   FILE_PREVIEW_LIMITS,
-  IMAGE_MIME_TYPES,
   MARKDOWN_EXTENSIONS,
+  MAX_STAT_PATHS,
   codeLanguage,
   excerptLines,
   fenceCode,
+  fileIconName,
   formatBytes,
+  type FileKind,
   type FilePreview,
 } from "../shared/file-preview";
 import { fullStamp } from "../shared/labels";
-import { superagentReadFileRpc } from "../shared/rpc";
+import { superagentReadFileRpc, superagentStatFilesRpc } from "../shared/rpc";
 import { TYPE } from "../shared/design";
-import { HAIRLINE, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
-import { Button, CopyButton, Notice, TextButton } from "./ui";
+import { HAIRLINE, WEB_TRANSITION, chatTokens, hueTokens, radius, space, type Theme } from "./theme-tokens";
+import { Button, CopyButton, Dialog, Notice, TextButton } from "./ui";
 
 /**
  * 答复里的文件链接与预览。宿主 Markdown 在插件页面里点文件链接没有反应(没有工作区
  * 上下文),所以把认出的文件列在答复下方,点开在弹层里预览:Markdown 按 Markdown 渲染,
  * 其余文本放进宿主的代码块(Web 端有高亮),图片直接显示,目录可以逐级点进去。
+ *
+ * 药丸按磁盘上的真实类型区分:目录是琥珀色文件夹图块,文件按扩展名换图标,已不存在的
+ * 划掉;类型由 superagent.stat_files 一次查完一段对话,查到之前按链接写法(结尾 /)猜。
+ * 桌面 Web 用自画的宽弹窗(宿主 Modal 桌面最宽 520),手机与平板仍用宿主弹层。
  */
 
 /** 打开预览的目标:答复里的链接,或在目录里点进去的条目。 */
 export type FileTarget = Pick<FileLink, "path" | "directory" | "lineStart" | "lineEnd">;
 
 function fileIcon(target: FileTarget): string {
-  if (target.directory) return "Folder";
-  const extension = extensionOf(target.path);
-  if (IMAGE_MIME_TYPES[extension]) return "Image";
-  if (MARKDOWN_EXTENSIONS.has(extension)) return "FileText";
-  return "File";
+  return fileIconName(extensionOf(target.path), target.directory ? "directory" : "file");
+}
+
+/** 目录图块与图标的琥珀色(与常见文件管理器的文件夹色一致)。 */
+function folderHue(theme: Theme) {
+  return hueTokens(theme, theme.colors.statusWarning, chatTokens(theme).card.background);
+}
+
+/** 查到的类型;没查到或读不到时按链接写法猜。 */
+export function resolveKind(link: Pick<FileLink, "directory">, kind: FileKind | undefined): FileKind | "guess-directory" {
+  if (kind && kind !== "unknown") return kind;
+  return link.directory ? "guess-directory" : "unknown";
 }
 
 // ---------------------------------------------------------------- chips
 
-/** 答复下方的文件条:细线药丸,图标 + 链接文字 + 行号;悬停显示完整路径(无障碍标签)。 */
-export function FileLinkList({ links, theme, touch, onOpen }: {
+/**
+ * 一段对话里所有文件链接的真实类型,一次 RPC 查完;新链接出现时重查,期间沿用上一次结果,
+ * 已有的药丸不闪。
+ */
+export function useFileKinds(hostId: string, linkLists: Iterable<readonly FileLink[]>): Readonly<Record<string, FileKind>> | undefined {
+  const stat = useRpc(superagentStatFilesRpc);
+  const paths = new Set<string>();
+  for (const links of linkLists) for (const link of links) paths.add(link.path);
+  const key = [...paths].sort().slice(0, MAX_STAT_PATHS).join("\n");
+  const query = useQuery({
+    queryKey: ["superagent", "file-kinds", hostId, key],
+    queryFn: () => stat({ paths: key.split("\n") }),
+    enabled: key.length > 0,
+    staleTime: 60_000,
+    retry: 1,
+    placeholderData: (previous) => previous,
+  });
+  return query.data?.kinds;
+}
+
+/** 答复下方的文件药丸:图块 + 名称 + 行号(目录为右箭头)。 */
+export function FileLinkList({ links, kinds, theme, touch, onOpen }: {
   links: readonly FileLink[];
+  kinds: Readonly<Record<string, FileKind>> | undefined;
   theme: Theme;
   touch: boolean;
-  onOpen(link: FileLink): void;
+  onOpen(target: FileTarget): void;
 }) {
   if (!links.length) return null;
   return (
-    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs + 2 }}>
-      {links.map((link) => (
-        <FileChip key={`${link.path}${lineSuffix(link)}`} link={link} theme={theme} touch={touch} onPress={() => onOpen(link)} />
-      ))}
+    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
+      {links.map((link) => {
+        const kind = resolveKind(link, kinds?.[link.path]);
+        const directory = kind === "directory" || kind === "guess-directory";
+        return (
+          <FileChip key={`${link.path}${lineSuffix(link)}`} link={link} kind={kind} theme={theme} touch={touch}
+            onPress={() => onOpen({ ...link, directory })} />
+        );
+      })}
     </View>
   );
 }
 
-function FileChip({ link, theme, touch, onPress }: { link: FileLink; theme: Theme; touch: boolean; onPress(): void }) {
+function FileChip({ link, kind, theme, touch, onPress }: {
+  link: FileLink;
+  kind: FileKind | "guess-directory";
+  theme: Theme;
+  touch: boolean;
+  onPress(): void;
+}) {
   const tokens = chatTokens(theme);
   const [hovered, setHovered] = useState(false);
+  const directory = kind === "directory" || kind === "guess-directory";
+  const missing = kind === "missing";
+  const folder = folderHue(theme);
   const suffix = lineSuffix(link);
+  const muted = theme.colors.foregroundMuted;
+  const iconColor = directory ? folder.text : missing ? tokens.row.icon : hovered ? theme.colors.foreground : muted;
+  const height = touch ? 34 : 30;
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`预览 ${link.path}${suffix}`}
+      accessibilityLabel={`${directory ? "打开目录" : "预览"} ${link.path}${suffix}${missing ? "(已不存在)" : ""}`}
       onPress={onPress}
       onHoverIn={() => setHovered(true)}
       onHoverOut={() => setHovered(false)}
-      hitSlop={touch ? 6 : 2}
+      hitSlop={touch ? 4 : 0}
       style={({ pressed }) => ({
         flexDirection: "row",
         alignItems: "center",
-        gap: space.xs + 1,
-        height: touch ? 28 : 24,
+        gap: space.sm,
+        height,
         maxWidth: "100%",
-        paddingHorizontal: space.sm,
-        borderRadius: radius.chip,
+        paddingLeft: (height - 22) / 2,
+        paddingRight: space.md - 2,
+        borderRadius: radius.block,
         borderWidth: HAIRLINE,
-        borderColor: tokens.card.pillBorder,
-        backgroundColor: pressed ? tokens.pressed : hovered ? tokens.card.controlHover : tokens.card.pillFill,
+        borderColor: tokens.card.buttonBorder,
+        backgroundColor: pressed ? tokens.card.controlHover : tokens.card.background,
+        opacity: missing && !hovered ? 0.75 : 1,
         ...WEB_TRANSITION,
+        ...(hovered ? tokens.card.shadowHover : tokens.card.shadow),
       })}
     >
-      <Icon name={fileIcon(link)} size={12} color={hovered ? theme.colors.foreground : theme.colors.foregroundMuted} />
-      <Text numberOfLines={1} style={{ flexShrink: 1, maxWidth: 280, color: theme.colors.foreground, fontSize: TYPE.caption.size,
-        lineHeight: TYPE.caption.lineHeight }}>
+      <View style={{ width: 22, height: 22, borderRadius: radius.chip, alignItems: "center", justifyContent: "center",
+        backgroundColor: directory ? folder.wash : tokens.card.pillFill }}>
+        <Icon name={fileIconName(extensionOf(link.path), kind)} size={14} color={iconColor} />
+      </View>
+      <Text numberOfLines={1} style={{ flexShrink: 1, maxWidth: 300, color: missing ? muted : theme.colors.foreground,
+        fontSize: TYPE.label.size, lineHeight: TYPE.label.lineHeight, fontWeight: "500",
+        textDecorationLine: missing ? "line-through" : "none" }}>
         {link.label}
-        {suffix ? <Text style={{ color: theme.colors.foregroundMuted, fontVariant: ["tabular-nums"] }}>{suffix}</Text> : null}
       </Text>
+      {suffix ? (
+        <Text style={{ flexShrink: 0, color: muted, fontSize: TYPE.meta.size, lineHeight: TYPE.meta.lineHeight, fontVariant: ["tabular-nums"] }}>
+          {suffix}
+        </Text>
+      ) : directory ? (
+        <Icon name="ChevronRight" size={13} color={muted} />
+      ) : null}
     </Pressable>
   );
 }
@@ -98,10 +162,12 @@ function FileChip({ link, theme, touch, onPress }: { link: FileLink; theme: Them
  * 预览弹层。target 变化时从它开始;在目录里点进去会压栈,「返回」出栈。关闭时保留最后的
  * 内容,让收起动画里不闪空。
  */
-export function FilePreviewModal({ target, hostId, theme, onClose }: {
+export function FilePreviewModal({ target, hostId, theme, wide, onClose }: {
   target: FileTarget | null;
   hostId: string;
   theme: Theme;
+  /** 桌面 Web:用自画的宽弹窗。 */
+  wide: boolean;
   onClose(): void;
 }) {
   const [stack, setStack] = useState<FileTarget[]>(() => (target ? [target] : []));
@@ -111,25 +177,32 @@ export function FilePreviewModal({ target, hostId, theme, onClose }: {
   const current = stack[stack.length - 1] ?? null;
   const open = Boolean(target);
   const title = current ? `${basename(current.path) || current.path}${lineSuffix(current)}` : "文件预览";
+  const icon = current ? (
+    <Icon name={fileIcon(current)} size={16} color={current.directory ? folderHue(theme).text : theme.colors.foregroundMuted} />
+  ) : undefined;
+  const body = current ? (
+    <PreviewBody
+      key={`${current.path}${lineSuffix(current)}`}
+      target={current}
+      hostId={hostId}
+      theme={theme}
+      enabled={open}
+      onBack={stack.length > 1 ? () => setStack((items) => items.slice(0, -1)) : null}
+      onOpen={(next) => setStack((items) => [...items, next])}
+    />
+  ) : null;
+  if (wide) {
+    return <Dialog theme={theme} title={title} icon={icon} open={open} onClose={onClose} maxWidth={WIDE_DIALOG_WIDTH}>{body}</Dialog>;
+  }
   return (
-    <Modal title={title} icon={current ? <Icon name={fileIcon(current)} size={16} color={theme.colors.foregroundMuted} /> : undefined}
-      open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
-      <Modal.Content>
-        {current ? (
-          <PreviewBody
-            key={`${current.path}${lineSuffix(current)}`}
-            target={current}
-            hostId={hostId}
-            theme={theme}
-            enabled={open}
-            onBack={stack.length > 1 ? () => setStack((items) => items.slice(0, -1)) : null}
-            onOpen={(next) => setStack((items) => [...items, next])}
-          />
-        ) : null}
-      </Modal.Content>
+    <Modal title={title} icon={icon} open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+      <Modal.Content>{body}</Modal.Content>
     </Modal>
   );
 }
+
+/** 桌面预览弹窗的最大宽度:代码一行 120 列左右也不用横向滚动。 */
+const WIDE_DIALOG_WIDTH = 1080;
 
 function PreviewBody({ target, hostId, theme, enabled, onBack, onOpen }: {
   target: FileTarget;
@@ -279,13 +352,14 @@ function DirectoryPreview({ preview, theme, onOpen }: {
 
 function DirectoryRow({ name, directory, theme, onPress }: { name: string; directory: boolean; theme: Theme; onPress(): void }) {
   const tokens = chatTokens(theme);
+  const iconColor = directory ? folderHue(theme).text : theme.colors.foregroundMuted;
   const [hovered, setHovered] = useState(false);
   return (
     <Pressable accessibilityRole="button" accessibilityLabel={directory ? `打开目录 ${name}` : `预览 ${name}`} onPress={onPress}
       onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
       style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: space.sm, minHeight: 32, paddingHorizontal: space.sm,
         borderRadius: radius.block, backgroundColor: pressed ? tokens.pressed : hovered ? tokens.hover : "transparent", ...WEB_TRANSITION })}>
-      <Icon name={fileIcon({ path: name, directory })} size={14} color={theme.colors.foregroundMuted} />
+      <Icon name={fileIcon({ path: name, directory })} size={14} color={iconColor} />
       <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: TYPE.label.size,
         lineHeight: TYPE.label.lineHeight }}>{name}</Text>
       {directory ? <Icon name="ChevronRight" size={14} color={theme.colors.foregroundMuted} /> : null}

@@ -1,7 +1,7 @@
 import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import type { FilePreview } from "../shared/file-preview";
+import type { FileKind, FilePreview } from "../shared/file-preview";
 import { FILE_PREVIEW_LIMITS, IMAGE_MIME_TYPES } from "../shared/file-preview";
 import { extensionOf } from "../shared/file-links";
 
@@ -35,6 +35,25 @@ export async function readFilePreview(rawPath: string, limits = FILE_PREVIEW_LIM
   } catch (error) {
     return { kind: "error", path, message: errorMessage(error) };
   }
+}
+
+/**
+ * 文件药丸的类型:一次查完一段对话里链接到的所有路径。stat 跟随符号链接;不存在为 missing,
+ * 其他原因读不到(权限等)为 unknown,由界面按链接写法猜。
+ */
+export async function statPaths(paths: readonly string[]): Promise<Record<string, FileKind>> {
+  const kinds = await Promise.all(paths.map(async (rawPath): Promise<FileKind> => {
+    const path = expandPath(rawPath);
+    if (!path) return "unknown";
+    try {
+      const info = await stat(path);
+      return info.isDirectory() ? "directory" : info.isFile() ? "file" : "unknown";
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+    }
+  }));
+  return Object.fromEntries(paths.map((path, index) => [path, kinds[index]]));
 }
 
 /** `~`、`~/x` 展开;不是绝对路径时为 null。 */

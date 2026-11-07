@@ -64,6 +64,35 @@ export const FilePreviewSchema = z.discriminatedUnion("kind", [
 
 export type FilePreview = z.infer<typeof FilePreviewSchema>;
 
+/** 链接目标在磁盘上的类型;unknown = 读不到(权限等),界面按链接写法猜。 */
+export const FileKindSchema = z.enum(["file", "directory", "missing", "unknown"]);
+export type FileKind = z.infer<typeof FileKindSchema>;
+
+/** 一次查询的路径上限:一段对话最近 120 条记录里链接到的文件。 */
+export const MAX_STAT_PATHS = 200;
+
+const ICON_BY_EXTENSION: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(["md", "markdown", "mdx", "txt", "rst", "log", "pdf", "doc", "docx", "rtf"].map((extension) => [extension, "FileText"])),
+  ...Object.fromEntries(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff", "heic"].map((extension) => [extension, "FileImage"])),
+  ...Object.fromEntries(["json", "jsonl", "ndjson", "json5"].map((extension) => [extension, "FileJson"])),
+  ...Object.fromEntries(["yaml", "yml", "toml", "ini", "conf", "cfg", "env", "properties", "plist", "lock"].map((extension) => [extension, "FileCog"])),
+  ...Object.fromEntries(["csv", "tsv", "xls", "xlsx", "parquet"].map((extension) => [extension, "FileSpreadsheet"])),
+  ...Object.fromEntries(["zip", "tar", "gz", "tgz", "bz2", "xz", "7z", "rar", "zst"].map((extension) => [extension, "FileArchive"])),
+  ...Object.fromEntries(["sh", "bash", "zsh", "fish", "ps1", "bat", "cmd"].map((extension) => [extension, "FileTerminal"])),
+  ...Object.fromEntries([
+    "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "py", "go", "rs", "java", "kt", "kts", "swift", "c", "h", "cc", "cpp",
+    "hpp", "cs", "rb", "php", "lua", "dart", "scala", "sql", "html", "htm", "css", "scss", "less", "vue", "svelte", "xml",
+    "diff", "patch", "proto", "graphql", "gradle", "r", "m", "zig", "nix", "tf",
+  ].map((extension) => [extension, "FileCode"])),
+};
+
+/** 药丸与目录列表的 Lucide 图标:目录、不存在,或按扩展名区分的文件。 */
+export function fileIconName(extension: string, kind: FileKind | "guess-directory"): string {
+  if (kind === "directory" || kind === "guess-directory") return "Folder";
+  if (kind === "missing") return "FileX";
+  return ICON_BY_EXTENSION[extension] ?? "File";
+}
+
 /** Markdown 文件按 Markdown 渲染,其余文本放进代码块。 */
 export const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdx", "mdown", "mkd"]);
 

@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
-import { Icon, Markdown, copyText, useToast } from "@getpaseo/plugin/client/ui";
+import { Modal as NativeModal, Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
+import { Icon, Markdown, ScrollView, copyText, useToast } from "@getpaseo/plugin/client/ui";
 import { TYPE, mix } from "../shared/design";
 import { markdownPreview, type Tone } from "../shared/labels";
 import { HAIRLINE, WEB_TRANSITION, chatTokens, hueTokens, radius, space, type Theme } from "./theme-tokens";
@@ -461,5 +461,54 @@ export function ExpandableText({
       </Text>
       {toggle}
     </View>
+  );
+}
+
+// ---------------------------------------------------------------- Dialog
+
+const FILL: ViewStyle = { position: "absolute", top: 0, right: 0, bottom: 0, left: 0 };
+
+/**
+ * 宽弹窗,只用于桌面 Web。宿主 Modal 的桌面卡片固定最宽 520,插件改不了;这里照它的样子
+ * (半透明遮罩、surface1 卡片、圆角 12、标题栏 + 关闭、24 内边距的滚动正文)自己画一个,
+ * 宽度由调用方定。走 RN Modal:Web 上是挂到 body 的 portal,Esc 与点遮罩都会关闭。
+ */
+export function Dialog({ theme, title, icon, open, onClose, maxWidth, children }: {
+  theme: Theme;
+  title: string;
+  icon?: ReactNode;
+  open: boolean;
+  onClose(): void;
+  maxWidth: number;
+  children: ReactNode;
+}) {
+  const tokens = chatTokens(theme);
+  const [closeHovered, setCloseHovered] = useState(false);
+  return (
+    <NativeModal transparent visible={open} animationType="fade" onRequestClose={onClose}>
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: space.xl + space.sm, backgroundColor: "rgba(0,0,0,0.55)" }}>
+        <Pressable accessibilityLabel="关闭" onPress={onClose} style={FILL} />
+        <View role="dialog" aria-modal aria-label={title}
+          style={{ width: "100%", maxWidth, maxHeight: "88%", flexShrink: 1, minHeight: 0, overflow: "hidden", backgroundColor: theme.colors.surface1,
+            borderRadius: 12, borderWidth: 1, borderColor: theme.colors.surface2, ...tokens.card.shadowHover }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, paddingHorizontal: space.xl, paddingVertical: space.lg,
+            borderBottomWidth: 1, borderBottomColor: theme.colors.surface2 }}>
+            {icon ? <View style={{ alignItems: "center", justifyContent: "center" }}>{icon}</View> : null}
+            <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: TYPE.body.size,
+              lineHeight: TYPE.body.lineHeight, fontWeight: "500" }}>{title}</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="关闭" hitSlop={8} onPress={onClose}
+              onHoverIn={() => setCloseHovered(true)} onHoverOut={() => setCloseHovered(false)}
+              style={({ pressed }) => ({ padding: space.xs, borderRadius: radius.block,
+                backgroundColor: pressed ? tokens.pressed : closeHovered ? tokens.hover : "transparent", ...WEB_TRANSITION })}>
+              <Icon name="X" size={18} color={closeHovered ? theme.colors.foreground : theme.colors.foregroundMuted} />
+            </Pressable>
+          </View>
+          <ScrollView style={{ flexShrink: 1, minHeight: 0 }} contentContainerStyle={{ padding: space.xl, gap: space.lg }}
+            keyboardShouldPersistTaps="handled">
+            {children}
+          </ScrollView>
+        </View>
+      </View>
+    </NativeModal>
   );
 }

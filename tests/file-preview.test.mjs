@@ -4,8 +4,8 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractFileLinks, parseFileTarget } from "../shared/file-links.ts";
-import { codeLanguage, excerptLines, fenceCode, FilePreviewSchema } from "../shared/file-preview.ts";
-import { expandPath, readFilePreview } from "../server/file-preview.ts";
+import { codeLanguage, excerptLines, fenceCode, fileIconName, FilePreviewSchema } from "../shared/file-preview.ts";
+import { expandPath, readFilePreview, statPaths } from "../server/file-preview.ts";
 
 test("Router file links become previewable targets with labels and line numbers", () => {
   const text = [
@@ -118,4 +118,30 @@ test("home-relative paths expand to the daemon user's home", () => {
   assert.equal(expandPath("/srv/../srv/x"), "/srv/x");
   assert.equal(expandPath("a.md"), null);
   assert.equal(expandPath("/a\0b"), null);
+});
+
+test("chips learn whether each linked path is a file, a folder or gone", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "superagent-stat-"));
+  try {
+    await writeFile(join(dir, "a.md"), "x");
+    await mkdir(join(dir, "pages"));
+    await symlink(join(dir, "pages"), join(dir, "link"));
+    const paths = [join(dir, "a.md"), join(dir, "pages"), join(dir, "link"), join(dir, "gone.md"), join(dir, "a.md", "x"), "relative", "/dev/null"];
+    assert.deepEqual(await statPaths(paths), Object.fromEntries(paths.map((path, index) =>
+      [path, ["file", "directory", "directory", "missing", "missing", "unknown", "unknown"][index]])));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("chip icons tell folders, missing files and file types apart", () => {
+  assert.equal(fileIconName("", "directory"), "Folder");
+  assert.equal(fileIconName("md", "guess-directory"), "Folder");
+  assert.equal(fileIconName("md", "missing"), "FileX");
+  assert.equal(fileIconName("md", "file"), "FileText");
+  assert.equal(fileIconName("tsx", "file"), "FileCode");
+  assert.equal(fileIconName("json", "unknown"), "FileJson");
+  assert.equal(fileIconName("png", "file"), "FileImage");
+  assert.equal(fileIconName("sh", "file"), "FileTerminal");
+  assert.equal(fileIconName("", "file"), "File");
 });

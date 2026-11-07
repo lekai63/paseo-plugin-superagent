@@ -3,7 +3,7 @@ import { defineRpc } from "@getpaseo/plugin";
 import { SuperagentSnapshotSchema } from "./model";
 import { ChatTabsSchema } from "./chat-tabs";
 import { WeixinStatusSchema } from "./weixin";
-import { FilePreviewSchema } from "./file-preview";
+import { FileKindSchema, FilePreviewSchema, MAX_STAT_PATHS } from "./file-preview";
 
 /**
  * 插件 RPC 契约。客户端经 `useRpc` 调用;server/handlers.ts 实现同名 handler。
@@ -98,6 +98,13 @@ export const superagentReadFileRpc = defineRpc({
   name: "superagent.read_file",
   input: z.object({ path: z.string().min(1).max(4096) }),
   output: FilePreviewSchema,
+});
+
+/** 文件药丸的类型:一段对话里链接到的路径各是文件、目录还是已不存在。 */
+export const superagentStatFilesRpc = defineRpc({
+  name: "superagent.stat_files",
+  input: z.object({ paths: z.array(z.string().min(1).max(4096)).max(MAX_STAT_PATHS) }),
+  output: z.object({ kinds: z.record(z.string(), FileKindSchema) }),
 });
 
 /** 微信通道状态:已保存的 bot 账号、扫码登录进度与长轮询状态。 */
