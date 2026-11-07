@@ -134,8 +134,10 @@ export interface PatrolDigest {
   at: string;
   intervalMin: number;
   tickets: PatrolTicket[];
-  /** 引擎健康状况的单行说明(评估熔断、投递失败、Router 丢失等)。 */
+  /** 需要判断的引擎异常(评估熔断、投递失败、积压动作等);它与未完结票据决定是否调用模型。 */
   health: string[];
+  /** 仅供参考的状态说明(如 Router 已释放、下次评估自动重建):随巡检附带,单独存在时不调用模型。 */
+  notes?: string[];
 }
 
 function activityLine(ticket: PatrolTicket): string {
@@ -176,6 +178,7 @@ export function composePatrolPrompt(digest: PatrolDigest, instructions: string |
   lines.push("", "## Engine health");
   if (digest.health.length === 0) lines.push("- no problems detected");
   else lines.push(...digest.health.map((line) => `- ${line}`));
+  for (const note of digest.notes ?? []) lines.push(`- (info, no action needed) ${note}`);
   return lines.join("\n");
 }
 

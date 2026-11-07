@@ -78,7 +78,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 | Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared`(直接在基础目录里干活,不需要 git。Router 与默认 Worker 同住「默认 workspace」;工作目录根下有 `AGENTS.md`/`CLAUDE.md` 时,Worker 按其中的归档规则放产出并完成要求的登记;没有规则时,每个 Ticket 的产出放进专属子目录 `tasks/<本地日期>-<标题>-<id 尾号>/`。Router 与 Worker 的提示词都会说明)。取消/关闭 Ticket 只归档 Worker 会话;Ticket 独占的 worktree 工作区一并归档,共享的持久工作区保留 |
 | Worker 超时 / 失败重试次数 / 批处理窗口 / 单条消息上限 | 引擎调参(设置页「执行」分组,超出范围会就地提示) |
 | 投机执行 | 「主动与巡检」分组,默认关。开启后 Router 规则里出现投机执行说明,Router 可依据你在「Router 规则」里写的主动策略(如「群里有人反馈问题时,静默复现并尝试简单修复」)派发 `speculative` Worker;同时最多 2 个,超出的投机派发直接丢弃并记入裁决 |
-| LLM 看门狗 | 「主动与巡检」分组,默认关。看门狗模型留空沿用 Router 的模型;巡检间隔 5–240 分钟(默认 30)。没有未完结任务、也没有异常时跳过,不调用模型;维护者正在和看门狗会话对话时本次巡检让路 |
+| LLM 看门狗 | 「主动与巡检」分组,默认关。看门狗模型留空沿用 Router 的模型;巡检间隔 5–240 分钟(默认 30)。没有未完结任务、也没有异常时跳过,不调用模型(Router 会话已释放、下次评估自动重建不算异常);维护者正在和看门狗会话对话时本次巡检让路 |
 | 注入委派 MCP | 开启后所有普通 agent 的会话注入 `superagent_dispatch` 工具。走**插件自持的本地 MCP server**(`127.0.0.1` 随机端口 + 随机密钥路径),不受宿主 "Paseo tools"(`mcp.injectIntoAgents`)开关影响。同一 endpoint 还按角色给编排自身的会话下发工具:Router 拿 `superagent_list`/`superagent_read`/`superagent_search`(只读回读与检索),Worker 拿 `superagent_unsubscribe`/`superagent_handback`(会话控制)——这部分不受本开关控制。角色工具在**每次会话启动时经 session_open 注入**——不能写进 agent 保存配置:同名 mcpServer 与插件注入冲突会被 daemon 拒绝,`toolPolicy` 预授权引用的 server 又必须出现在同一请求里,两条都走不通 |
 | 注入 provider | 允许注入上述 MCP 的 provider 家族,逗号分隔(如 `codex,claude`);留空 = claude,codex,opencode,omp,copilot。不支持 MCP server 的 provider(如 pi)注入会导致会话启动失败,默认排除;Router/Worker 的角色工具注入同样按「默认名单 ∪ 此名单」的家族门控(provider 带 model 限定时按 `/` 前的家族判断;插件型 provider 如 zcode-acp 由 daemon 统一声明支持 MCP,想给它注入就在此配置) |
 

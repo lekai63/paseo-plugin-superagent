@@ -1693,7 +1693,7 @@ export class SuperagentEngine {
     const now = new Date();
     const { digest, seen } = await this.collectPatrolDigest(now);
     if (digest.tickets.length === 0 && digest.health.length === 0) {
-      // 无事可巡:不调用模型。
+      // 无事可巡:不调用模型。仅有参考说明(如 Router 已释放)不算异常,看门狗也没有动作可做。
       await this.updateWatchdogState({ lastRunAt: now.toISOString(), lastSummary: "nothing to patrol", lastError: null, lastActions: 0, seen });
       return;
     }
@@ -1812,14 +1812,18 @@ export class SuperagentEngine {
       });
     }
     return {
-      digest: { at: now.toISOString(), intervalMin: this.settingsValues.watchdogIntervalMin, tickets, health: this.healthLines(state, now) },
+      digest: { at: now.toISOString(), intervalMin: this.settingsValues.watchdogIntervalMin, tickets, ...this.healthLines(state, now) },
       seen,
     };
   }
 
-  /** 引擎健康的单行说明:评估熔断/连续出错、久候的触发、投递失败、积压动作、近期失败票据、Router 丢失。 */
-  private healthLines(state: SuperagentState, now: Date): string[] {
+  /**
+   * 引擎健康的单行说明。health:评估熔断/连续出错、久候的触发、投递失败、积压动作、近期失败票据——
+   * 看门狗可能要介入的异常;notes:Router 已释放这类会自愈、看门狗无动作可做的状态,只作上下文。
+   */
+  private healthLines(state: SuperagentState, now: Date): { health: string[]; notes: string[] } {
     const lines: string[] = [];
+    const notes: string[] = [];
     const ago = (iso: string) => Math.max(0, Math.round((now.getTime() - Date.parse(iso)) / 60_000));
     const label = (threadId: string) => {
       const thread = state.threads.find((t) => t.id === threadId);
@@ -1850,9 +1854,9 @@ export class SuperagentEngine {
       lines.push(`ticket ${ticket.id} "${truncate(ticket.title, 60)}" failed ${ago(ticket.updatedAt)} min ago: ${truncate(ticket.lastError ?? "unknown error", 200)}`);
     }
     if (!state.kv.routerAgentId && state.threads.some((t) => t.state === "active")) {
-      lines.push("no live Router agent; it is recreated on the next evaluation");
+      notes.push("no live Router agent; it is recreated on the next evaluation");
     }
-    return lines;
+    return { health: lines, notes };
   }
 
   /** 执行看门狗动作:每个动作一条 watchdog 裁决留痕;取消/上报经引擎触发交 Router 告知人。 */

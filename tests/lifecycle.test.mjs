@@ -2181,6 +2181,25 @@ test("the LLM watchdog stays off by default and skips the model when there is no
   assert.equal(idle.calls.patrols.length, 0);
   assert.equal(idle.calls.watchdogCreates.length, 0);
   assert.equal(idle.state.kv.watchdog.lastSummary, "nothing to patrol");
+
+  // Router 被释放/归档后线程仍活跃:引擎下次评估自动重建,不是需要看门狗判断的异常。
+  const released = fixture(t, "completed");
+  released.values.watchdogEnabled = true;
+  released.state.kv.routerAgentId = null;
+  assert.ok(released.state.threads.some((thread) => thread.state === "active"));
+  await released.engine.maybePatrol(true);
+  assert.equal(released.calls.patrols.length, 0, "a released Router alone does not wake the model");
+  assert.equal(released.calls.watchdogCreates.length, 0);
+  assert.equal(released.state.kv.watchdog.lastSummary, "nothing to patrol");
+
+  // 有未完结票据时照常巡检,Router 状态作为参考说明随附。
+  const busy = fixture(t, "running");
+  busy.values.watchdogEnabled = true;
+  busy.state.kv.routerAgentId = null;
+  busy.controls.patrolVerdict = { summary: "steady", actions: [] };
+  await busy.engine.maybePatrol(true);
+  assert.equal(busy.calls.patrols.length, 1);
+  assert.match(busy.calls.patrols[0], /## Engine health\n- no problems detected\n- \(info, no action needed\) no live Router agent/);
 });
 
 test("an unparsable watchdog reply is recorded and the rules are resent next time", async (t) => {
