@@ -213,3 +213,30 @@ export function clockTime(iso: string | null | undefined): string {
   const pad = (value: number) => String(value).padStart(2, "0");
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
+
+/**
+ * 对话里的时间戳(better-paseo 页脚同款):今天只写「时:分」,今年其他日子「M月D日 时:分」,
+ * 往年再加年份。24 小时制、两位数字,同一列的时间等宽对齐。
+ */
+export function stampTime(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const today = new Date(now);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  if (date.getFullYear() === today.getFullYear() && date.getMonth() === today.getMonth() && date.getDate() === today.getDate()) {
+    return clock;
+  }
+  const monthDay = `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
+  return date.getFullYear() === today.getFullYear() ? monthDay : `${date.getFullYear()}年${monthDay}`;
+}
+
+/** 完整时刻(无障碍标签、悬停说明):YYYY-MM-DD 时:分:秒。 */
+export function fullStamp(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clockTime(iso)}`;
+}

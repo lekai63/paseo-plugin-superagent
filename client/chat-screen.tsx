@@ -7,15 +7,17 @@ import type { SuperagentSnapshot } from "../shared/model";
 import { buildChatEntries } from "../shared/chat";
 import { closeChatTab, entryChatTab, openChatTab } from "../shared/chat-tabs";
 import { directTickets, followsOf } from "../shared/execution";
+import { TYPE } from "../shared/design";
 import { markdownPreview, relativeTime, threadStatus } from "../shared/labels";
 import { superagentDispatchRpc } from "../shared/rpc";
 import { ChatComposer, type ComposerHint } from "./chat-composer";
 import { ChatTabBar } from "./chat-tab-bar";
 import { useChatTabs } from "./chat-tabs-store";
-import { CHAT_MAX_WIDTH, ChatMessages, type WorkingState } from "./chat-messages";
+import { ChatMessages, useChatMetrics, type WorkingState } from "./chat-messages";
 import { SIDEBAR_WIDTH, SidebarContent, SidebarTabs, type SidebarTab } from "./chat-sidebar";
 import { STATE_QUERY_KEY, useSuperagentState } from "./query";
-import { Button, Notice, StatusBadge, fontSize, radius, space, type Theme } from "./ui";
+import { HAIRLINE, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
+import { Button, Notice, StatusBadge, cardSurface } from "./ui";
 
 /**
  * 主界面:像在 Paseo 项目里和 agent 对话一样和 Superagent 对话。
@@ -63,6 +65,7 @@ export function ChatScreen(props: ChatScreenProps) {
   const [sheetOpen, setSheetOpen] = useState(Boolean(requestedPanel) && layout.compact);
   const [pending, setPending] = useState<PendingMessage | null>(null);
   const docked = !layout.compact && width >= DOCK_MIN_WIDTH;
+  const metrics = useChatMetrics(theme, layout);
 
   // 键盘避让要以窗口为参照:KeyboardAvoidingView 只知道自己在父容器里的位置,而宿主把
   // 插件放在自己的页头之下,不补上这段距离(页头 + 安全区)避让高度就会少算一截。
@@ -208,7 +211,7 @@ export function ChatScreen(props: ChatScreenProps) {
         keyboardVerticalOffset={keyboardOffset}
       >
         {deciding ? (
-          <View style={{ height: 44, borderBottomWidth: 1, borderBottomColor: theme.colors.border }} />
+          <View style={{ height: 44, borderBottomWidth: HAIRLINE, borderBottomColor: theme.colors.border }} />
         ) : (
           <ChatTabBar tabIds={tabs?.open ?? []} activeId={threadId} snapshot={snapshot} theme={theme} compact={layout.compact}
             onSelect={selectThread} onClose={closeTab} trailing={docked ? (
@@ -224,7 +227,7 @@ export function ChatScreen(props: ChatScreenProps) {
 
         {activeQuery.isError ? (
           <View style={{ paddingHorizontal: space.lg, paddingTop: space.md, alignItems: "center" }}>
-            <View style={{ width: "100%", maxWidth: CHAT_MAX_WIDTH }}>
+            <View style={{ width: "100%", maxWidth: metrics.maxWidth }}>
               <Notice theme={theme} tone={activeQuery.data ? "warning" : "danger"}
                 title={activeQuery.data ? "状态刷新失败,当前显示上一次的数据" : "无法读取 Superagent 状态"}
                 description={activeQuery.error instanceof Error ? activeQuery.error.message : String(activeQuery.error)}>
@@ -246,7 +249,7 @@ export function ChatScreen(props: ChatScreenProps) {
             truncated={truncated}
             theme={theme}
             navigation={navigation}
-            compact={layout.compact}
+            metrics={metrics}
             empty={notFound ? (
               <NotFound theme={theme} onClose={() => closeTab(threadId)} />
             ) : threadId ? null : (
@@ -260,6 +263,7 @@ export function ChatScreen(props: ChatScreenProps) {
           draftKey={`${host.id}:${threadId ?? "new"}`}
           theme={theme}
           layout={layout}
+          metrics={metrics}
           placeholder={threadId ? "继续对话…" : "描述要交给 Superagent 的任务…"}
           hint={hint}
           disabledReason={disabledReason}
@@ -268,7 +272,7 @@ export function ChatScreen(props: ChatScreenProps) {
       </KeyboardAvoidingView>
 
       {docked && sidebarOpen ? (
-        <View style={{ width: SIDEBAR_WIDTH, borderLeftWidth: 1, borderLeftColor: theme.colors.border, backgroundColor: theme.colors.surface0 }}>
+        <View style={{ width: SIDEBAR_WIDTH, borderLeftWidth: HAIRLINE, borderLeftColor: theme.colors.border, backgroundColor: theme.colors.surface0 }}>
           <SidebarTabs tab={tab} onTab={setTab} theme={theme} trailing={
             <Button theme={theme} variant="ghost" size="xs" icon="PanelRightClose" accessibilityLabel="收起侧栏"
               onPress={() => setSidebarOpen(false)} />
@@ -299,24 +303,28 @@ function Welcome({ snapshot, theme, openSettings, onSelectThread }: {
   onSelectThread(threadId: string): void;
 }) {
   const recent = (snapshot?.threads ?? []).filter((thread) => thread.state !== "closed").slice(0, 4);
+  const muted = theme.colors.foregroundMuted;
   return (
     <View style={{ flex: 1, justifyContent: "center", gap: space.xl, paddingVertical: space.xl }}>
-      <View style={{ alignItems: "center", gap: space.md }}>
-        <View style={{ width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center",
-          borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface1 }}>
-          <Icon name="Network" size={20} color={theme.colors.foregroundMuted} />
+      <View style={{ alignItems: "center", gap: space.sm }}>
+        <View style={{ width: 40, height: 40, marginBottom: space.xs, borderRadius: radius.overlay, alignItems: "center", justifyContent: "center",
+          ...cardSurface(theme) }}>
+          <Icon name="Network" size={18} color={muted} />
         </View>
-        <Text style={{ color: theme.colors.foreground, fontSize: fontSize.stat, fontWeight: "500", textAlign: "center" }}>
+        <Text style={{ color: theme.colors.foreground, fontSize: TYPE.stat.size, lineHeight: 28, fontWeight: "600", textAlign: "center" }}>
           要交给 Superagent 做什么?
         </Text>
-        <Text style={{ maxWidth: 480, color: theme.colors.foregroundMuted, fontSize: fontSize.base, lineHeight: 20, textAlign: "center" }}>
+        <Text style={{ maxWidth: 480, color: muted, fontSize: TYPE.bodyRead.size, lineHeight: TYPE.bodyRead.lineHeight, textAlign: "center" }}>
           Router 会评估你的消息,直接答复,或派发 Worker 执行。在任意 agent 会话里输入 /superagent 也能委派。
         </Text>
         {snapshot?.workingDir ? (
-          <Text numberOfLines={1} ellipsizeMode="middle"
-            style={{ width: "100%", maxWidth: 480, color: theme.colors.foregroundMuted, fontSize: fontSize.sm, textAlign: "center" }}>
-            工作目录 · {snapshot.workingDir}
-          </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2, maxWidth: "100%", marginTop: space.xs }}>
+            <Icon name="Folder" size={12} color={muted} />
+            <Text numberOfLines={1} ellipsizeMode="middle"
+              style={{ flexShrink: 1, maxWidth: 440, color: muted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight }}>
+              {snapshot.workingDir}
+            </Text>
+          </View>
         ) : null}
       </View>
       {snapshot?.configured && snapshot.workingDirIssue ? (
@@ -330,7 +338,7 @@ function Welcome({ snapshot, theme, openSettings, onSelectThread }: {
       ) : null}
       {recent.length ? (
         <View style={{ gap: space.sm }}>
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm, fontWeight: "500" }}>继续最近的对话</Text>
+          <Text style={{ color: muted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight, fontWeight: "600" }}>继续最近的对话</Text>
           {recent.map((thread) => (
             <RecentThread key={thread.id} thread={thread} snapshot={snapshot!} theme={theme} onPress={() => onSelectThread(thread.id)} />
           ))}
@@ -346,18 +354,22 @@ function RecentThread({ thread, snapshot, theme, onPress }: {
   theme: Theme;
   onPress(): void;
 }) {
+  const [hovered, setHovered] = useState(false);
+  const card = chatTokens(theme).card;
   const status = threadStatus(thread, snapshot.tickets.filter((ticket) => ticket.threadId === thread.id),
     thread.lastDecision ? [thread.lastDecision] : []);
   const preview = thread.latestResult ? markdownPreview(thread.latestResult.text).replace(/\s+/g, " ").trim() : thread.summary ?? "";
   return (
     <Pressable accessibilityRole="button" accessibilityLabel={`${thread.title},${status.label}`} onPress={onPress}
-      style={({ pressed }) => ({ gap: space.xs, padding: space.md, borderRadius: radius.lg, borderWidth: 1, borderColor: theme.colors.border,
-        backgroundColor: pressed ? theme.colors.surface2 : theme.colors.surface1 })}>
+      onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
+      style={({ pressed }) => ({ gap: space.xs, paddingVertical: space.sm + 2, paddingHorizontal: space.md, ...cardSurface(theme),
+        ...(hovered || pressed ? card.shadowHover : null), ...(pressed ? { backgroundColor: card.controlHover } : null), ...WEB_TRANSITION })}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-        <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: fontSize.base }}>{thread.title}</Text>
+        <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: TYPE.body.size, lineHeight: TYPE.body.lineHeight,
+          fontWeight: "500" }}>{thread.title}</Text>
         <StatusBadge theme={theme} {...status} />
       </View>
-      <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
+      <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight }}>
         {relativeTime(thread.updatedAt)}{preview ? ` · ${preview}` : ""}
       </Text>
     </Pressable>
@@ -367,7 +379,10 @@ function RecentThread({ thread, snapshot, theme, onPress }: {
 function NotFound({ theme, onClose }: { theme: Theme; onClose(): void }) {
   return (
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: space.md }}>
-      <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.base }}>找不到这段对话,它可能已被清理。</Text>
+      <Icon name="MessageSquareOff" size={20} color={theme.colors.foregroundMuted} />
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.body.size, lineHeight: TYPE.body.lineHeight }}>
+        找不到这段对话,它可能已被清理。
+      </Text>
       <Button theme={theme} variant="outline" size="xs" icon="X" label="关闭此标签" onPress={onClose} />
     </View>
   );

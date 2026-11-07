@@ -3,11 +3,12 @@ import { Pressable, Text, View, type NativeSyntheticEvent, type TextInputKeyPres
 import type { PluginHostProps } from "@getpaseo/plugin/client";
 import { Icon, TextInput } from "@getpaseo/plugin/client/ui";
 import type { Tone } from "../shared/labels";
-import { CHAT_FONT, CHAT_MAX_WIDTH } from "./chat-messages";
+import { TYPE, mix } from "../shared/design";
+import type { ChatMetrics } from "./chat-messages";
 import { readWebSendShortcut } from "./web";
-import { space, toneColor, withAlpha, type Theme } from "./ui";
+import { HAIRLINE, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
+import { toneColor, withAlpha } from "./ui";
 
-const MIN_INPUT_HEIGHT = { web: 46, native: 30 } as const;
 const MAX_INPUT_HEIGHT = 200;
 /** 每个标签各自的未发送草稿;切换标签不会把一段对话里写了一半的话带到另一段。 */
 const drafts = new Map<string, string>();
@@ -28,8 +29,8 @@ export interface ComposerHint {
 }
 
 /**
- * 对话输入框:停靠在消息流下方,外观对齐 Paseo 的 composer(圆角 16 的卡片、
- * 右下角圆形发送键)。桌面 Web 的发送键跟随 Paseo 全局设置(Settings → General 的
+ * 对话输入框:停靠在消息流下方,外观对齐 Paseo 的 composer(圆角 16 的卡片、细线描边、
+ * 右下角圆形发送键);输入文字与用户气泡同为宿主正文字号 × 1.4,宽度与消息列一致。桌面 Web 的发送键跟随 Paseo 全局设置(Settings → General 的
  * sendShortcut):默认 Enter 发送、Shift+Enter 换行;设为 Cmd/Ctrl+Enter 后裸 Enter 换行。
  * 组字中的回车不发送。草稿按 draftKey 保存在本次 app 会话里;调用方切换对话时应以
  * draftKey 作为 key 重新挂载。
@@ -37,6 +38,7 @@ export interface ComposerHint {
 export function ChatComposer({
   theme,
   layout,
+  metrics,
   placeholder,
   hint,
   disabledReason,
@@ -45,6 +47,7 @@ export function ChatComposer({
 }: {
   theme: Theme;
   layout: PluginHostProps["layout"];
+  metrics: ChatMetrics;
   placeholder: string;
   hint: ComposerHint;
   /** 有值时禁止发送并在提示位说明原因。 */
@@ -66,7 +69,8 @@ export function ChatComposer({
   const [contentHeight, setContentHeight] = useState(0);
   const web = layout.platform === "web";
   const enterToSend = web && !layout.compact;
-  const minHeight = web ? MIN_INPUT_HEIGHT.web : MIN_INPUT_HEIGHT.native;
+  // 桌面 Web 默认留出两行,原生一行加一点余量(正文 15/21 时分别是 46 与 30)。
+  const minHeight = web ? metrics.bubble.lineHeight * 2 + 4 : metrics.bubble.lineHeight + 9;
   const height = Math.min(MAX_INPUT_HEIGHT, Math.max(minHeight, contentHeight));
   const canSend = Boolean(text.trim()) && !busy && !disabledReason;
 
@@ -99,22 +103,25 @@ export function ChatComposer({
   const statusColor = status.tone && status.tone !== "default" ? toneColor(status.tone, theme) : theme.colors.foregroundMuted;
   // 文本镜像:与输入框同宽同字号的隐藏 Text 量出内容高度,输入框随内容增高、删除后回缩。
   const mirror = !text ? " " : text.endsWith("\n") ? `${text} ` : text;
-  const inputFont = { fontSize: CHAT_FONT.size, lineHeight: CHAT_FONT.lineHeight };
+  const inputFont = { fontSize: metrics.bubble.size, lineHeight: metrics.bubble.lineHeight };
+  const tokens = chatTokens(theme);
 
   return (
     <View style={{ paddingHorizontal: layout.compact ? space.md : space.lg, paddingBottom: layout.compact ? space.md : space.lg, alignItems: "center" }}>
       <View
         style={{
           width: "100%",
-          maxWidth: CHAT_MAX_WIDTH,
+          maxWidth: metrics.maxWidth,
           gap: layout.compact ? space.sm : space.md,
-          paddingTop: layout.compact ? space.sm : space.lg,
-          paddingBottom: layout.compact ? space.sm : space.md,
+          paddingTop: layout.compact ? space.sm + 2 : space.md + 2,
+          paddingBottom: layout.compact ? space.sm : space.sm + 2,
           paddingHorizontal: layout.compact ? space.md : space.lg,
-          borderRadius: 16,
-          borderWidth: 1,
-          borderColor: focused ? withAlpha(theme.colors.foregroundMuted, 0.5) : theme.colors.border,
+          borderRadius: radius.bubble,
+          borderWidth: HAIRLINE,
+          borderColor: focused ? mix(theme.colors.border, theme.colors.foregroundMuted, 0.5) : tokens.card.pillBorder,
           backgroundColor: theme.colors.surface1,
+          ...WEB_TRANSITION,
+          ...(focused ? tokens.card.shadowHover : tokens.card.shadow),
         }}
       >
         <View>
@@ -153,8 +160,10 @@ export function ChatComposer({
         </View>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.md }}>
           <View style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
-            <Icon name={status.icon} size={14} color={statusColor} />
-            <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: statusColor, fontSize: 12 }}>{status.label}</Text>
+            <Icon name={status.icon} size={13} color={statusColor} />
+            <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: statusColor, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight }}>
+              {status.label}
+            </Text>
           </View>
           <Pressable
             accessibilityRole="button"
@@ -169,8 +178,9 @@ export function ChatComposer({
               borderRadius: 14,
               alignItems: "center",
               justifyContent: "center",
-              backgroundColor: canSend ? theme.colors.accent : theme.colors.surface2,
+              backgroundColor: canSend ? theme.colors.accent : tokens.pressed,
               opacity: pressed ? 0.85 : 1,
+              ...WEB_TRANSITION,
             })}
           >
             <Icon name="ArrowUp" size={16} color={canSend ? theme.colors.accentForeground : theme.colors.foregroundMuted} />

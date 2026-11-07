@@ -325,7 +325,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
       >
         <SettingsCard>
           <View style={{ padding: space.lg, gap: space.sm }}>
-            <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base }}>自定义规则</Text>
+            <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base, lineHeight: 20 }}>自定义规则</Text>
             <TextInput
               accessibilityLabel="Router 自定义规则"
               multiline
@@ -343,7 +343,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
                 opacity: disabled ? 0.5 : 1,
               }}
             />
-            <Text style={{ color: errors.routerInstructions ? theme.colors.statusDanger : theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
+            <Text style={{ color: errors.routerInstructions ? theme.colors.statusDanger : theme.colors.foregroundMuted, fontSize: fontSize.sm, lineHeight: 18 }}>
               {errors.routerInstructions ? `${errors.routerInstructions},最多 ${MAX_ROUTER_INSTRUCTIONS_CHARS} 字符。` : "留空使用默认规则。内置的职责和输出约束始终保留。"}
               {` ${form.routerInstructions.length}/${MAX_ROUTER_INSTRUCTIONS_CHARS}`}
             </Text>

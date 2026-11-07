@@ -3,8 +3,10 @@ import { Platform, Pressable, ScrollView, Text, View } from "react-native";
 import { Icon } from "@getpaseo/plugin/client/ui";
 import type { SuperagentSnapshot } from "../shared/model";
 import { threadStatus, type StatusLabel } from "../shared/labels";
+import { TYPE } from "../shared/design";
 import { agentStatusColors, RunningStatusRing } from "./agent-status-icon";
-import { fontSize, radius, space, toneColor, type Theme } from "./ui";
+import { HAIRLINE, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
+import { toneColor } from "./ui";
 
 /**
  * 对话页顶部的标签栏:每个打开着的对话一个标签,末尾是「新对话」草稿标签(仅在草稿时出现)
@@ -65,7 +67,7 @@ export function ChatTabBar({ tabIds, activeId, snapshot, theme, compact, onSelec
   return (
     <View style={{ height: 44, flexDirection: "row", alignItems: "center", gap: space.xs,
       paddingLeft: compact ? space.sm : space.md, paddingRight: compact ? space.sm : space.md,
-      borderBottomWidth: 1, borderBottomColor: theme.colors.border }}>
+      borderBottomWidth: HAIRLINE, borderBottomColor: theme.colors.border }}>
       <ScrollView ref={scroller} horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0, flexShrink: 1, minWidth: 0 }}
         contentContainerStyle={{ alignItems: "center", gap: space.xs }} scrollEventThrottle={32}
         onScroll={(event) => { view.current.x = event.nativeEvent.contentOffset.x; }}
@@ -88,13 +90,7 @@ export function ChatTabBar({ tabIds, activeId, snapshot, theme, compact, onSelec
             theme={theme} onSelect={() => onSelect(null)} onClose={() => onClose(null)} />
         ) : null}
       </ScrollView>
-      {draft ? null : (
-        <Pressable accessibilityRole="button" accessibilityLabel="新对话" hitSlop={4} onPress={() => onSelect(null)}
-          style={({ pressed }) => ({ width: TAB_HEIGHT, height: TAB_HEIGHT, flexShrink: 0, alignItems: "center", justifyContent: "center",
-            borderRadius: radius.md, backgroundColor: pressed ? theme.colors.surface2 : "transparent" })}>
-          <Icon name="Plus" size={16} color={theme.colors.foregroundMuted} />
-        </Pressable>
-      )}
+      {draft ? null : <NewTabButton theme={theme} onPress={() => onSelect(null)} />}
       <View style={{ flex: 1 }} />
       {trailing}
     </View>
@@ -116,30 +112,47 @@ function Tab({ id, label, active, closable, compact, muted, status, indicator, t
   onClose(): void;
 }) {
   const [hovered, setHovered] = useState(false);
+  const [closeHovered, setCloseHovered] = useState(false);
+  const tokens = chatTokens(theme);
   // 触屏没有悬停:只在当前标签上给关闭按钮;桌面悬停时也显示。
   const showClose = closable && (active || (hovered && Platform.OS === "web"));
-  const color = active ? theme.colors.foreground : theme.colors.foregroundMuted;
+  const color = active || hovered ? theme.colors.foreground : theme.colors.foregroundMuted;
   return (
     <View testID={`superagent-tab-${id}`} onLayout={onLayout} onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}
-      style={{ flexDirection: "row", alignItems: "center", height: TAB_HEIGHT, maxWidth: compact ? 168 : 220, borderRadius: radius.md,
-        backgroundColor: active ? theme.colors.surface2 : hovered ? theme.colors.surface1 : "transparent" }}>
+      style={{ flexDirection: "row", alignItems: "center", height: TAB_HEIGHT, maxWidth: compact ? 168 : 220, borderRadius: radius.block,
+        backgroundColor: active ? tokens.pressed : hovered ? tokens.hover : "transparent", ...WEB_TRANSITION }}>
       <Pressable accessibilityRole="tab" accessibilityState={{ selected: active }}
         accessibilityLabel={status ? `${label},${status.label}` : label} onPress={onSelect}
         style={{ flexShrink: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: space.xs + 2, height: TAB_HEIGHT,
           paddingLeft: space.sm, paddingRight: closable ? space.xs : space.sm }}>
         <View style={{ width: STATUS_BOX, height: STATUS_BOX, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{indicator}</View>
-        <Text numberOfLines={1} style={{ flexShrink: 1, minWidth: 0, color, opacity: muted ? 0.7 : 1, fontSize: fontSize.sm,
-          fontWeight: active ? "500" : "400" }}>{label}</Text>
+        <Text numberOfLines={1} style={{ flexShrink: 1, minWidth: 0, color, opacity: muted ? 0.7 : 1, fontSize: TYPE.label.size,
+          lineHeight: TYPE.label.lineHeight, fontWeight: active ? "500" : "400" }}>{label}</Text>
       </Pressable>
       {closable ? (
         <Pressable accessibilityRole="button" accessibilityLabel={`关闭标签 ${label}`} hitSlop={4} onPress={onClose}
           disabled={!showClose} accessibilityElementsHidden={!showClose}
-          style={({ pressed }) => ({ width: 18, height: 18, marginRight: space.xs, flexShrink: 0, alignItems: "center", justifyContent: "center",
-            borderRadius: radius.md, opacity: showClose ? 1 : 0, backgroundColor: pressed ? theme.colors.border : "transparent" })}>
-          <Icon name="X" size={12} color={theme.colors.foregroundMuted} />
+          onHoverIn={() => setCloseHovered(true)} onHoverOut={() => setCloseHovered(false)}
+          style={({ pressed }) => ({ width: 20, height: 20, marginRight: space.xs, flexShrink: 0, alignItems: "center", justifyContent: "center",
+            borderRadius: radius.chip, opacity: showClose ? 1 : 0,
+            backgroundColor: pressed || closeHovered ? tokens.card.controlHover : "transparent", ...WEB_TRANSITION })}>
+          <Icon name="X" size={12} color={closeHovered ? theme.colors.foreground : theme.colors.foregroundMuted} />
         </Pressable>
       ) : null}
     </View>
+  );
+}
+
+function NewTabButton({ theme, onPress }: { theme: Theme; onPress(): void }) {
+  const [hovered, setHovered] = useState(false);
+  const tokens = chatTokens(theme);
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel="新对话" hitSlop={4} onPress={onPress}
+      onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
+      style={({ pressed }) => ({ width: TAB_HEIGHT, height: TAB_HEIGHT, flexShrink: 0, alignItems: "center", justifyContent: "center",
+        borderRadius: radius.block, backgroundColor: pressed ? tokens.pressed : hovered ? tokens.hover : "transparent", ...WEB_TRANSITION })}>
+      <Icon name="Plus" size={16} color={hovered ? theme.colors.foreground : theme.colors.foregroundMuted} />
+    </Pressable>
   );
 }
 

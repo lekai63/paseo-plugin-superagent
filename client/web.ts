@@ -1,5 +1,5 @@
 import { Platform } from "react-native";
-import { APP_SETTINGS_KEY, LEGACY_SETTINGS_KEY, resolveUiFontSize } from "../shared/host-font";
+import { APP_SETTINGS_KEY, LEGACY_SETTINGS_KEY, resolveHostAppearance, resolveUiFontSize, type HostAppearance } from "../shared/host-font";
 import { DEFAULT_SEND_SHORTCUT, resolveHostSendShortcut, type HostSendShortcut } from "../shared/host-send-shortcut";
 
 interface StorageEvent {
@@ -31,6 +31,21 @@ export function readWebUiFontSize(): number | null {
       try { return storage.getItem(key); } catch { return null; }
     };
     return resolveUiFontSize(read(APP_SETTINGS_KEY), read(LEGACY_SETTINGS_KEY), "web");
+  } catch {
+    return null;
+  }
+}
+
+/** Paseo 外观设置(界面/正文字号、内容列宽度);非 Web 或读不到存储时为 null。 */
+export function readWebAppearance(): HostAppearance | null {
+  if (Platform.OS !== "web") return null;
+  try {
+    const storage = browser.localStorage;
+    if (!storage || typeof storage.getItem !== "function") return null;
+    const read = (key: string) => {
+      try { return storage.getItem(key); } catch { return null; }
+    };
+    return resolveHostAppearance(read(APP_SETTINGS_KEY), read(LEGACY_SETTINGS_KEY), "web");
   } catch {
     return null;
   }
@@ -74,6 +89,26 @@ export function subscribeWebReducedMotion(onChange: (reduced: boolean) => void):
   update();
   query.addEventListener("change", update);
   return () => query.removeEventListener("change", update);
+}
+
+/**
+ * 运行点的呼吸(better-paseo `RunningDot`):1200ms 一个周期在全不透明与 30% 之间往返,
+ * 用 CSS 动画在合成层上跑,React 不参与每一帧。
+ */
+export function startWebPulse(node: unknown): (() => void) | undefined {
+  if (Platform.OS !== "web") return;
+  const element = node as {
+    animate?: (frames: { opacity: number }[], options: { duration: number; iterations: number; easing: string }) => {
+      startTime: number | null;
+      cancel(): void;
+    };
+  } | null;
+  if (!element?.animate) return;
+  const animation = element.animate([{ opacity: 1 }, { opacity: 0.3 }, { opacity: 1 }],
+    { duration: 1200, iterations: Infinity, easing: "cubic-bezier(0.33, 1, 0.68, 1)" });
+  // 所有运行点共用同一个时钟,同屏的几个点一起呼吸。
+  animation.startTime = 0;
+  return () => animation.cancel();
 }
 
 export function startWebRotation(node: unknown): (() => void) | undefined {

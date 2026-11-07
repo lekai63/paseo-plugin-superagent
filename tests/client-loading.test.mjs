@@ -99,6 +99,15 @@ test("iOS reads the current font setting through the native module", async () =>
   assert.equal(exports.useHostUiFontSize({}), 18);
 });
 
+test("native clients also follow the content size and width from the same settings", async () => {
+  const { exports } = load(fontBundle, "ios", {
+    turbo: nativeStorage({ "@paseo:app-settings": '{"uiBaseFontSize":16,"contentFontSize":19,"contentMaxWidth":1000}' }),
+  });
+  assert.deepEqual({ ...exports.useHostAppearance({}) }, { uiFontSize: 15, contentFontSize: 16, contentMaxWidth: 820 });
+  await flush();
+  assert.deepEqual({ ...exports.useHostAppearance({}) }, { uiFontSize: 16, contentFontSize: 19, contentMaxWidth: 1000 });
+});
+
 test("Android falls back to legacy native storage and the legacy settings key", async () => {
   const { exports } = load(fontBundle, "android", {
     turbo() { throw new Error("TurboModule unavailable"); },
@@ -134,6 +143,14 @@ test("web reads browser preferences without accessing the native bridge", () => 
   assert.deepEqual(reads, []);
 });
 
+test("web reads content size and width without accessing the native bridge", () => {
+  const { exports, reads } = load(fontBundle, "web", {
+    storage: { getItem: (key) => key === "@paseo:app-settings" ? '{"contentFontSize":17,"contentMaxWidth":960}' : null },
+  });
+  assert.deepEqual({ ...exports.useHostAppearance({}) }, { uiFontSize: 14, contentFontSize: 17, contentMaxWidth: 960 });
+  assert.deepEqual(reads, []);
+});
+
 test("web storage failures keep the default font without accessing native modules", () => {
   const { exports, reads } = load(fontBundle, "web", {
     storage: { getItem() { throw new Error("Storage access denied"); } },
@@ -146,7 +163,9 @@ test("browser helpers are safe no-ops on native clients", () => {
   const { exports } = load(webBundle, "ios");
   const unexpectedBrowserCall = () => assert.fail("Native clients must not call browser APIs");
   assert.equal(exports.readWebUiFontSize(), null);
+  assert.equal(exports.readWebAppearance(), null);
   exports.subscribeWebAppearance(unexpectedBrowserCall)();
   exports.subscribeWebReducedMotion(unexpectedBrowserCall)();
   assert.equal(exports.startWebRotation({ get animate() { unexpectedBrowserCall(); } }), undefined);
+  assert.equal(exports.startWebPulse({ get animate() { unexpectedBrowserCall(); } }), undefined);
 });

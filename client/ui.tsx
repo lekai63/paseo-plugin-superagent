@@ -1,19 +1,20 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Pressable, Text, View, type StyleProp, type ViewStyle } from "react-native";
-import type { PluginHostProps } from "@getpaseo/plugin/client";
-import { Icon, Markdown } from "@getpaseo/plugin/client/ui";
+import { Icon, Markdown, copyText, useToast } from "@getpaseo/plugin/client/ui";
+import { TYPE, mix } from "../shared/design";
 import { markdownPreview, type Tone } from "../shared/labels";
+import { HAIRLINE, WEB_TRANSITION, chatTokens, hueTokens, radius, space, type Theme } from "./theme-tokens";
 
 /**
- * 插件内复用的小型 UI 原语。宿主只向插件暴露 Settings* 系列与 Icon/Modal 等,
- * 按钮、徽标、提示条需要自己画;数值与宿主 theme.ts 的刻度保持一致
- * (间距 4/8/12/16/24、圆角 6/8、字号 12/14/20),颜色全部来自 theme。
+ * 插件内复用的小型 UI 原语。宿主只向插件暴露 Settings* 系列与 Icon/Modal 等,按钮、药丸、
+ * 卡片、提示条需要自己画。外观取自 better-paseo 的设计规范:描边按钮(细线、无底色,
+ * 悬停只加深阴影)、细线药丸、带轻阴影的抬起卡片;颜色全部从宿主 theme 混出。
  */
 
-export type Theme = PluginHostProps["theme"];
+export { HAIRLINE, radius, space, type Theme } from "./theme-tokens";
+export { TYPE, withAlpha } from "../shared/design";
 
-export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24 } as const;
-export const radius = { md: 6, lg: 8, full: 999 } as const;
+/** 旧刻度,设置页等仍在用;新代码优先用 TYPE(字号与行高成对)。 */
 export const fontSize = { sm: 12, base: 14, stat: 20 } as const;
 
 export function toneColor(tone: Tone, theme: Theme): string {
@@ -31,15 +32,13 @@ export function toneColor(tone: Tone, theme: Theme): string {
   }
 }
 
-/** 给 #rgb / #rrggbb 颜色加透明度;其他格式原样返回(宁可不透明也不产出非法颜色)。 */
-export function withAlpha(color: string, alpha: number): string {
-  const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(color);
-  const hex = short ? `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}` : color;
-  if (!/^#[0-9a-f]{6}$/i.test(hex)) return color;
-  const value = Math.round(Math.min(1, Math.max(0, alpha)) * 255)
-    .toString(16)
-    .padStart(2, "0");
-  return `${hex}${value}`;
+/** 状态色点:用宿主 statusDot 色带(比文字状态色更亮,小点也压得住);中性为次要色。 */
+export function toneDotColor(tone: Tone, theme: Theme): string {
+  const status = chatTokens(theme).status;
+  if (tone === "success") return status.success;
+  if (tone === "warning") return status.warning;
+  if (tone === "danger") return status.danger;
+  return tone === "muted" ? mix(theme.colors.foregroundMuted, theme.colors.surface0, 0.3) : theme.colors.foregroundMuted;
 }
 
 // ---------------------------------------------------------------- Button
@@ -54,14 +53,24 @@ export interface ButtonProps {
   onPress(): void;
   variant?: ButtonVariant;
   size?: "xs" | "sm";
-  /** 危险操作:outline/ghost 用红色文字,primary 用红色填充。 */
+  /** 危险操作:描边与文字用危险色;primary 用危险色填充。 */
   danger?: boolean;
+  /** 上膛等需要强调的状态:铺一层色洗。 */
+  emphasized?: boolean;
   disabled?: boolean;
   accessibilityLabel?: string;
 }
 
 const BUTTON_HEIGHT = { xs: 28, sm: 32 } as const;
 
+/**
+ * 按钮(better-paseo「Buttons → Look」):
+ * - outline:细线描边、无底色,文字为前景色、图标为次要色;悬停只加深阴影,按下铺一层浅底;
+ * - secondary:同上再垫一层中性浅底,用于一组里的主操作;
+ * - ghost:无边无底,悬停/按下才出现浅底;
+ * - primary:强调色填充,只给真正的确认动作;
+ * - danger:描边、文字与图标都换成危险色。
+ */
 export function Button({
   theme,
   label,
@@ -70,19 +79,25 @@ export function Button({
   variant = "secondary",
   size = "sm",
   danger = false,
+  emphasized = false,
   disabled = false,
   accessibilityLabel,
 }: ButtonProps) {
   const [hovered, setHovered] = useState(false);
   const { colors } = theme;
+  const tokens = chatTokens(theme);
   const height = BUTTON_HEIGHT[size];
   const filled = variant === "primary";
-  const fillColor = danger ? colors.statusDanger : colors.accent;
-  // 状态色填充上的文字用 surface0:浅色主题是白底色、深色主题是深底色,两边都有足够对比。
-  let foreground: string = danger ? colors.statusDanger : colors.foreground;
-  if (filled) foreground = danger ? colors.surface0 : colors.accentForeground;
-  else if (variant === "ghost" && !danger && !hovered) foreground = colors.foregroundMuted;
+  const dangerHue = danger ? hueTokens(theme, colors.statusDanger, colors.surface0) : null;
+  const type = size === "xs" ? { size: 12, lineHeight: 16 } : TYPE.button;
 
+  let textColor: string = dangerHue?.text ?? colors.foreground;
+  let iconColor: string = dangerHue?.text ?? colors.foregroundMuted;
+  if (filled) textColor = iconColor = danger ? colors.surface0 : colors.accentForeground;
+  else if (variant === "ghost" && !danger && !hovered) textColor = colors.foregroundMuted;
+  if (variant === "ghost" && hovered && !danger) iconColor = colors.foreground;
+
+  const bordered = variant === "outline" || variant === "secondary";
   return (
     <Pressable
       accessibilityRole="button"
@@ -96,28 +111,32 @@ export function Button({
       style={({ pressed }) => {
         const active = (pressed || hovered) && !disabled;
         let backgroundColor = "transparent";
-        if (filled) backgroundColor = fillColor;
-        else if (variant === "secondary") backgroundColor = active ? colors.border : colors.surface2;
-        else if (active) backgroundColor = colors.surface2;
+        if (filled) backgroundColor = danger ? colors.statusDanger : colors.accent;
+        else if (emphasized && dangerHue) backgroundColor = dangerHue.wash;
+        else if (variant === "secondary") backgroundColor = pressed ? tokens.pressed : tokens.hover;
+        else if (variant === "ghost" && active) backgroundColor = pressed ? tokens.pressed : tokens.hover;
+        else if (variant === "outline" && pressed) backgroundColor = tokens.hover;
         return {
           height,
           minWidth: height,
-          paddingHorizontal: label ? (size === "xs" ? space.sm : space.md) : 0,
+          paddingHorizontal: label ? (size === "xs" ? space.sm + 2 : space.md) : 0,
           flexDirection: "row",
           alignItems: "center",
           justifyContent: "center",
           gap: space.xs + 2,
-          borderRadius: radius.md,
-          borderWidth: variant === "outline" || variant === "secondary" ? 1 : 0,
-          borderColor: colors.border,
+          borderRadius: radius.block,
+          borderWidth: bordered || (danger && !filled && variant !== "ghost") ? HAIRLINE : 0,
+          borderColor: dangerHue?.border ?? tokens.card.buttonBorder,
           backgroundColor,
           opacity: disabled ? 0.5 : filled && active ? 0.88 : 1,
+          ...WEB_TRANSITION,
+          ...(bordered && hovered && !disabled ? tokens.card.shadowHover : null),
         };
       }}
     >
-      {icon ? <Icon name={icon} size={size === "xs" ? 14 : 16} color={foreground} /> : null}
+      {icon ? <Icon name={icon} size={14} color={iconColor} /> : null}
       {label ? (
-        <Text style={{ color: foreground, fontSize: size === "xs" ? fontSize.sm : fontSize.base }} numberOfLines={1}>
+        <Text numberOfLines={1} style={{ color: textColor, fontSize: type.size, lineHeight: type.lineHeight, fontWeight: "500" }}>
           {label}
         </Text>
       ) : null}
@@ -126,7 +145,7 @@ export function Button({
 }
 
 /**
- * 二次确认按钮:第一次点击只"上膛"(变成红色确认),4 秒内再点才执行。
+ * 二次确认按钮:第一次点击只"上膛"(换成危险色描边与色洗,文案变成确认语),4 秒内再点才执行。
  * 对应宿主"红色只在用户表达意图后出现"的规则,也省掉一个确认弹窗。
  */
 export function ConfirmButton({
@@ -148,7 +167,7 @@ export function ConfirmButton({
   icon?: string;
   onConfirm(): void;
   size?: "xs" | "sm";
-  /** 上膛前的样式;上膛后总是红色填充。 */
+  /** 上膛前的样式;上膛后总是危险色。 */
   variant?: ButtonVariant;
   disabled?: boolean;
   accessibilityLabel?: string;
@@ -170,9 +189,11 @@ export function ConfirmButton({
     return (
       <Button
         theme={theme}
-        variant="primary"
+        variant="outline"
         danger
+        emphasized
         size={size}
+        icon="CircleAlert"
         label={confirmLabel}
         disabled={disabled}
         onPress={() => {
@@ -190,51 +211,65 @@ export function ConfirmButton({
 
 // ---------------------------------------------------------------- Surfaces
 
-export function Card({ theme, children, style }: { theme: Theme; children: ReactNode; style?: StyleProp<ViewStyle> }) {
-  return (
-    <View
-      style={[
-        {
-          backgroundColor: theme.colors.surface1,
-          borderWidth: 1,
-          borderColor: theme.colors.border,
-          borderRadius: radius.lg,
-          overflow: "hidden",
-        },
-        style,
-      ]}
-    >
-      {children}
-    </View>
-  );
+export type CardState = "rest" | "current" | "failed" | "attention";
+
+/** 抬起的卡片(better-paseo 任务卡):圆角 8、细线描边、轻阴影;状态改变底色与描边。 */
+export function Card({ theme, children, style, state = "rest" }: {
+  theme: Theme;
+  children: ReactNode;
+  style?: StyleProp<ViewStyle>;
+  state?: CardState;
+}) {
+  return <View style={[cardSurface(theme, state), { overflow: "hidden" }, style]}>{children}</View>;
 }
 
-/** 状态徽标:中性外壳 + 状态色圆点与文字(与宿主 StatusBadge 同构)。 */
-export function StatusBadge({ theme, label, tone }: { theme: Theme; label: string; tone: Tone }) {
-  const color = toneColor(tone, theme);
+export function cardSurface(theme: Theme, state: CardState = "rest"): ViewStyle {
+  const card = chatTokens(theme).card;
+  const fill = state === "current" ? card.current : state === "failed" ? card.failed : state === "attention" ? card.attention : card.background;
+  const border = state === "current" ? card.currentBorder : state === "failed" ? card.failedBorder
+    : state === "attention" ? card.attentionBorder : card.border;
+  return { backgroundColor: fill, borderWidth: HAIRLINE, borderColor: border, borderRadius: radius.card, ...card.shadow };
+}
+
+/**
+ * 状态药丸(better-paseo 卡片药丸):20 高、全圆角、细线描边。中性状态用中性浅底与次要色文字;
+ * 成功/警告/危险用该色相的浅洗、描边与可读文字,前面带状态色点。
+ */
+export function StatusBadge({ theme, label, tone, dot = true }: { theme: Theme; label: string; tone: Tone; dot?: boolean }) {
+  const tokens = chatTokens(theme);
+  const hue = tone === "success" || tone === "warning" || tone === "danger" ? toneColor(tone, theme) : null;
+  const surface = tokens.card.background;
+  const tint = hue ? {
+    fill: mix(surface, hue, tokens.isDark ? 0.16 : 0.1),
+    border: mix(surface, hue, tokens.isDark ? 0.34 : 0.26),
+    text: hueTokens(theme, hue, mix(surface, hue, tokens.isDark ? 0.16 : 0.1)).text,
+  } : null;
   return (
     <View
       style={{
         flexDirection: "row",
         alignItems: "center",
-        gap: space.xs + 2,
-        height: 22,
-        paddingHorizontal: space.sm,
+        gap: space.xs + 1,
+        height: 20,
+        paddingHorizontal: space.sm - 1,
         borderRadius: radius.full,
-        borderWidth: 1,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface2,
+        borderWidth: HAIRLINE,
+        borderColor: tint?.border ?? tokens.card.pillBorder,
+        backgroundColor: tint?.fill ?? tokens.card.pillFill,
+        flexShrink: 1,
+        minWidth: 0,
       }}
     >
-      <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color }} />
-      <Text style={{ color, fontSize: fontSize.sm }} numberOfLines={1}>
+      {dot ? <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: toneDotColor(tone, theme) }} /> : null}
+      <Text style={{ flexShrink: 1, color: tint?.text ?? theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight }}
+        numberOfLines={1}>
         {label}
       </Text>
     </View>
   );
 }
 
-/** 页面级提示条:细边框、透明底、带色图标与标题,描述用次要色;操作放 children。 */
+/** 页面级提示条:该色相的浅洗与描边,带色图标与标题,描述用次要色;操作放 children。 */
 export function Notice({
   theme,
   tone,
@@ -248,27 +283,33 @@ export function Notice({
   description?: string | null;
   children?: ReactNode;
 }) {
-  const color = tone === "default" ? theme.colors.foreground : toneColor(tone, theme);
+  const tokens = chatTokens(theme);
+  const hue = tone === "default" ? null : toneColor(tone, theme);
+  const surface = theme.colors.surface0;
+  const fill = hue ? mix(surface, hue, tokens.isDark ? 0.08 : 0.06) : tokens.card.background;
+  const color = hue ? hueTokens(theme, hue, fill).text : theme.colors.foreground;
   const icon = tone === "danger" ? "CircleAlert" : tone === "warning" ? "TriangleAlert" : "Info";
   return (
     <View
       accessibilityRole="alert"
       style={{
         flexDirection: "row",
-        gap: space.md,
-        padding: space.lg,
-        borderWidth: 1,
-        borderRadius: radius.lg,
-        borderColor: tone === "default" ? theme.colors.border : withAlpha(color, 0.45),
+        gap: space.sm + 2,
+        paddingVertical: space.md,
+        paddingHorizontal: space.md + 2,
+        borderWidth: HAIRLINE,
+        borderRadius: radius.card,
+        borderColor: hue ? mix(theme.colors.border, hue, 0.35) : theme.colors.border,
+        backgroundColor: fill,
       }}
     >
-      <View style={{ paddingTop: 2 }}>
+      <View style={{ height: TYPE.body.lineHeight, justifyContent: "center" }}>
         <Icon name={icon} size={16} color={color} />
       </View>
-      <View style={{ flex: 1, minWidth: 0, gap: space.xs }}>
-        <Text style={{ color, fontSize: fontSize.base, fontWeight: "500" }}>{title}</Text>
+      <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+        <Text style={{ color, fontSize: TYPE.body.size, lineHeight: TYPE.body.lineHeight, fontWeight: "600" }}>{title}</Text>
         {description ? (
-          <Text selectable style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm, lineHeight: 18 }}>
+          <Text selectable style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.labelRead.size, lineHeight: TYPE.labelRead.lineHeight }}>
             {description}
           </Text>
         ) : null}
@@ -295,9 +336,10 @@ export function StatTile({
   caption?: string | null;
 }) {
   return (
-    <Card theme={theme} style={{ flex: 1, minWidth: 0, paddingVertical: space.md, paddingHorizontal: space.lg, gap: 2 }}>
-      <Text style={{ color: toneColor(tone, theme), fontSize: fontSize.stat, fontVariant: ["tabular-nums"] }}>{value}</Text>
-      <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }} numberOfLines={1}>
+    <Card theme={theme} style={{ flex: 1, minWidth: 0, paddingVertical: space.sm + 2, paddingHorizontal: space.md, gap: 2 }}>
+      <Text style={{ color: tone === "default" ? theme.colors.foreground : toneColor(tone, theme), fontSize: TYPE.stat.size,
+        lineHeight: TYPE.stat.lineHeight, fontWeight: "600", fontVariant: ["tabular-nums"] }}>{value}</Text>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight }} numberOfLines={1}>
         {label}
         {caption ? <Text style={{ color: theme.colors.statusWarning }}>{` · ${caption}`}</Text> : null}
       </Text>
@@ -305,13 +347,72 @@ export function StatTile({
   );
 }
 
-/** 卡片内分组的小标题(结构性标签:medium 字重、次要色)。 */
+/** 分组小标题(结构性标签:12/16、semibold、次要色)。 */
 export function GroupLabel({ theme, children, trailing }: { theme: Theme; children: string; trailing?: ReactNode }) {
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.sm }}>
-      <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm, fontWeight: "500" }}>{children}</Text>
+    <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.sm, minHeight: 20 }}>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight, fontWeight: "600" }}>
+        {children}
+      </Text>
       {trailing}
     </View>
+  );
+}
+
+/** 文字按钮(展开全部 / 收起 之类):13/18、medium、次要色,悬停变前景色。 */
+export function TextButton({ theme, label, onPress, accessibilityLabel }: {
+  theme: Theme;
+  label: string;
+  onPress(): void;
+  accessibilityLabel?: string;
+}) {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel ?? label} hitSlop={6} onPress={onPress}
+      onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)} style={{ alignSelf: "flex-start" }}>
+      <Text style={{ color: hovered ? theme.colors.foreground : theme.colors.foregroundMuted, fontSize: TYPE.button.size,
+        lineHeight: TYPE.button.lineHeight, fontWeight: "500" }}>{label}</Text>
+    </Pressable>
+  );
+}
+
+/**
+ * 复制按钮(better-paseo 同款):24 的方框放 14 的图标,复制成功后 1.2 秒显示对勾并提示;
+ * 失败只提示错误,不显示对勾。走宿主 copyText,各平台一致。
+ */
+export function CopyButton({ theme, text, label = "复制", touch = false }: {
+  theme: Theme;
+  text: string;
+  /** 无障碍与提示里的说法,例如「复制消息」。 */
+  label?: string;
+  touch?: boolean;
+}) {
+  const toast = useToast();
+  const tokens = chatTokens(theme);
+  const [copied, setCopied] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1200);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  const copy = () => {
+    copyText(text).then(
+      () => {
+        setCopied(true);
+        toast.show("已复制", { variant: "success" });
+      },
+      (error: unknown) => toast.error(`复制失败:${error instanceof Error ? error.message : String(error)}`),
+    );
+  };
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={copied ? "已复制" : label} hitSlop={touch ? 10 : 4} onPress={copy}
+      onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
+      style={({ pressed }) => ({ width: 24, height: 24, alignItems: "center", justifyContent: "center", borderRadius: radius.chip,
+        backgroundColor: pressed ? tokens.pressed : hovered ? tokens.hover : "transparent", ...WEB_TRANSITION })}>
+      <Icon name={copied ? "Check" : "Copy"} size={14}
+        color={copied ? tokens.status.success : hovered ? theme.colors.foreground : theme.colors.foregroundMuted} />
+    </Pressable>
   );
 }
 
@@ -336,13 +437,9 @@ export function ExpandableText({
   const trimmed = text.trim();
   const long = trimmed.length > lines * 64 || trimmed.split("\n").length > lines;
   const toggle = long ? (
-    <Text
-      accessibilityRole="button"
-      onPress={() => setOpen((value) => !value)}
-      style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm, marginTop: space.xs, alignSelf: "flex-start" }}
-    >
-      {open ? "收起" : "展开全部"}
-    </Text>
+    <View style={{ marginTop: space.xs }}>
+      <TextButton theme={theme} label={open ? "收起" : "展开全部"} onPress={() => setOpen((value) => !value)} />
+    </View>
   ) : null;
 
   if (open && markdown) {
@@ -358,7 +455,7 @@ export function ExpandableText({
       <Text
         selectable
         numberOfLines={open ? undefined : lines}
-        style={{ color: color ?? theme.colors.foreground, fontSize: fontSize.base, lineHeight: 20 }}
+        style={{ color: color ?? theme.colors.foreground, fontSize: TYPE.labelRead.size, lineHeight: TYPE.labelRead.lineHeight }}
       >
         {markdown ? markdownPreview(trimmed) : trimmed}
       </Text>

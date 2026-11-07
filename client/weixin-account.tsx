@@ -129,7 +129,7 @@ export function WeixinAccountPanel({ hostId, theme, savedEnabled }: { hostId: st
       {active ? (
         <View style={{ padding: space.lg, gap: space.md }}>
           {login.qrModules ? <QrMatrix modules={login.qrModules} /> : null}
-          <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base, textAlign: "center" }}>
+          <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base, lineHeight: 20, textAlign: "center" }}>
             {login.message ?? "用手机微信扫描二维码"}
           </Text>
           {login.qrUrl ? (
@@ -185,7 +185,7 @@ export function WeixinAccountPanel({ hostId, theme, savedEnabled }: { hostId: st
       ) : null}
       {!active && login.phase === "confirmed" && login.message ? (
         <View style={{ paddingHorizontal: space.lg, paddingBottom: space.md }}>
-          <Text style={{ color: theme.colors.statusSuccess, fontSize: fontSize.sm }}>{login.message}</Text>
+          <Text style={{ color: theme.colors.statusSuccess, fontSize: fontSize.sm, lineHeight: 18 }}>{login.message}</Text>
         </View>
       ) : null}
       {account && !active ? (

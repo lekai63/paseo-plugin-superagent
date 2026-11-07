@@ -27,8 +27,23 @@ import {
 } from "../shared/rpc";
 import { superagentSettings, type SuperagentSettingsValues } from "../shared/settings";
 import { ImDeliveries, undeliveredReplies } from "./im-deliveries";
+import { TYPE } from "../shared/design";
+import { RunningDot } from "./agent-status-icon";
 import { STATE_QUERY_KEY, useExecutionAgents, type AgentObservation } from "./query";
-import { Button, ConfirmButton, ExpandableText, GroupLabel, StatTile, StatusBadge, fontSize, radius, space, toneColor, type Theme } from "./ui";
+import { HAIRLINE, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
+import {
+  Button,
+  ConfirmButton,
+  ExpandableText,
+  GroupLabel,
+  StatTile,
+  StatusBadge,
+  TextButton,
+  cardSurface,
+  toneColor,
+  toneDotColor,
+  type CardState,
+} from "./ui";
 
 /**
  * 对话页右侧栏:对话之外的信息都在这里——
@@ -67,28 +82,35 @@ export interface ChatSidebarProps {
 export function SidebarTabs({ tab, onTab, theme, trailing }: Pick<ChatSidebarProps, "tab" | "onTab" | "theme" | "trailing">) {
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs, height: 44, paddingHorizontal: space.sm,
-      borderBottomWidth: 1, borderBottomColor: theme.colors.border }}>
-      {TABS.map((item) => {
-        const active = item.id === tab;
-        return (
-          <Pressable key={item.id} accessibilityRole="tab" accessibilityState={{ selected: active }} onPress={() => onTab(item.id)}
-            style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: space.xs + 2, height: 28, paddingHorizontal: space.sm,
-              borderRadius: radius.md, backgroundColor: active ? theme.colors.surface2 : pressed ? theme.colors.surface1 : "transparent" })}>
-            <Icon name={item.icon} size={14} color={active ? theme.colors.foreground : theme.colors.foregroundMuted} />
-            <Text style={{ color: active ? theme.colors.foreground : theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{item.label}</Text>
-          </Pressable>
-        );
-      })}
+      borderBottomWidth: HAIRLINE, borderBottomColor: theme.colors.border }}>
+      {TABS.map((item) => (
+        <SidebarTabButton key={item.id} item={item} active={item.id === tab} theme={theme} onPress={() => onTab(item.id)} />
+      ))}
       <View style={{ flex: 1 }} />
       {trailing}
     </View>
   );
 }
 
+function SidebarTabButton({ item, active, theme, onPress }: { item: (typeof TABS)[number]; active: boolean; theme: Theme; onPress(): void }) {
+  const [hovered, setHovered] = useState(false);
+  const tokens = chatTokens(theme);
+  const color = active || hovered ? theme.colors.foreground : theme.colors.foregroundMuted;
+  return (
+    <Pressable accessibilityRole="tab" accessibilityState={{ selected: active }} onPress={onPress}
+      onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
+      style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: space.xs + 2, height: 28, paddingHorizontal: space.sm + 2,
+        borderRadius: radius.block, backgroundColor: active || pressed ? tokens.pressed : hovered ? tokens.hover : "transparent", ...WEB_TRANSITION })}>
+      <Icon name={item.icon} size={14} color={color} />
+      <Text style={{ color, fontSize: TYPE.label.size, lineHeight: TYPE.label.lineHeight, fontWeight: active ? "500" : "400" }}>{item.label}</Text>
+    </Pressable>
+  );
+}
+
 export function SidebarContent(props: ChatSidebarProps) {
   const { tab, snapshot, theme } = props;
   if (!snapshot) {
-    return <Text style={{ padding: space.lg, color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>正在读取状态…</Text>;
+    return <Text style={{ padding: space.lg, color: theme.colors.foregroundMuted, fontSize: TYPE.label.size, lineHeight: TYPE.label.lineHeight }}>正在读取状态…</Text>;
   }
   return (
     <View style={{ padding: space.md, gap: space.lg }}>
@@ -156,7 +178,7 @@ function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, h
       <View style={{ gap: space.sm }}>
         <GroupLabel theme={theme}>{thread ? `本对话的 Worker · ${tickets.length}` : `进行中的 Worker · ${tickets.length}`}</GroupLabel>
         {ordered.length === 0 ? (
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm, lineHeight: 18 }}>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.labelRead.size, lineHeight: TYPE.labelRead.lineHeight }}>
             {thread ? "Router 还没有为这段对话派发 Worker。" : "暂无进行中的 Worker。选择一段对话查看它的全部任务。"}
           </Text>
         ) : ordered.map((ticket) => (
@@ -185,21 +207,20 @@ function RouterCard({ snapshot, observation, theme, navigation }: {
   const session = snapshot.routerAgentId ? observationStatus(observation) : null;
   const routerAgentId = snapshot.routerAgentId;
   return (
-    <SidebarCard theme={theme} active={snapshot.engine.evalInFlight}>
+    <SidebarCard theme={theme}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-        <Icon name="Route" size={16} color={theme.colors.foregroundMuted} />
-        <Text style={{ flex: 1, color: theme.colors.foreground, fontSize: fontSize.base, fontWeight: "500" }}>Router</Text>
+        <View style={{ width: 16, alignItems: "center" }}>
+          {snapshot.engine.evalInFlight ? <RunningDot color={chatTokens(theme).status.running} accessibilityLabel="Router 评估中" />
+            : <Icon name="Route" size={15} color={theme.colors.foregroundMuted} />}
+        </View>
+        <Text style={{ flex: 1, color: theme.colors.foreground, fontSize: TYPE.body.size, lineHeight: TYPE.body.lineHeight, fontWeight: "600" }}>Router</Text>
         <StatusBadge theme={theme} {...state} />
       </View>
       {session && session.tone !== "muted" && session.label !== "会话执行中" ? (
         <View style={{ flexDirection: "row" }}><StatusBadge theme={theme} {...session} /></View>
       ) : null}
-      <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
-        {snapshot.routerProvider || "自动选择模型"}
-      </Text>
-      {evaluating ? (
-        <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>正在评估 · {evaluating.title}</Text>
-      ) : null}
+      <CardMeta theme={theme} lines={2}>{snapshot.routerProvider || "自动选择模型"}</CardMeta>
+      {evaluating ? <CardMeta theme={theme} lines={2}>{`正在评估 · ${evaluating.title}`}</CardMeta> : null}
       {routerAgentId && navigation ? (
         <View style={{ flexDirection: "row" }}>
           <Button theme={theme} size="xs" variant="outline" icon="ArrowUpRight" label="打开 Router 会话"
@@ -244,15 +265,23 @@ function TicketItem({ ticket, observation, direct, viewThreadId = null, threadTi
   ].filter(Boolean).join(" · ");
   const workerId = ticket.workerAgentId;
   return (
-    <SidebarCard theme={theme} active={attention} activeColor={toneColor(session?.tone ?? "danger", theme)}>
+    <SidebarCard theme={theme} state={ticket.status === "failed" || (attention && (session?.tone ?? "danger") === "danger") ? "failed"
+      : attention ? "attention" : "rest"}>
       {threadTitle ? (
-        <Pressable accessibilityRole="button" accessibilityLabel={`打开对话:${threadTitle}`} disabled={!onOpenThread} onPress={onOpenThread}>
-          <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{threadTitle}</Text>
+        <Pressable accessibilityRole="button" accessibilityLabel={`打开对话:${threadTitle}`} disabled={!onOpenThread} onPress={onOpenThread}
+          style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
+          <Icon name="MessagesSquare" size={12} color={theme.colors.foregroundMuted} />
+          <Text numberOfLines={1} style={{ flexShrink: 1, color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size,
+            lineHeight: TYPE.caption.lineHeight }}>{threadTitle}</Text>
         </Pressable>
       ) : null}
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
-        <View style={{ paddingTop: 2 }}><Icon name="Bot" size={15} color={theme.colors.foregroundMuted} /></View>
-        <Text numberOfLines={2} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: fontSize.base, lineHeight: 20 }}>{ticket.title}</Text>
+        <View style={{ width: 16, height: TYPE.body.lineHeight, alignItems: "center", justifyContent: "center" }}>
+          {active ? <RunningDot color={chatTokens(theme).status.running} accessibilityLabel={ticketStatusLabel(ticket.status)} />
+            : <Icon name="Bot" size={15} color={theme.colors.foregroundMuted} />}
+        </View>
+        <Text numberOfLines={2} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: TYPE.body.size, lineHeight: TYPE.body.lineHeight,
+          fontWeight: "500" }}>{ticket.title}</Text>
       </View>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs }}>
         <StatusBadge theme={theme} label={ticketStatusLabel(ticket.status)} tone={ticketStatusTone(ticket.status)} />
@@ -262,7 +291,7 @@ function TicketItem({ ticket, observation, direct, viewThreadId = null, threadTi
         {!following && followsOf(ticket).length ? <StatusBadge theme={theme} label={`另跟随 ${followsOf(ticket).length} 段对话`} tone="muted" /> : null}
         {ticket.speculative ? <StatusBadge theme={theme} label="投机执行" tone="warning" /> : null}
       </View>
-      <Text numberOfLines={3} style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm, lineHeight: 17 }}>{meta}</Text>
+      <CardMeta theme={theme} lines={3}>{meta}</CardMeta>
       {ticket.lastError ? (
         <ExpandableText theme={theme} text={ticket.lastError} lines={2} color={theme.colors.statusDanger} />
       ) : null}
@@ -332,14 +361,13 @@ function ThreadsTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme 
       <View style={{ gap: space.xs }}>
         <GroupLabel theme={theme}>{`进行中 · ${open.length}`}</GroupLabel>
         {open.length ? open.map(row) : (
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>没有进行中的对话</Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.label.size, lineHeight: TYPE.label.lineHeight }}>没有进行中的对话</Text>
         )}
       </View>
       {closed.length ? (
         <View style={{ gap: space.xs }}>
           <GroupLabel theme={theme} trailing={
-            <Text accessibilityRole="button" onPress={() => setShowClosed((value) => !value)}
-              style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{showClosed ? "收起" : "展开"}</Text>
+            <TextButton theme={theme} label={showClosed ? "收起" : "展开"} onPress={() => setShowClosed((value) => !value)} />
           }>{`已关闭 · ${closed.length}`}</GroupLabel>
           {showClosed ? closed.map(row) : null}
         </View>
@@ -351,6 +379,8 @@ function ThreadsTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme 
 /** 对话行首行高度,以及悬停时覆盖在时间处的按钮高度(Button xs)。 */
 const THREAD_LINE_HEIGHT = 20;
 const THREAD_ACTION_SIZE = 28;
+/** 行首状态点的槽宽:第二行与标题对齐。 */
+const THREAD_MARK = 8;
 
 function ThreadRow({ thread, tickets, selected, theme, onPress, onClose }: {
   thread: Thread;
@@ -375,25 +405,37 @@ function ThreadRow({ thread, tickets, selected, theme, onPress, onClose }: {
   // 按钮是行按钮的兄弟节点(web 不能嵌套按钮),绝对定位盖在时间上;时间只隐藏不移除,
   // 宽度不变,标题不跳。确认文案更宽时按实测宽度给时间处留位,标题随之让开。
   const actionWidth = armed ? armedWidth : THREAD_ACTION_SIZE;
+  const tokens = chatTokens(theme);
+  const busy = thread.state !== "closed"
+    && (thread.pendingTriggers > 0 || own.some((ticket) => ACTIVE_TICKET_STATUSES.includes(ticket.status)));
+  const closed = thread.state === "closed";
   return (
     <View onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}
-      style={{ borderRadius: radius.lg,
-        backgroundColor: selected ? theme.colors.surface2 : pressed || hovered ? theme.colors.surface1 : "transparent" }}>
+      style={{ borderRadius: radius.block, ...WEB_TRANSITION,
+        backgroundColor: selected || pressed ? tokens.pressed : hovered ? tokens.hover : "transparent" }}>
       <Pressable accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={`${thread.title},${status.label}`}
         onPress={onPress} onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
         style={{ gap: 2, paddingHorizontal: space.sm, paddingVertical: space.sm }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: toneColor(status.tone, theme) }} />
-          <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: fontSize.base,
-            lineHeight: THREAD_LINE_HEIGHT }}>{thread.title}</Text>
+          <View style={{ width: THREAD_MARK, alignItems: "center" }}>
+            {busy ? <RunningDot color={chatTokens(theme).status.running} accessibilityLabel={status.label} />
+              : <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: toneDotColor(status.tone, theme) }} />}
+          </View>
+          <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: closed ? theme.colors.foregroundMuted : theme.colors.foreground,
+            fontSize: TYPE.body.size, lineHeight: THREAD_LINE_HEIGHT, fontWeight: selected ? "500" : "400" }}>{thread.title}</Text>
           <View style={{ minWidth: showAction ? actionWidth : 0, alignItems: "flex-end" }}>
-            <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm, opacity: showAction ? 0 : 1 }}>
+            <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight,
+              fontVariant: ["tabular-nums"], opacity: showAction ? 0 : 1 }}>
               {relativeTime(thread.updatedAt)}
             </Text>
           </View>
         </View>
-        <Text numberOfLines={1} style={{ marginLeft: 6 + space.sm, color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
-          {status.label}{preview ? ` · ${preview}` : ""}
+        <Text numberOfLines={1} style={{ marginLeft: THREAD_MARK + space.sm, color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size,
+          lineHeight: TYPE.caption.lineHeight }}>
+          <Text style={{ color: status.tone === "danger" || status.tone === "warning" ? toneColor(status.tone, theme) : theme.colors.foregroundMuted }}>
+            {status.label}
+          </Text>
+          {preview ? ` · ${preview}` : ""}
         </Text>
       </Pressable>
       {onClose && showAction ? (
@@ -496,21 +538,26 @@ function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSi
 function InfoRow({ theme, label, value, tone }: { theme: Theme; label: string; value: string; tone?: "warning" | "danger" }) {
   return (
     <View style={{ gap: 2 }}>
-      <Text style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>{label}</Text>
-      <Text selectable style={{ color: tone ? toneColor(tone, theme) : theme.colors.foreground, fontSize: fontSize.sm, lineHeight: 18 }}>{value}</Text>
+      <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight }}>{label}</Text>
+      <Text selectable style={{ color: tone ? toneColor(tone, theme) : theme.colors.foreground, fontSize: TYPE.labelRead.size,
+        lineHeight: TYPE.labelRead.lineHeight }}>{value}</Text>
     </View>
   );
 }
 
-function SidebarCard({ theme, active = false, activeColor, children }: {
-  theme: Theme;
-  active?: boolean;
-  activeColor?: string;
-  children: ReactNode;
-}) {
+/** 卡片里的次要说明:12/18(会换行的小字多给行距)、次要色。 */
+function CardMeta({ theme, lines, children }: { theme: Theme; lines: number; children: string }) {
   return (
-    <View style={{ gap: space.sm, padding: space.md, borderRadius: radius.lg, borderWidth: 1,
-      borderColor: active ? activeColor ?? theme.colors.statusWarning : theme.colors.border, backgroundColor: theme.colors.surface1 }}>
+    <Text numberOfLines={lines} style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.captionRead.size, lineHeight: TYPE.captionRead.lineHeight }}>
+      {children}
+    </Text>
+  );
+}
+
+/** 侧栏卡片(better-paseo 任务卡):抬起的表面、细线描边、轻阴影;失败与待处理换底色与描边。 */
+function SidebarCard({ theme, state = "rest", children }: { theme: Theme; state?: CardState; children: ReactNode }) {
+  return (
+    <View style={{ gap: space.sm, paddingTop: space.sm + 2, paddingBottom: space.md, paddingHorizontal: space.md, ...cardSurface(theme, state) }}>
       {children}
     </View>
   );
