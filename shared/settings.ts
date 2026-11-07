@@ -68,13 +68,14 @@ const WorkerProfilesSchema = z
  * 自动挑一个稳定的默认(优先 claude → codex → opencode → 任意可用),并记入 kv,
  * 保证 Router/Worker 的模型选择跨重启稳定。
  *
- * IM 触发源(飞书/QQ)的准入白名单是硬门槛:allowUsers/allowChats 全空时
- * 该 source 拒绝启动(对齐 Paseo Hub from_users 的安全设计)。
+ * IM 触发源的准入白名单是硬门槛:allowUsers/allowChats 全空时该 source 拒绝启动
+ * (对齐 Paseo Hub from_users 的安全设计)。微信例外:扫码人自动在白名单里,
+ * 凭证由扫码登录写在 daemon 本机,不进设置。
  */
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 10,
+  version: 11,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
@@ -158,6 +159,11 @@ export const superagentSettings = defineSettings({
     /** 允许的会话 chatid(群聊),逗号分隔;群聊被 @ 才会收到。 */
     wecomAllowChats: z.string().trim().max(2000).default(""),
 
+    // ---- 微信触发源(腾讯官方 iLink / 微信 ClawBot,扫码登录,HTTP 长轮询,免公网) ----
+    weixinEnabled: z.boolean().default(false),
+    /** 扫码人之外允许的微信用户 ID(xxx@im.wechat),逗号分隔;仅私聊。 */
+    weixinAllowUsers: z.string().trim().max(2000).default(""),
+
     /** IM 单条消息上限(含分段序号);长答复完整分段发送。 */
     imReplyMaxChars: boundedInt("imReplyMaxChars", 600),
 
@@ -184,7 +190,8 @@ export const superagentSettings = defineSettings({
    * v6 → v7:档位新增 workingDir(留空 = 全局 workingDir),旧档位由默认值补齐;
    * v7 → v8:新增 feishuObserve/qqObserve(默认关闭,行为与旧版一致);
    * v8 → v9:新增 speculativeEnabled 与 watchdog* 字段(默认关闭,行为与旧版一致);
-   * v9 → v10:新增 workerModeId 与档位 modeId(留空沿用 Paseo 默认模式)。
+   * v9 → v10:新增 workerModeId 与档位 modeId(留空沿用 Paseo 默认模式);
+   * v10 → v11:新增 weixinEnabled/weixinAllowUsers(默认关闭,行为与旧版一致)。
    */
   migrate: (values) => values,
 });

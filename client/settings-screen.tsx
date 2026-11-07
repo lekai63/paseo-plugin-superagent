@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSettings, type PluginSurfaceProps, type SettingsState } from "@getpaseo/plugin/client";
@@ -25,6 +25,7 @@ import {
 } from "../shared/settings";
 import { STATE_QUERY_KEY, useProviderSnapshot, type ProviderSnapshotEntry } from "./query";
 import { fontSize, radius, space } from "./ui";
+import { WeixinAccountPanel } from "./weixin-account";
 
 /**
  * Settings → Plugins → Superagent。宿主负责标题栏、返回、滚动与居中栏宽;
@@ -435,10 +436,14 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
 
       <SettingsSection
         title="IM 触发源"
-        info="从聊天软件接收指令,Router 的答复回到原聊天。白名单(发送者或会话至少填一项)是硬门槛:全空时该通道不会启动。保存后自动重连,无需重启 daemon。"
+        info="从聊天软件接收指令,Router 的答复回到原聊天。白名单(发送者或会话至少填一项)是硬门槛:全空时该通道不会启动;微信的扫码人自动在白名单内。保存后自动重连,无需重启 daemon。"
       >
         {CHANNELS.map((channel) => (
-          <ChannelCard key={channel.enabled} channel={channel} {...field} />
+          <ChannelCard key={channel.enabled} channel={channel} {...field}>
+            {channel.enabled === "weixinEnabled" ? (
+              <WeixinAccountPanel hostId={hostId} theme={theme} savedEnabled={settings.values.weixinEnabled} />
+            ) : null}
+          </ChannelCard>
         ))}
         <SettingsCard>
           <TextField {...field} name="imReplyMaxChars" label="IM 单条消息上限(字符)" hint="包含分段序号;长答复自动分成多条依次发完" />
@@ -831,6 +836,8 @@ interface Channel {
   fields: ChannelField[];
   /** 群聊观察模式开关(未 @ 的群消息作为上下文交给 Router);仅支持该模式的通道填写。 */
   observe?: BooleanKey;
+  /** 白名单可以全空:登录者自动允许(微信扫码人)。 */
+  allowlistOptional?: boolean;
 }
 
 const CHANNELS: Channel[] = [
@@ -880,12 +887,26 @@ const CHANNELS: Channel[] = [
       { name: "wecomAllowChats", label: "允许的群", hint: "chatid,逗号分隔", allowlist: true },
     ],
   },
+  {
+    enabled: "weixinEnabled",
+    title: "微信",
+    hint: "腾讯官方 ClawBot(iLink)通道,扫码登录,免公网;仅私聊",
+    allowlistOptional: true,
+    fields: [
+      {
+        name: "weixinAllowUsers",
+        label: "另外允许的用户",
+        hint: "扫码人自动允许;其他人填微信用户 ID(xxx@im.wechat),逗号分隔",
+        allowlist: true,
+      },
+    ],
+  },
 ];
 
-function ChannelCard({ channel, ...field }: FieldContext & { channel: Channel }) {
+function ChannelCard({ channel, children, ...field }: FieldContext & { channel: Channel; children?: ReactNode }) {
   const enabled = field.form[channel.enabled];
   const allowlist = channel.fields.filter((f) => f.allowlist);
-  const allowlistEmpty = allowlist.every((f) => parseAllowlist(field.form[f.name]).length === 0);
+  const allowlistEmpty = !channel.allowlistOptional && allowlist.every((f) => parseAllowlist(field.form[f.name]).length === 0);
   return (
     <SettingsCard>
       <SwitchField {...field} name={channel.enabled} label={channel.title} hint={channel.hint} />
@@ -897,6 +918,7 @@ function ChannelCard({ channel, ...field }: FieldContext & { channel: Channel })
           hint="未 @ 机器人的群消息作为上下文交给 Router 判断,不再丢弃;关闭时记为已过滤留痕"
         />
       ) : null}
+      {enabled ? children : null}
       {enabled
         ? channel.fields.map((f) => (
             <TextField

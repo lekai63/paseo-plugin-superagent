@@ -16,7 +16,7 @@ Paseo 的 Router/Worker 双层编排插件。按《Super-agent 设计探索》�
 - **批处理**:同一批窗口内的触发合并进一次 Router LLM 调用;窗口一经武装不再被后续消息重置(有界合并,持续消息流不会无限推迟评估);
 - **看门狗(两层)**:程序看门狗每 15 秒对账——错过完成、卡死启动、运行超时、评估重排、待执行动作补执行,进程重启后自恢复;**LLM 看门狗**(可选,默认关)是独立的 `Superagent Watchdog` 会话,按间隔收到全部未完结票据的进展摘要(会话状态、自上次巡检新增的时间线条目、静默时长、最近消息、权限等待)与引擎健康状况,判断有无实质进展/是否偏离任务,用 JSON 动作 `nudge`/`interrupt`/`cancel`/`retry`/`reeval`/`escalate` 介入(取消与上报经 Router 告诉人);维护者可在状态栏一键打开该会话直接问诊;
 - **Router 只裁决(硬约束)**:Router/看门狗的权限请求由插件按策略应答——自身回读工具放行,其余工具、计划与模式切换一律拒绝;codex 系 Router/看门狗以只读沙箱创建。Worker 的退订/转回工具自动放行;
-- **IM 触发源**:飞书(官方长连接)、QQ(OneBot 11 / NapCat)、钉钉、企业微信接收指令,Router 答复回到原聊天;插件启动即连接,引擎启动(首个 hook/RPC)之前到达的消息先落盘,启动后补直通/评估。
+- **IM 触发源**:飞书(官方长连接)、QQ(OneBot 11 / NapCat)、钉钉、企业微信、微信(腾讯官方 ClawBot / iLink,扫码登录)接收指令,Router 答复回到原聊天;插件启动即连接,引擎启动(首个 hook/RPC)之前到达的消息先落盘,启动后补直通/评估。
 
 ## 架构
 
@@ -82,13 +82,13 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 | 注入委派 MCP | 开启后所有普通 agent 的会话注入 `superagent_dispatch` 工具。走**插件自持的本地 MCP server**(`127.0.0.1` 随机端口 + 随机密钥路径),不受宿主 "Paseo tools"(`mcp.injectIntoAgents`)开关影响。同一 endpoint 还按角色给编排自身的会话下发工具:Router 拿 `superagent_list`/`superagent_read`/`superagent_search`(只读回读与检索),Worker 拿 `superagent_unsubscribe`/`superagent_handback`(会话控制)——这部分不受本开关控制。角色工具在**每次会话启动时经 session_open 注入**——不能写进 agent 保存配置:同名 mcpServer 与插件注入冲突会被 daemon 拒绝,`toolPolicy` 预授权引用的 server 又必须出现在同一请求里,两条都走不通 |
 | 注入 provider | 允许注入上述 MCP 的 provider 家族,逗号分隔(如 `codex,claude`);留空 = claude,codex,opencode,omp,copilot。不支持 MCP server 的 provider(如 pi)注入会导致会话启动失败,默认排除;Router/Worker 的角色工具注入同样按「默认名单 ∪ 此名单」的家族门控(provider 带 model 限定时按 `/` 前的家族判断;插件型 provider 如 zcode-acp 由 daemon 统一声明支持 MCP,想给它注入就在此配置) |
 
-## IM 触发源(飞书 / QQ / 钉钉 / 企业微信)
+## IM 触发源(飞书 / QQ / 钉钉 / 企业微信 / 微信)
 
-在设置页「IM 触发源」打开对应开关并填入凭据与**白名单**(发送者/会话至少一项;全空不启动,防陌生人触发)。保存即热重载,无需重启 daemon。
+在设置页「IM 触发源」打开对应开关并填入凭据与**白名单**(发送者/会话至少一项;全空不启动,防陌生人触发;微信的扫码人自动在白名单内)。保存即热重载,无需重启 daemon。
 
 **分级准入**:白名单命中但未 @ 机器人的群消息(飞书/QQ)默认记为**已过滤**留痕(对话气泡显示「已过滤 · 群消息未 @ 机器人」,不评估、不直通、每线程上限 30 条);打开该通道的**群聊观察模式**后,这类消息改为上下文触发交给 Router 判断(可忽略,也可按需行动)——对齐文章「观察公共聊天、未被点名也可介入」的候选档。钉钉/企微的未 @ 群消息在平台侧就不会投递,无此档位。
 
-> 选型说明:调研过 [openclaw-china](https://github.com/BytePioneer-AI/openclaw-china)(MIT,TypeScript)——其 adapter 深度绑定 OpenClaw 宿主 runtime(消息路由/会话存储/流式回复均走宿主),无法脱离 OpenClaw 独立 import。因此本插件采用与其**相同的官方 SDK 矩阵**直接接入:飞书 `@larksuiteoapi/node-sdk`、钉钉 `dingtalk-stream`、企微 `@wecom/aibot-node-sdk`,全部官方 API、长连接、免公网。
+> 选型说明:调研过 [openclaw-china](https://github.com/BytePioneer-AI/openclaw-china)(MIT,TypeScript)——其 adapter 深度绑定 OpenClaw 宿主 runtime(消息路由/会话存储/流式回复均走宿主),无法脱离 OpenClaw 独立 import。因此本插件采用与其**相同的官方 SDK 矩阵**直接接入:飞书 `@larksuiteoapi/node-sdk`、钉钉 `dingtalk-stream`、企微 `@wecom/aibot-node-sdk`,全部官方 API、长连接、免公网。微信同理:腾讯官方插件 [`@tencent-weixin/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) 以 openclaw 为 peer 依赖、走 OpenClaw 的渠道运行时,因此按其公开的 iLink 协议([protocol.md](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol.md))直接调用同一官方接口 `ilinkai.weixin.qq.com`。
 
 ### 飞书(官方长连接)
 
@@ -115,6 +115,16 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 行为:单聊直接触发;群聊需 @机器人。答复通过 `chatId` 主动发送独立 Markdown 消息,支持多段续发,不复用已完成的 `req_id` 回复流。通道拒绝时保留未发送内容与进度供补发。
 
+### 微信(腾讯官方 ClawBot / iLink,扫码登录,免公网)
+
+1. 设置页打开「微信」,点**扫码登录**,用手机微信扫描设置页里的二维码并在手机上确认(在手机上打开设置页时可点「在微信中打开链接」;要求输入验证码时,把手机微信显示的数字填进设置页);
+2. 按需在「另外允许的用户」里填其他人的微信用户 ID(`xxx@im.wechat`)——扫码人自动允许,可以留空;
+3. 保存设置。之后换号或凭证失效时点「重新扫码」,不用改设置;「退出登录」删除本机凭证并停止通道。
+
+行为:仅私聊(官方插件同样未开放群聊;白名单内用户的群消息记为已过滤「微信群消息暂不支持」)。同一用户 = 同一 Thread。收消息走 `getupdates` 长轮询,游标落盘,重启后从断点续收;回复带入站消息的 `context_token`(按用户取最新一枚,重启后回落到触发记录里保存的那枚)。支持文本与语音转写,图片/文件等纯媒体消息暂不处理;引用回复按 `ref_msg` 的消息 id 归回线程。服务端返回 `-14`(会话失效)时按官方插件的做法暂停 1 小时再试,设置页显示原因。
+
+凭证(bot token)只保存在 daemon 主机的 `$PASEO_HOME/plugin-data/superagent/weixin/account.json`(0600),不进插件设置,客户端只看得到 bot ID 与扫码人 ID。使用须遵守腾讯《微信ClawBot功能使用条款》;腾讯可随时限流或终止该能力,不宜作为唯一的通知通道。
+
 ### QQ(OneBot 11,配合 NapCat;个人号路线)
 
 1. 安装 [NapCat](https://napneko.github.io/) 并用 QQ 号登录;
@@ -123,7 +133,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 行为:私聊直接触发;群里需 @机器人(或打开「群聊观察模式」收上下文)。回复带引用,断线自动重连。(官方 QQ 机器人平台路线见 openclaw-china/qqbot,需开发者资质,暂未内置。)
 
-> 安全:IM 消息文本是不可信输入——Router 系统提示词已要求把触发文本当数据处理;白名单是第一道闸,凭据明文存于 `$PASEO_HOME/plugin-settings/superagent/`(0600)。微信公众号通道需要公网回调,插件暂未提供 HTTP 入口,列为限制。
+> 安全:IM 消息文本是不可信输入——Router 系统提示词已要求把触发文本当数据处理;白名单是第一道闸,凭据明文存于 `$PASEO_HOME/plugin-settings/superagent/`(0600),微信 bot token 另存于 `$PASEO_HOME/plugin-data/superagent/weixin/`(0600)。微信公众号通道需要公网回调,插件暂未提供 HTTP 入口,列为限制。
 
 ## 使用
 
@@ -155,7 +165,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
   - 主系统之外的独立控制回路:LLM 看门狗是独立会话,但驱动它的定时器与引擎同进程;
   - 看门狗在线改写提示词/触发规则:插件服务端只能读、不能写插件设置,改规则仍在设置页完成;
   - 无头重启后自启动:宿主不在插件启动时提供 Paseo 句柄,引擎在首个 hook/RPC 时启动(IM 已提前连上并排队消息,不丢);
-- **按需求放弃**:GitHub/邮件/CI 等非 IM 触发源,仅支持现有四个 IM 通道;
+- **按需求放弃**:GitHub/邮件/CI 等非 IM 触发源,仅支持现有五个 IM 通道;
 - **暂不做(成本高)**:跨线程合并成一次 Router 调用的批处理(当前按线程合并,与官方原型一致);按群/会话粒度的准入档位(当前按通道开关观察模式);钉钉/企微的引用回复解析(通道不回传可用的消息 id)。
 
 ## 开发

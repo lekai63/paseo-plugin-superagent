@@ -9,7 +9,7 @@ import { STATE_QUERY_KEY } from "./query";
 import { Button, Card, fontSize, space, type Theme } from "./ui";
 
 type Delivery = SuperagentSnapshot["imDeliveries"][number];
-const CHANNELS = { feishu: "飞书", qq: "QQ", dingtalk: "钉钉", wecom: "企业微信" };
+const CHANNELS = { feishu: "飞书", qq: "QQ", dingtalk: "钉钉", wecom: "企业微信", weixin: "微信" };
 
 export function ImDeliveries({ deliveries, theme, hostId }: { deliveries: Delivery[]; theme: Theme; hostId: string }) {
   const visible = [...deliveries.filter((item) => item.status !== "sent"), ...deliveries.filter((item) => item.status === "sent").slice(0, 5)];

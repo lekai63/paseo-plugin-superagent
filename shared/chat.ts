@@ -36,7 +36,7 @@ export type ChatEntry =
       live: boolean;
     };
 
-const USER_KINDS: readonly Trigger["kind"][] = ["manual", "agent", "feishu", "qq", "dingtalk", "wecom"];
+const USER_KINDS: readonly Trigger["kind"][] = ["manual", "agent", "feishu", "qq", "dingtalk", "wecom", "weixin"];
 
 const DECISION_ICONS: Record<Decision["outcome"], string> = {
   dispatch: "Bot",

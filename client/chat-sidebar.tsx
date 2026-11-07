@@ -415,6 +415,7 @@ const CHANNEL_LABELS: [keyof SuperagentSettingsValues, string][] = [
   ["qqEnabled", "QQ"],
   ["dingtalkEnabled", "钉钉"],
   ["wecomEnabled", "企业微信"],
+  ["weixinEnabled", "微信"],
 ];
 
 function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {

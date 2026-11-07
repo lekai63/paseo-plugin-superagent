@@ -23,18 +23,18 @@ export const ROUTER_AGENT_LABEL_VALUE = "router";
 /** 同一标签键下的 LLM 看门狗会话(§6):独立于 Router 的巡检 agent。 */
 export const WATCHDOG_AGENT_LABEL_VALUE = "watchdog";
 
-export const TRIGGER_KINDS = ["manual", "agent", "report", "engine", "feishu", "qq", "dingtalk", "wecom"] as const;
+export const TRIGGER_KINDS = ["manual", "agent", "report", "engine", "feishu", "qq", "dingtalk", "wecom", "weixin"] as const;
 export const TriggerKindSchema = z.enum(TRIGGER_KINDS);
 export type TriggerKind = z.infer<typeof TriggerKindSchema>;
 
 /** IM 触发的来源信息:outbox 依此把 Router 答复发回原聊天。 */
 export const TriggerOriginSchema = z.object({
-  channel: z.enum(["feishu", "qq", "dingtalk", "wecom"]),
-  /** 会话标识:飞书 chat_id / QQ group_id 或私聊对方 QQ 号 / 钉钉 conversationId / 企微 chatid 或 userid。 */
+  channel: z.enum(["feishu", "qq", "dingtalk", "wecom", "weixin"]),
+  /** 会话标识:飞书 chat_id / QQ group_id 或私聊对方 QQ 号 / 钉钉 conversationId / 企微 chatid 或 userid / 微信用户 ID。 */
   chatId: z.string().min(1),
   /** 通道专属回复引用:飞书/钉钉/企微消息 id,OneBot 用。 */
   messageId: z.string().nullish(),
-  /** 通道专属回复通道:钉钉 sessionWebhook、企微 req_id。 */
+  /** 通道专属回复通道:钉钉 sessionWebhook、企微 req_id、微信 context_token。 */
   replyRef: z.string().nullish(),
   senderId: z.string().min(1),
   senderName: z.string().nullish(),

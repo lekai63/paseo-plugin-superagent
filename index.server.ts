@@ -19,6 +19,9 @@ import { FeishuSource } from "./server/feishu";
 import { QqSource } from "./server/qq";
 import { DingtalkSource } from "./server/dingtalk";
 import { WecomSource } from "./server/wecom";
+import { WeixinSource } from "./server/weixin";
+import { WeixinLogin } from "./server/weixin-login";
+import { clearWeixinAccount, loadWeixinAccount, saveWeixinAccount } from "./server/weixin-store";
 import {
   superagentCancelTicketRpc,
   superagentCloseThreadRpc,
@@ -29,7 +32,10 @@ import {
   superagentSaveChatTabsRpc,
   superagentStateRpc,
   superagentUnsubscribeRpc,
+  superagentWeixinAccountRpc,
+  superagentWeixinStatusRpc,
 } from "./shared/rpc";
+import type { WeixinStatus } from "./shared/weixin";
 import {
   parseAllowlist,
   superagentSettings,
@@ -127,8 +133,96 @@ export default function contribute(server: PluginServerContext) {
       q: [values.qqEnabled, values.qqEndpoint, values.qqToken, values.qqAllowUsers, values.qqAllowGroups, values.qqObserve],
       d: [values.dingtalkEnabled, values.dingtalkClientId, values.dingtalkClientSecret, values.dingtalkAllowUsers, values.dingtalkAllowChats],
       w: [values.wecomEnabled, values.wecomBotId, values.wecomSecret, values.wecomAllowUsers, values.wecomAllowChats],
+      x: [values.weixinEnabled, values.weixinAllowUsers],
     });
   }
+
+  // 微信:凭证来自扫码登录(daemon 本机文件),不在设置里;扫码人自动进白名单。
+  let weixinSource: WeixinSource | null = null;
+
+  async function wantedWeixinSource(values: SuperagentSettingsValues): Promise<WeixinSource | null> {
+    if (!values.weixinEnabled) return null;
+    const account = await loadWeixinAccount();
+    if (!account) {
+      console.warn("[superagent] weixin source enabled but not logged in; scan the QR code in settings");
+      return null;
+    }
+    const users = [...new Set([...(account.userId ? [account.userId] : []), ...parseAllowlist(values.weixinAllowUsers)])];
+    if (users.length === 0) {
+      console.warn("[superagent] weixin source enabled but allowlist is empty; not starting (unsafe)");
+      return null;
+    }
+    return new WeixinSource({ account, allowUsers: users });
+  }
+
+  // IM 启停串行执行:设置保存与扫码登录可能同时触发重连。
+  let imSyncChain: Promise<void> = Promise.resolve();
+  function queueImSync(task: () => Promise<void>): Promise<void> {
+    const run = imSyncChain.then(task);
+    imSyncChain = run.catch((error) => {
+      console.error("[superagent] IM source sync failed", error);
+    });
+    return imSyncChain;
+  }
+
+  /** 只重启微信通道(登录/退出后),不打断其他通道的连接。 */
+  async function syncWeixinSource(): Promise<void> {
+    const next = await wantedWeixinSource(current);
+    if (!next) {
+      await im.stopChannel("weixin");
+      weixinSource = null;
+      return;
+    }
+    weixinSource = next;
+    await im.register(next).catch((error) => {
+      console.error("[superagent] IM source failed to start", error);
+    });
+  }
+
+  const weixinLogin = new WeixinLogin({
+    loadAccount: loadWeixinAccount,
+    onConfirmed: async (account) => {
+      await saveWeixinAccount(account);
+      await queueImSync(syncWeixinSource);
+    },
+  });
+
+  async function weixinStatus(): Promise<WeixinStatus> {
+    const account = await loadWeixinAccount();
+    return {
+      account: account ? { botId: account.botId, userId: account.userId ?? null, savedAt: account.savedAt } : null,
+      login: weixinLogin.snapshot(),
+      source: weixinSource && im.has("weixin") ? weixinSource.status() : null,
+    };
+  }
+
+  server.handle(superagentWeixinStatusRpc, withPrime(() => weixinStatus()));
+  server.handle(
+    superagentWeixinAccountRpc,
+    withPrime(async (input) => {
+      switch (input.action) {
+        case "login":
+          await weixinLogin.start();
+          break;
+        case "verify":
+          weixinLogin.verify(input.code ?? "");
+          break;
+        case "cancel":
+          weixinLogin.cancel();
+          break;
+        case "logout":
+          weixinLogin.cancel();
+          // 先停轮询再删凭证与游标,避免轮询把游标写回来。
+          await queueImSync(async () => {
+            await im.stopChannel("weixin");
+            weixinSource = null;
+            await clearWeixinAccount();
+          });
+          break;
+      }
+      return weixinStatus();
+    }),
+  );
 
   async function syncImSources(): Promise<void> {
     const values = current;
@@ -219,8 +313,15 @@ export default function contribute(server: PluginServerContext) {
         );
       }
     }
-    for (const channel of ["feishu", "qq", "dingtalk", "wecom"] as const) {
-      if (!wanted.has(channel)) await im.stopChannel(channel);
+    const weixin = await wantedWeixinSource(values);
+    if (weixin) {
+      weixinSource = weixin;
+      wanted.set("weixin", im.register(weixin));
+    }
+    for (const channel of ["feishu", "qq", "dingtalk", "wecom", "weixin"] as const) {
+      if (wanted.has(channel)) continue;
+      await im.stopChannel(channel);
+      if (channel === "weixin") weixinSource = null;
     }
     for (const start of wanted.values()) {
       await start.catch((error) => {
@@ -238,7 +339,7 @@ export default function contribute(server: PluginServerContext) {
     const signature = imSignature(current);
     if (signature !== lastImSignature) {
       lastImSignature = signature;
-      void syncImSources();
+      void queueImSync(syncImSources);
     }
   });
   settings.subscribe((state) => {
@@ -247,7 +348,7 @@ export default function contribute(server: PluginServerContext) {
     const signature = imSignature(current);
     if (signature === lastImSignature) return;
     lastImSignature = signature;
-    void syncImSources();
+    void queueImSync(syncImSources);
   });
 
   // hook 同时用于 prime 与注入:无头重启后首个 session_open 就把引擎拉起来。
@@ -293,6 +394,7 @@ export default function contribute(server: PluginServerContext) {
     removePermissionHook();
     removePermissionResolvedHook();
     void dispatchEndpoint?.stop();
+    weixinLogin.cancel();
     void im.stopAll();
     void engine.stop();
   };

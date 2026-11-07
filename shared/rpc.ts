@@ -2,6 +2,7 @@ import { z } from "zod";
 import { defineRpc } from "@getpaseo/plugin";
 import { SuperagentSnapshotSchema } from "./model";
 import { ChatTabsSchema } from "./chat-tabs";
+import { WeixinStatusSchema } from "./weixin";
 
 /**
  * 插件 RPC 契约。客户端经 `useRpc` 调用;server/handlers.ts 实现同名 handler。
@@ -86,4 +87,24 @@ export const superagentSaveChatTabsRpc = defineRpc({
   name: "superagent.save_chat_tabs",
   input: ChatTabsSchema,
   output: OkSchema,
+});
+
+/** 微信通道状态:已保存的 bot 账号、扫码登录进度与长轮询状态。 */
+export const superagentWeixinStatusRpc = defineRpc({
+  name: "superagent.weixin_status",
+  input: z.object({}),
+  output: WeixinStatusSchema,
+});
+
+/**
+ * 微信扫码登录与账号管理:login 取新二维码(取消进行中的登录)、verify 提交手机上
+ * 显示的验证码、cancel 取消登录、logout 删除本机凭证并停止通道。返回最新状态。
+ */
+export const superagentWeixinAccountRpc = defineRpc({
+  name: "superagent.weixin_account",
+  input: z.object({
+    action: z.enum(["login", "verify", "cancel", "logout"]),
+    code: z.string().max(32).optional(),
+  }),
+  output: WeixinStatusSchema,
 });

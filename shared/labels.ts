@@ -90,6 +90,8 @@ export function triggerKindLabel(kind: Trigger["kind"]): string {
       return "钉钉";
     case "wecom":
       return "企业微信";
+    case "weixin":
+      return "微信";
   }
 }
 
@@ -104,7 +106,7 @@ export function triggerSenderLabel(trigger: Pick<Trigger, "sender" | "origin">):
   if (sender === "user" || sender === "agent" || sender.startsWith("worker:")) return null;
   if (sender.startsWith("agent:")) return `Agent ${sender.slice("agent:".length, "agent:".length + 8)}`;
   const colon = sender.indexOf(":");
-  if (colon > 0 && ["feishu", "qq", "dingtalk", "wecom"].includes(sender.slice(0, colon))) {
+  if (colon > 0 && ["feishu", "qq", "dingtalk", "wecom", "weixin"].includes(sender.slice(0, colon))) {
     return sender.slice(colon + 1);
   }
   return sender;
