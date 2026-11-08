@@ -1,7 +1,7 @@
 /**
  * paseo-plugin-superagent 的 pi 适配扩展(需 pi ≥ 1.5.0)。
  *
- * 安装:cp pi-extension/superagent.mjs ~/.pi/agent/extensions/
+ * 安装:cp pi-extension/superagent.js ~/.pi/agent/extensions/
  *
  * 为什么需要它:pi 家族不走 Paseo 的 mcpServers 注入——Paseo→pi 的配置转换不透传
  * exposure,pi 的 MCP 工具会以默认 codemode 暴露(模型不能直接调用);pi 也不把工具
@@ -12,9 +12,12 @@
  *   1. 以 exposure "direct" 注册 superagent MCP server(工具直接声明给模型):
  *      Router/看门狗 → superagent_list / read / search;Worker → unsubscribe /
  *      handback;普通 agent → superagent_dispatch;
- *   2. Router/看门狗会话裁剪工具:before_agent_start 里把 selectedTools 原地裁到只剩
- *      回读工具(提示词与可执行工具集同步移除 bash/edit 等),并清空 skills 与
- *      contextFiles(决策角色不需要项目上下文);
+ *   2. Router/看门狗会话裁剪工具:before_agent_start 里按 pi.getActiveTools() 的
+ *      实时活跃集过滤出回读工具并以 setActiveTools 写回(不能改事件里的
+ *      selectedTools 快照——MCP 服务器在首提示前才连接,快照里还没有回读工具,
+ *      清空快照会把它们一并清掉);同时清空 skills 与 contextFiles(决策角色
+ *      不需要项目上下文)。连接尚未完成时活跃集可能暂时为空:direct 工具注册时
+ *      会自动激活,无需补偿;
  *   3. tool_call 兜底拦截:任何非回读工具的调用(含 codemode 等嵌套调用)一律
  *      { block: true },模型会收到拒绝原因。
  *
@@ -58,18 +61,16 @@ export default function superagentPiAdapter(pi) {
   if (role !== "router" && role !== "watchdog") return;
 
   pi.on("before_agent_start", async (event) => {
+    // 按实时活跃集裁剪后写回:setActiveTools 忽略未知名,尚未连接的回读工具
+    // 留给注册时的自动激活(direct 工具注册即激活),不会因此丢失。
+    const active = typeof pi.getActiveTools === "function" ? pi.getActiveTools() : [];
+    const keep = active.filter((name) => typeof name === "string" && RECALL_TOOLS.test(name));
+    if (typeof pi.setActiveTools === "function") pi.setActiveTools(keep);
+
+    // 决策角色不需要项目上下文与技能提示词(数组原地清空)。
     const options = event?.systemPromptOptions;
-    if (!options) return;
-    // 原地裁剪(等价于 pi.setActiveTools):提示词贡献与可执行工具集同步更新。
-    if (Array.isArray(options.selectedTools)) {
-      const keep = options.selectedTools.filter(
-        (name) => typeof name === "string" && RECALL_TOOLS.test(name),
-      );
-      options.selectedTools.length = 0;
-      options.selectedTools.push(...keep);
-    }
-    if (Array.isArray(options.skills)) options.skills.length = 0;
-    if (Array.isArray(options.contextFiles)) options.contextFiles.length = 0;
+    if (Array.isArray(options?.skills)) options.skills.length = 0;
+    if (Array.isArray(options?.contextFiles)) options.contextFiles.length = 0;
   });
 
   pi.on("tool_call", async (event) => {
