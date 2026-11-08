@@ -131,14 +131,19 @@ const ROUTER_RULES = [
   "thread. Combine at most 5 actions in one verdict.",
 ];
 
-/** 已从宿主实现确认会把 systemPrompt 交给模型的内置 provider。其他 provider 首轮引导。 */
+/**
+ * 已从宿主实现确认会把 systemPrompt 交给模型的内置 provider;pi 由 paseo 的集成
+ * 扩展经 before_agent_start 追加(v0.15.0 核实)。其余 provider 首轮消息引导。
+ */
 export function routerUsesSystemPrompt(provider: string): boolean {
-  return ["claude", "codex", "opencode", "omp"].includes(provider.split("/")[0]);
+  return ["claude", "codex", "opencode", "omp", "pi"].includes(provider.split("/")[0]);
 }
 
 /**
  * 只裁决的会话(Router/看门狗)在 provider 层面也收紧:codex 用只读沙箱(能读不能写、
- * 不能跑有副作用的命令);其他 provider 由 agent.permission.before 钩子拒绝非自身工具。
+ * 不能跑有副作用的命令);pi 由 pi 扩展(pi-extension/superagent.mjs)裁剪工具与
+ * 拦截调用;其余 provider 依赖 agent.permission.before 钩子拒绝非自身工具(pi 的
+ * 工具调用不经过 Paseo 权限流,钩子对它不生效)。
  */
 export function decisionOnlyOptions(provider: string): { options?: Record<string, string> } {
   return provider.split("/")[0] === "codex" ? { options: { sandbox_mode: "read-only" } } : {};

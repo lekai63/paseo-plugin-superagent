@@ -18,11 +18,20 @@ import { WATCHDOG_AGENT_LABEL_VALUE } from "../shared/model";
 export { DISPATCH_MCP_SERVER_NAME } from "./mcp-server";
 
 /**
- * 默认注入的 provider:已知声明 supportsMcpServers 的内置 provider。其余(pi 及 ACP 系
+ * 默认注入的 provider:已知声明 supportsMcpServers 的内置 provider。其余(ACP 系
  * cursor/kimi/kiro/trae、未来的未知 provider)注入会让会话启动直接失败,故跳过;
- * 可用设置 agentToolProviders 覆盖(增删任意 provider id)。
+ * 可用设置 agentToolProviders 覆盖(增删任意 provider id)。pi 家族不在此列:
+ * 它不经 mcpServers 注入,走 env + pi 扩展通道(见 PI_MCP_URL_ENV)。
  */
 const DEFAULT_MCP_PROVIDERS = ["claude", "codex", "opencode", "omp", "copilot"];
+
+/** pi 系会话经 env 下发的角色 MCP URL 与角色名,由 pi-extension/superagent.mjs 读取。 */
+export const PI_MCP_URL_ENV = "SUPERAGENT_PI_MCP_URL";
+export const PI_ROLE_ENV = "SUPERAGENT_PI_ROLE";
+
+function isPiProvider(provider: string): boolean {
+  return provider.split("/")[0] === "pi";
+}
 
 export function resolveMcpProviders(configured: string): string[] {
   const list = configured
@@ -43,6 +52,38 @@ export function mcpCapableProvider(provider: string, extraFamilies: readonly str
   return DEFAULT_MCP_PROVIDERS.includes(family) || extraFamilies.includes(family);
 }
 
+/**
+ * pi 系会话不做 mcpServers 注入:Paseo→pi 的配置转换不透传 exposure,pi 的 MCP 工具
+ * 会以默认 codemode 暴露(模型不能直接调用)。改经 env 把角色 URL 交给随插件发行的
+ * pi 扩展注册(direct exposure),Router/看门狗并由扩展裁剪工具(只裁决)。扩展未
+ * 安装时 env 无副作用:会话照常,只是没有角色工具与硬约束。
+ */
+function piEnvRequest(
+  request: PluginSessionOpenRequest,
+  url: string,
+  role: "router" | "watchdog" | "worker" | null,
+): PluginSessionOpenRequest {
+  return {
+    ...request,
+    env: {
+      ...request.env,
+      [PI_MCP_URL_ENV]: url,
+      ...(role ? { [PI_ROLE_ENV]: role } : {}),
+    },
+  };
+}
+
+/** pi 编排会话的扩展安装提示(检测不到扩展是否装了,每个插件进程只提示一次)。 */
+let piExtensionHintShown = false;
+function hintPiExtension(): void {
+  if (piExtensionHintShown) return;
+  piExtensionHintShown = true;
+  console.warn(
+    "[superagent] pi orchestration session: install the bundled pi extension for role tools and " +
+      "decision-only enforcement (pi-extension/superagent.mjs -> ~/.pi/agent/extensions/, see README)",
+  );
+}
+
 /** session_open 转换:编排 agent 注入各自角色工具;普通 agent 按设置注入委派工具。 */
 export function createSessionOpenTransform(
   resolveEndpoint: () => SuperagentMcpEndpoint | null,
@@ -53,26 +94,41 @@ export function createSessionOpenTransform(
     const endpoint = resolveEndpoint();
     if (!endpoint) return undefined;
     if (request.mcpServers[DISPATCH_MCP_SERVER_NAME]) return undefined;
-    // 看门狗与 Router 同样只拿只读回读/检索工具(它通过 JSON 动作行事,不直接执行)。
-    const orchestrationUrl =
-      request.labels[ROUTER_LABEL] === ROUTER_LABEL_VALUE || request.labels[ROUTER_LABEL] === WATCHDOG_AGENT_LABEL_VALUE
-        ? endpoint.routerUrl()
-        : request.labels[TICKET_LABEL]
-          ? endpoint.workerUrl(request.labels[TICKET_LABEL])
-          : null;
+    const role: "router" | "watchdog" | "worker" | null =
+      request.labels[ROUTER_LABEL] === ROUTER_LABEL_VALUE
+        ? "router"
+        : request.labels[ROUTER_LABEL] === WATCHDOG_AGENT_LABEL_VALUE
+          ? "watchdog"
+          : request.labels[TICKET_LABEL]
+            ? "worker"
+            : null;
     // Router/Worker 的角色工具是编排自身机制:不受 agentToolEnabled 影响,但同样
-    // 只注入声明支持 MCP servers 的 provider 家族(默认名单 ∪ 用户配置,否则会话启动失败)。
-    if (orchestrationUrl && mcpCapableProvider(request.provider, providers())) {
-      return {
-        ...request,
-        mcpServers: {
-          ...request.mcpServers,
-          [DISPATCH_MCP_SERVER_NAME]: { type: "http" as const, url: orchestrationUrl, alwaysLoad: true },
-        },
-      };
+    // 只注入声明支持 MCP servers 的 provider 家族(默认名单 ∪ 用户配置,否则会话启动失败);
+    // pi 家族改走 env + pi 扩展(扩展负责 direct exposure 注册与只裁决裁剪)。
+    if (role) {
+      const url = role === "worker" ? endpoint.workerUrl(request.labels[TICKET_LABEL]) : endpoint.routerUrl();
+      if (isPiProvider(request.provider)) {
+        hintPiExtension();
+        return piEnvRequest(request, url, role);
+      }
+      if (mcpCapableProvider(request.provider, providers())) {
+        return {
+          ...request,
+          mcpServers: {
+            ...request.mcpServers,
+            [DISPATCH_MCP_SERVER_NAME]: { type: "http" as const, url, alwaysLoad: true },
+          },
+        };
+      }
+      return undefined;
     }
     if (!enabled()) return undefined;
     if (isOrchestrationAgent(request.labels)) return undefined;
+    if (isPiProvider(request.provider)) {
+      // 普通委派注入:pi 家族同样经 env(需在「注入 provider」里显式加 pi)。
+      if (!providers().some((entry) => isPiProvider(entry))) return undefined;
+      return piEnvRequest(request, endpoint.urlFor(request.agentId), null);
+    }
     if (!providers().includes(request.provider)) return undefined;
     return {
       ...request,

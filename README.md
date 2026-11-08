@@ -15,7 +15,7 @@ Paseo 的 Router/Worker 双层编排插件。按《Super-agent 设计探索》�
 - **跨线程指挥**:每次评估除本线程票据外,还列出其他活跃线程的未完结票据存根,steer/cancel/retry 可跨线程执行(全局协调);
 - **批处理**:同一批窗口内的触发合并进一次 Router LLM 调用;窗口一经武装不再被后续消息重置(有界合并,持续消息流不会无限推迟评估);
 - **看门狗(两层)**:程序看门狗每 15 秒对账——错过完成、卡死启动、运行超时、评估重排、待执行动作补执行,进程重启后自恢复;**LLM 看门狗**(可选,默认关)是独立的 `Superagent Watchdog` 会话,按间隔收到全部未完结票据的进展摘要(会话状态、自上次巡检新增的时间线条目、静默时长、最近消息、权限等待)与引擎健康状况,判断有无实质进展/是否偏离任务,用 JSON 动作 `nudge`/`interrupt`/`cancel`/`retry`/`reeval`/`escalate` 介入(取消与上报经 Router 告诉人);维护者可在状态栏一键打开该会话直接问诊;
-- **Router 只裁决(硬约束)**:Router/看门狗的权限请求由插件按策略应答——自身回读工具放行,其余工具、计划与模式切换一律拒绝;codex 系 Router/看门狗以只读沙箱创建。Worker 的退订/转回工具自动放行;
+- **Router 只裁决(硬约束)**:Router/看门狗的权限请求由插件按策略应答——自身回读工具放行,其余工具、计划与模式切换一律拒绝;codex 系 Router/看门狗以只读沙箱创建,pi 系由 pi 扩展裁剪工具并拦截调用(见「pi 作为 Router / Worker」)。Worker 的退订/转回工具自动放行;
 - **IM 触发源**:飞书(官方长连接)、QQ(OneBot 11 / NapCat)、钉钉、企业微信、微信(腾讯官方 ClawBot / iLink,扫码登录)接收指令,Router 答复回到原聊天;插件启动即连接,引擎启动(首个 hook/RPC)之前到达的消息先落盘,启动后补直通/评估。
 
 ## 架构
@@ -48,7 +48,7 @@ LLM 看门狗(独立会话,定时)── 巡检摘要 ──► nudge/interrupt/
 
 | 模块 | 实现 |
 |---|---|
-| 双层架构 | Router = 常驻 agent(只裁决由权限钩子硬约束:非自身工具一律拒绝,codex 系只读沙箱)(`superagent.role=router` 标签,provider 可配轻量模型,只裁决、不执行,唯一可用的工具是编排自身的只读回读);固定规则与 actions 示例只初始化一次。已确认支持 systemPrompt 的内置 claude/codex/opencode/omp 在创建时设置;ACP(如 zcode-acp)及其他 provider 通过首轮消息初始化。Worker = 每 Ticket 独立 agent + worktree 隔离 + `superagent.ticket` 标签,可按 Worker 档位让不同 Ticket 跑在不同模型上;层级在 app 的 Subagents track 可见。跨线程指挥:评估提示词列出其他活跃线程的未完结票据,steer/cancel/retry 可指向它们,裁决仍记录在本线程 |
+| 双层架构 | Router = 常驻 agent(只裁决由权限钩子硬约束:非自身工具一律拒绝,codex 系只读沙箱,pi 系由 pi 扩展裁剪工具)(`superagent.role=router` 标签,provider 可配轻量模型,只裁决、不执行,唯一可用的工具是编排自身的只读回读);固定规则与 actions 示例只初始化一次。已确认支持 systemPrompt 的内置 claude/codex/opencode/omp/pi 在创建时设置;ACP(如 zcode-acp)及其他 provider 通过首轮消息初始化。Worker = 每 Ticket 独立 agent + worktree 隔离 + `superagent.ticket` 标签,可按 Worker 档位让不同 Ticket 跑在不同模型上;层级在 app 的 Subagents track 可见。跨线程指挥:评估提示词列出其他活跃线程的未完结票据,steer/cancel/retry 可指向它们,裁决仍记录在本线程 |
 | 事件驱动 | Trigger 三源(手动/agent 工具/worker 汇报)+ 四 IM 通道;fast-path 程序过滤(白名单之外,未 @ 群消息记 filtered 留痕,观察模式下作上下文候选,且一律走 Router 语义判断、不直通 Worker);Thread 归属(引用回复归入被引用消息的线程);批窗口合并评估(窗口有界,不随后续消息重置,按线程合并);订阅 fan-out 直通,多对多(Router `subscribe` 让 Worker 跟随其他线程,汇报回流到每个订阅线程)。Inline:被引用消息内联、最近 5 条未 @ 相邻群聊内联。投机执行(可选):`speculative` 派发,DELIVER/DISCARD 交付或静默丢弃,并发上限 2。正常续轮只带新触发(每条最多 4000 字,截断处标注回读指针)、任务状态快照、尚未读过的直通上下文(最近 8 条、每条最多 1000 字)。Chain of Recall:提示词里的触发/票据/线程/裁决均带 ID,历史存根也保留 ID,Router 用 `superagent_read` 按 ID 找回完整未截断记录(线程回读内联最近 10 条消息与 5 条裁决的 ID、跟随它的其他线程票据;票据回读内联跟随的线程与 Worker 会话最近 3 条消息,沿引用逐跳展开)、用 `superagent_list` 总览活跃线程(最近 10 个)、用 `superagent_search` 按关键词检索全部记录;Worker 汇报回流时截断的文本附带票据回读指针,汇报首行被要求写成含关键实体(路径/ID/命令)的自足结论句(存根与检索都取开头)。内置记忆纪律:跨轮承诺必须落 ticket 或 reply,stop/跨线程裁决目标不明时先 `superagent_list` 对账。不重复用户首行标题或 Ticket 汇报正文;线程首次恢复时才补最多 8 条历史存根 |
 | 面向人的交互 | Paseo app 即信道:推送、attention、权限流;任意 agent 会话内 `/superagent` 或 `superagent_dispatch` 工具委派,Router 答复经 sourceAgentId 回到原会话;Worker 会话可随时人工接管。多渠道输出风格:IM 来源线程的评估提示词带渠道风格小节(答复保持简短、长内容派 Worker 后转述摘要与产物位置),超长答复仍按段落自动分段回投 直通误投自愈:Worker 调 `superagent_handback` 把不属于自己的消息转回 Router 重新路由(继承原 IM/agent 回投目标),`superagent_unsubscribe` 退订后续直通 |
 | 存算/环境分离 | 即 Paseo daemon 本身:daemon 在你的机器,客户端(relay E2EE)在任何地方;执行环境留在原地。状态落盘(state.json)+ 重启自恢复是单机形态的「计算与状态分离」;云端无状态计算与端侧 daemon 受宿主形态限制不做(见下文) |
@@ -80,7 +80,19 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 | 投机执行 | 「主动与巡检」分组,默认关。开启后 Router 规则里出现投机执行说明,Router 可依据你在「Router 规则」里写的主动策略(如「群里有人反馈问题时,静默复现并尝试简单修复」)派发 `speculative` Worker;同时最多 2 个,超出的投机派发直接丢弃并记入裁决 |
 | LLM 看门狗 | 「主动与巡检」分组,默认关。看门狗模型留空沿用 Router 的模型;巡检间隔 5–240 分钟(默认 30)。没有未完结任务、也没有异常时跳过,不调用模型(Router 会话已释放、下次评估自动重建不算异常);维护者正在和看门狗会话对话时本次巡检让路 |
 | 注入委派 MCP | 开启后所有普通 agent 的会话注入 `superagent_dispatch` 工具。走**插件自持的本地 MCP server**(`127.0.0.1` 随机端口 + 随机密钥路径),不受宿主 "Paseo tools"(`mcp.injectIntoAgents`)开关影响。同一 endpoint 还按角色给编排自身的会话下发工具:Router 拿 `superagent_list`/`superagent_read`/`superagent_search`(只读回读与检索),Worker 拿 `superagent_unsubscribe`/`superagent_handback`(会话控制)——这部分不受本开关控制。角色工具在**每次会话启动时经 session_open 注入**——不能写进 agent 保存配置:同名 mcpServer 与插件注入冲突会被 daemon 拒绝,`toolPolicy` 预授权引用的 server 又必须出现在同一请求里,两条都走不通 |
-| 注入 provider | 允许注入上述 MCP 的 provider 家族,逗号分隔(如 `codex,claude`);留空 = claude,codex,opencode,omp,copilot。不支持 MCP server 的 provider(如 pi)注入会导致会话启动失败,默认排除;Router/Worker 的角色工具注入同样按「默认名单 ∪ 此名单」的家族门控(provider 带 model 限定时按 `/` 前的家族判断;插件型 provider 如 zcode-acp 由 daemon 统一声明支持 MCP,想给它注入就在此配置) |
+| 注入 provider | 允许注入上述 MCP 的 provider 家族,逗号分隔(如 `codex,claude`);留空 = claude,codex,opencode,omp,copilot。不支持 MCP server 的 provider(如 ACP 系)注入会导致会话启动失败,默认排除;pi 家族例外——走 env + pi 扩展通道(见下文「pi 作为 Router / Worker」),在此填 `pi` 即向普通 pi 会话注入委派工具。Router/Worker 的角色工具注入同样按「默认名单 ∪ 此名单」的家族门控(provider 带 model 限定时按 `/` 前的家族判断;插件型 provider 如 zcode-acp 由 daemon 统一声明支持 MCP,想给它注入就在此配置) |
+
+## pi 作为 Router / Worker / 委派入口(pi 扩展)
+
+pi(pi-coding-agent ≥ 1.5.0)可以担任 Router、看门狗、Worker 的 provider,也可以接收委派注入。pi 家族不走 MCP 注入,原因有二:Paseo→pi 的配置转换不透传 `exposure`,pi 的 MCP 工具会以默认 `codemode` 暴露(模型无法直接调用);pi 也不把工具调用送进 Paseo 权限流,「只裁决」的权限钩子对 pi 不生效。因此 pi 系会话改经 env 下发角色 MCP URL(`SUPERAGENT_PI_MCP_URL` / `SUPERAGENT_PI_ROLE`,每次 session open 都带最新 URL,跟随插件重载后的端口与密钥轮换),由随插件发行的 pi 扩展完成注册与约束:
+
+```bash
+cp pi-extension/superagent.mjs ~/.pi/agent/extensions/
+```
+
+扩展按 env 自门控,没有 `SUPERAGENT_PI_MCP_URL` 时完全休眠,不影响你自己的交互式 pi。对 Router/看门狗会话它做三件事:以 `exposure: "direct"` 注册回读 MCP(三个工具直接声明给模型);在 `before_agent_start` 把 `selectedTools` 原地裁到只剩回读工具(提示词与可执行工具集同步移除 bash/edit 等,并清空 skills 与 AGENTS.md 上下文);`tool_call` 兜底拦截一切非白名单调用(含 codemode 嵌套调用,模型会收到拒绝原因)。Worker 与普通 agent 会话只注册各自工具,不裁剪。
+
+未安装扩展时一切照常降级:pi Router 按「回读工具不可用则仅凭提示词裁决」运行,只是没有 Chain of Recall 与硬约束;daemon 日志在首个 pi 编排会话时提示安装。约束级别说明:扩展运行在 pi 进程内,是用户态约束,比 codex 的只读沙箱弱一层,对编排层 Router 足够。Router 规则照常经 systemPrompt 送达(paseo 的 pi provider 以 `before_agent_start` 追加),配置变化的补发机制与其他 provider 一致。
 
 ## IM 触发源(飞书 / QQ / 钉钉 / 企业微信 / 微信)
 
@@ -160,7 +172,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 - **裁决解析**:Router 必须回 fenced JSON;解析失败记录 `unparsed` 决策并保留触发供重试,不做模型侧重问。
 - **取消语义**:取消 Ticket 归档 Worker agent,Ticket 独占的 worktree 工作区一并归档(soft delete,可从 History 找回);共享的持久工作区(「默认 workspace」/档位工作区)保留,继续服务 Router 与后续 Ticket。
 - **委派 MCP 通道**:`superagent_dispatch` 经插件自持 MCP server 注入(不走 daemon 的插件 agent tools 目录,因此宿主关闭 "Paseo tools" 不影响委派)。代价:插件重载后端口与密钥轮换,已打开会话中的旧 URL 在下次 session_open 刷新前调用会报连接错误;不支持 MCP server 的 provider 默认不注入(可用"注入 provider"设置覆盖)。
-- **编排角色工具**:Router 的 `superagent_list`/`superagent_read`/`superagent_search` 与 Worker 的 `superagent_unsubscribe`/`superagent_handback` 走同一自持 endpoint,按 URL 角色参数区分工具集,在每次会话启动时经 session_open 注入(创建时的 agent config 不携带任何 MCP 配置:保存配置与插件注入同名冲突、预授权又要求 server 同请求存在,均会被 daemon 拒绝)。需要权限确认的 provider 上,插件的权限钩子会自动批准 Worker 的退订/转回与 Router/看门狗的回读工具,拒绝 Router/看门狗的其他工具;Worker 的其余权限照常交给人。回读与检索是只读的引擎状态视图,不含 IM 凭据;`superagent_list` 最多列最近 10 个活跃线程 × 每线程 8 张未完结票、`superagent_search` 最多回 20 条命中(均带截断标注);状态清理(300 触发/200 裁决/40 关闭线程)后旧 ID 回读返回"不存在"。
+- **编排角色工具**:Router 的 `superagent_list`/`superagent_read`/`superagent_search` 与 Worker 的 `superagent_unsubscribe`/`superagent_handback` 走同一自持 endpoint,按 URL 角色参数区分工具集,在每次会话启动时经 session_open 注入(创建时的 agent config 不携带任何 MCP 配置:保存配置与插件注入同名冲突、预授权又要求 server 同请求存在,均会被 daemon 拒绝)。需要权限确认的 provider 上,插件的权限钩子会自动批准 Worker 的退订/转回与 Router/看门狗的回读工具,拒绝 Router/看门狗的其他工具;Worker 的其余权限照常交给人。回读与检索是只读的引擎状态视图,不含 IM 凭据;`superagent_list` 最多列最近 10 个活跃线程 × 每线程 8 张未完结票、`superagent_search` 最多回 20 条命中(均带截断标注);状态清理(300 触发/200 裁决/40 关闭线程)后旧 ID 回读返回"不存在"。pi 系会话的工具注册与只裁决约束由 pi 扩展承担(env 下发 URL,扩展以 direct exposure 注册并裁剪工具),见「pi 作为 Router / Worker」。
 - **直通误投**:直通给唯一订阅 Worker 的消息若与其工单无关,Worker 用 `superagent_handback` 转回 Router 重新路由(可同时退订);Router 规则要求不得把同一条消息再 steer 回转出它的 Worker,防循环。
 - **受宿主(Paseo/插件机制)限制而放弃**:
   - 云端无状态计算 + 状态入库(§5.1 的弹性形态):插件运行在单个 daemon 子进程里,只能做到「状态落盘 + 重启自恢复」;

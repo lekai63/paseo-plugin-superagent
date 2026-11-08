@@ -4,6 +4,8 @@ import {
   createSessionOpenTransform,
   resolveMcpProviders,
   DISPATCH_MCP_SERVER_NAME,
+  PI_MCP_URL_ENV,
+  PI_ROLE_ENV,
 } from "../server/agent-mcp.ts";
 import {
   startDispatchMcpServer,
@@ -15,6 +17,7 @@ import {
   HANDBACK_TOOL_NAME,
 } from "../server/mcp-server.ts";
 import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "../server/router.ts";
+import { WATCHDOG_AGENT_LABEL_VALUE } from "../shared/model.ts";
 
 /** 响应为 SSE(data: 行)或纯 JSON,统一解析出 JSON-RPC 报文数组。 */
 async function rpc(res) {
@@ -284,7 +287,7 @@ test("session_open transform injects the endpoint for allowed providers only", a
   assert.equal(new URL(injected.url).searchParams.get("callerAgentId"), "agent-1");
   assert.deepEqual(transformed.tools, []);
 
-  assert.equal(transform(sessionRequest({ provider: "pi" })), undefined, "pi has no MCP support");
+  assert.equal(transform(sessionRequest({ provider: "pi" })), undefined, "pi dispatch needs explicit opt-in (not in default providers)");
 
   // 编排 agent 拿各自的角色工具:Router 回读、Worker 退订/转回,不受委派开关影响。
   const router = transform(sessionRequest({ labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE }, provider: "codex/test" }));
@@ -295,8 +298,12 @@ test("session_open transform injects the endpoint for allowed providers only", a
   const workerUrl = new URL(worker.mcpServers[DISPATCH_MCP_SERVER_NAME].url);
   assert.equal(workerUrl.searchParams.get("role"), "worker");
   assert.equal(workerUrl.searchParams.get("ticket"), "tkt-1");
-  // 角色工具不受 provider 覆盖名单限制,但仍要求 provider 家族支持 MCP。
-  assert.equal(workerTransform(sessionRequest({ labels: { [TICKET_LABEL]: "tkt-1" }, provider: "pi" })), undefined);
+  // 角色工具不受 provider 覆盖名单限制,但仍要求 provider 家族支持 MCP;
+  // pi 家族例外:改走 env + pi 扩展通道(见 pi-extension.test.mjs)。
+  const piWorker = workerTransform(sessionRequest({ labels: { [TICKET_LABEL]: "tkt-1" }, provider: "pi/glm" }));
+  assert.equal(piWorker.mcpServers[DISPATCH_MCP_SERVER_NAME], undefined, "pi gets no mcpServers");
+  assert.equal(piWorker.env[PI_MCP_URL_ENV], endpoint.workerUrl("tkt-1"));
+  assert.equal(piWorker.env[PI_ROLE_ENV], "worker");
 
   assert.equal(
     transform(sessionRequest({ mcpServers: { [DISPATCH_MCP_SERVER_NAME]: { type: "http", url: "x" } } })),
@@ -475,4 +482,42 @@ test("configured provider families unlock orchestration injection beyond the def
     undefined,
     "an unconfigured family still gets nothing",
   );
+});
+
+test("pi orchestration and dispatch sessions receive env for the pi extension", async (t) => {
+  const endpoint = await startDispatchMcpServer({
+    dispatch: async () => ({ threadId: "t", triggerId: "g", directDelivered: false, note: null }),
+  });
+  t.after(() => endpoint.stop());
+
+  // 角色工具不受委派开关与 provider 名单影响:pi Router/看门狗/Worker 一律走 env。
+  const transform = createSessionOpenTransform(() => endpoint, () => false, () => resolveMcpProviders(""));
+
+  const router = transform(sessionRequest({
+    labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE },
+    provider: "pi/anthropic/claude-x",
+  }));
+  assert.equal(router.env[PI_MCP_URL_ENV], endpoint.routerUrl());
+  assert.equal(router.env[PI_ROLE_ENV], "router");
+  assert.deepEqual(router.mcpServers, {}, "pi gets no mcpServers");
+
+  const watchdog = transform(sessionRequest({
+    labels: { [ROUTER_LABEL]: WATCHDOG_AGENT_LABEL_VALUE },
+    provider: "pi",
+  }));
+  assert.equal(watchdog.env[PI_MCP_URL_ENV], endpoint.routerUrl());
+  assert.equal(watchdog.env[PI_ROLE_ENV], "watchdog");
+
+  const worker = transform(sessionRequest({ labels: { [TICKET_LABEL]: "tkt-9" }, provider: "pi" }));
+  assert.equal(worker.env[PI_MCP_URL_ENV], endpoint.workerUrl("tkt-9"));
+  assert.equal(worker.env[PI_ROLE_ENV], "worker");
+
+  // 普通委派注入:默认名单不含 pi;显式加入后同样经 env 下发,且保留原有 env。
+  assert.equal(transform(sessionRequest({ provider: "pi" })), undefined, "pi dispatch stays off by default");
+  const optedIn = createSessionOpenTransform(() => endpoint, () => true, () => resolveMcpProviders("pi,claude"));
+  const dispatch = optedIn(sessionRequest({ provider: "pi", env: { HOME: "/home/x" } }));
+  assert.equal(dispatch.env[PI_MCP_URL_ENV], endpoint.urlFor("agent-1"));
+  assert.equal(dispatch.env[PI_ROLE_ENV], undefined, "dispatch sessions carry no role restriction");
+  assert.equal(dispatch.env.HOME, "/home/x");
+  assert.deepEqual(dispatch.mcpServers, {});
 });

@@ -427,7 +427,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
               {...field}
               name="agentToolProviders"
               label="注入的 provider"
-              hint="逗号分隔。不支持 MCP 的 provider(如 pi、ACP 系)注入会导致会话启动失败"
+              hint="逗号分隔。不支持 MCP 的 provider(如 ACP 系)注入会导致会话启动失败;pi 走 pi 扩展通道,填 pi 前先安装扩展(见 README)"
               placeholder="claude,codex,opencode,omp,copilot"
             />
           ) : null}
