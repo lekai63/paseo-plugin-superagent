@@ -25,7 +25,7 @@ export { DISPATCH_MCP_SERVER_NAME } from "./mcp-server";
  */
 const DEFAULT_MCP_PROVIDERS = ["claude", "codex", "opencode", "omp", "copilot"];
 
-/** pi 系会话经 env 下发的角色 MCP URL 与角色名,由 pi-extension/superagent.mjs 读取。 */
+/** pi 系会话经 env 下发的角色 MCP URL 与角色名,由 pi-extension/superagent.js 读取。 */
 export const PI_MCP_URL_ENV = "SUPERAGENT_PI_MCP_URL";
 export const PI_ROLE_ENV = "SUPERAGENT_PI_ROLE";
 
@@ -80,7 +80,7 @@ function hintPiExtension(): void {
   piExtensionHintShown = true;
   console.warn(
     "[superagent] pi orchestration session: install the bundled pi extension for role tools and " +
-      "decision-only enforcement (pi-extension/superagent.mjs -> ~/.pi/agent/extensions/, see README)",
+      "decision-only enforcement (pi-extension/superagent.js -> ~/.pi/agent/extensions/, see README)",
   );
 }
 

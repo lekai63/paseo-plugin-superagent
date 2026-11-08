@@ -141,7 +141,7 @@ export function routerUsesSystemPrompt(provider: string): boolean {
 
 /**
  * 只裁决的会话(Router/看门狗)在 provider 层面也收紧:codex 用只读沙箱(能读不能写、
- * 不能跑有副作用的命令);pi 由 pi 扩展(pi-extension/superagent.mjs)裁剪工具与
+ * 不能跑有副作用的命令);pi 由 pi 扩展(pi-extension/superagent.js)裁剪工具与
  * 拦截调用;其余 provider 依赖 agent.permission.before 钩子拒绝非自身工具(pi 的
  * 工具调用不经过 Paseo 权限流,钩子对它不生效)。
  */

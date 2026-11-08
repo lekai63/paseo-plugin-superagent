@@ -87,7 +87,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 pi(pi-coding-agent ≥ 1.5.0)可以担任 Router、看门狗、Worker 的 provider,也可以接收委派注入。pi 家族不走 MCP 注入,原因有二:Paseo→pi 的配置转换不透传 `exposure`,pi 的 MCP 工具会以默认 `codemode` 暴露(模型无法直接调用);pi 也不把工具调用送进 Paseo 权限流,「只裁决」的权限钩子对 pi 不生效。因此 pi 系会话改经 env 下发角色 MCP URL(`SUPERAGENT_PI_MCP_URL` / `SUPERAGENT_PI_ROLE`,每次 session open 都带最新 URL,跟随插件重载后的端口与密钥轮换),由随插件发行的 pi 扩展完成注册与约束:
 
 ```bash
-cp pi-extension/superagent.mjs ~/.pi/agent/extensions/
+cp pi-extension/superagent.js ~/.pi/agent/extensions/
 ```
 
 扩展按 env 自门控,没有 `SUPERAGENT_PI_MCP_URL` 时完全休眠,不影响你自己的交互式 pi。对 Router/看门狗会话它做三件事:以 `exposure: "direct"` 注册回读 MCP(三个工具直接声明给模型);在 `before_agent_start` 把 `selectedTools` 原地裁到只剩回读工具(提示词与可执行工具集同步移除 bash/edit 等,并清空 skills 与 AGENTS.md 上下文);`tool_call` 兜底拦截一切非白名单调用(含 codemode 嵌套调用,模型会收到拒绝原因)。Worker 与普通 agent 会话只注册各自工具,不裁剪。
