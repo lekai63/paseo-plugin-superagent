@@ -48,7 +48,7 @@ import {
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
 import type { ToolOutcome } from "./mcp-server";
 import { matchWorkerProfile, resolveProviderSelection, validateProviderMode } from "./providers";
-import { ensureSharedWorkspace } from "./workspace";
+import { BACKGROUND_WORKSPACE_TITLE, ensureSharedWorkspace } from "./workspace";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 import { deliveryPreview, splitImReply } from "./im-replies";
 import {
@@ -809,13 +809,13 @@ export class SuperagentEngine {
     const ruleOptions = { speculative: this.settingsValues.speculativeEnabled };
     const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions, ruleOptions);
     const configHash = createHash("sha256").update(instructions).digest("hex");
-    // Router 落在默认 workspace 里;惰性获取——Router 存活时零开销,重建时才查找/新建。
+    // Router 与看门狗落在专用后台工作区,与普通 Worker 工作区分离。
     // 回读/检索工具(superagent_list/read/search)由 session_open 转换注入,不经 agent config。
     const router = await ensureRouter(
       paseo,
       state,
       routerProvider,
-      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, DEFAULT_WORKSPACE_TITLE),
+      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, BACKGROUND_WORKSPACE_TITLE, true),
       instructions,
     );
     if ("error" in router) throw new Error(router.error);
@@ -1710,7 +1710,7 @@ export class SuperagentEngine {
       paseo,
       state,
       provider,
-      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, DEFAULT_WORKSPACE_TITLE),
+      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, BACKGROUND_WORKSPACE_TITLE, true),
       instructions,
     );
     if (!watchdog.created) {
@@ -2651,24 +2651,27 @@ export class SuperagentEngine {
 
   /**
    * 共享隔离的持久工作区:全局目录命名「默认 workspace」,档位专属目录以档位名命名;
-   * kv 登记(目录 → id)+ 内存缓存;句柄失效(被归档/目录不符)时按标题找回或重建。
+   * 后台与普通工作区分别登记(目录 → id)和缓存,避免角色混用;失效时按标题找回或重建。
    * 串行链防止并发启动的 Ticket 为同一目录重复建区。
    */
-  private sharedWorkspaceFor(dir: string, title: string): Promise<PaseoWorkspaceHandle> {
-    const key = resolve(dir);
+  private sharedWorkspaceFor(dir: string, title: string, background = false): Promise<PaseoWorkspaceHandle> {
+    const directory = resolve(dir);
+    const key = `${background ? "background\u0000" : ""}${directory}`;
+    const registry = background ? "backgroundWorkspaces" : "sharedWorkspaces";
     const ensure = this.workspaceChain.then(async () => {
       const cached = this.sharedWorkspaceCache.get(key);
       if (cached) {
         const descriptor = await cached.refresh().catch(() => null);
-        if (descriptor && !descriptor.archivingAt) return cached;
+        if (descriptor && !descriptor.archivingAt && resolve(descriptor.workspaceDirectory) === directory
+          && (descriptor.background === true) === background) return cached;
         this.sharedWorkspaceCache.delete(key);
       }
-      const remembered = this.store.get().kv.sharedWorkspaces?.[key];
-      const { handle } = await ensureSharedWorkspace(this.requirePaseo(), remembered, dir, title);
+      const remembered = this.store.get().kv[registry]?.[directory];
+      const { handle } = await ensureSharedWorkspace(this.requirePaseo(), remembered, directory, title, background);
       this.sharedWorkspaceCache.set(key, handle);
       if (remembered !== handle.id) {
         await this.store.update((next) => {
-          next.kv.sharedWorkspaces = { ...next.kv.sharedWorkspaces, [key]: handle.id };
+          next.kv[registry] = { ...next.kv[registry], [directory]: handle.id };
         });
       }
       return handle;

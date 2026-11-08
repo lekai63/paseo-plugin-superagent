@@ -6,6 +6,7 @@ import { FeishuSource } from "../server/feishu.ts";
 import { emptyState, SuperagentStateSchema } from "../shared/model.ts";
 import { splitImReply } from "../server/im-replies.ts";
 import { SETTINGS_DEFAULTS } from "../shared/settings.ts";
+import { BACKGROUND_WORKSPACE_TITLE } from "../server/workspace.ts";
 
 const oldTime = "2020-01-01T00:00:00.000Z";
 
@@ -52,7 +53,7 @@ function fixture(t, status = "running", subscribed = true) {
   const calls = {
     sends: [], watches: [], archives: [], workspaceArchives: [], creates: 0, workspaceCreateOptions: [], evals: [],
     routerCreates: [], workerCreates: [], prompts: [], watchdogCreates: [], patrols: [],
-    permissionResponses: [],
+    permissionResponses: [], detaches: [],
   };
   const controls = {
     send: async () => {},
@@ -69,6 +70,8 @@ function fixture(t, status = "running", subscribed = true) {
     workspaceBranch: null,
     pendingPermissions: new Map(),
     sessionStatuses: new Map(),
+    agentWorkspaces: new Map([["router", "role-workspace"]]),
+    parents: new Map([["worker", "router"]]),
     respond: async (id, { requestId }) => {
       controls.pendingPermissions.set(id, (controls.pendingPermissions.get(id) ?? []).filter((request) => request.id !== requestId));
     },
@@ -79,6 +82,7 @@ function fixture(t, status = "running", subscribed = true) {
     if (!handles.has(id)) handles.set(id, {
       id,
       refresh: async () => ({ agent: { status: controls.sessionStatuses.get(id) ?? (id === "router" || id.includes("watchdog") ? "idle" : "running"), archivedAt: null,
+        workspaceId: controls.agentWorkspaces.get(id),
         pendingPermissions: controls.pendingPermissions.get(id) ?? [],
         persistence: id.includes("router") && controls.routerSessionId ? { sessionId: controls.routerSessionId } : null } }),
       current: () => ({ persistence: controls.routerSessionId ? { sessionId: controls.routerSessionId } : null }),
@@ -105,7 +109,16 @@ function fixture(t, status = "running", subscribed = true) {
         return finish.promise;
       },
       timeline: { refetch: () => id.includes("router") ? controls.routerTimeline() : controls.timeline() },
-      archive: async () => { calls.archives.push(id); },
+      detach: async () => { calls.detaches.push(id); controls.parents.delete(id); },
+      archive: async () => {
+        calls.archives.push(id);
+        // 真 daemon 会级联归档同工作区的子 agent;迁移必须先解除这个关系。
+        for (const [childId, parentId] of controls.parents) {
+          if (parentId === id && controls.agentWorkspaces.get(childId) === controls.agentWorkspaces.get(id)) {
+            calls.archives.push(childId);
+          }
+        }
+      },
     });
     return handles.get(id);
   };
@@ -117,15 +130,18 @@ function fixture(t, status = "running", subscribed = true) {
     if (!workspaceHandles.has(id)) workspaceHandles.set(id, {
       id,
       current: () => daemonWorkspaces.get(id) ?? null,
-      refresh: async () => daemonWorkspaces.get(id) ?? null,
+      refresh: async () => daemonWorkspaces.get(id) ?? (id === "role-workspace" ? { background: true } : null),
       agents: {
         create: async (options) => {
           if (options.labels?.["superagent.role"] === "router") {
             calls.routerCreates.push(options);
-            return controls.createRouterAgent(options);
+            const agent = await controls.createRouterAgent(options);
+            controls.agentWorkspaces.set(agent.id, id);
+            return agent;
           }
           if (options.labels?.["superagent.role"] === "watchdog") {
             calls.watchdogCreates.push(options);
+            controls.agentWorkspaces.set("watchdog", id);
             return ref("watchdog");
           }
           calls.workerCreates.push(options);
@@ -142,6 +158,12 @@ function fixture(t, status = "running", subscribed = true) {
   const paseo = {
     agents: {
       ref,
+      list: async ({ filter }) => ({
+        entries: [...controls.parents]
+          .filter(([, parentId]) => parentId === filter.labels["paseo.parent-agent-id"])
+          .map(([id]) => ({ agent: { id, archivedAt: null } })),
+        pageInfo: { nextCursor: null },
+      }),
       create: async (options) => {
         calls.routerCreates.push(options);
         return ref("new-router");
@@ -161,11 +183,15 @@ function fixture(t, status = "running", subscribed = true) {
           name: options.title ?? null,
           workspaceDirectory: options.source?.path ?? "/mock/repo",
           archivingAt: null,
+          background: options.background === true,
           gitRuntime: { currentBranch: controls.workspaceBranch },
         });
         return workspaceHandle(id);
       },
-      list: async () => ({ entries: [...daemonWorkspaces.values()] }),
+      list: async (options) => ({
+        entries: [...daemonWorkspaces.values()].filter((entry) => options?.filter?.includeBackground || !entry.background),
+        pageInfo: { nextCursor: null },
+      }),
       ref: (id) => workspaceHandle(id),
     },
   };
@@ -1522,17 +1548,20 @@ test("the snapshot exposes the configured worker profiles", async (t) => {
   assert.deepEqual(f.engine.snapshot().workerProfiles.map((profile) => profile.name), ["glm", "flash"]);
 });
 
-test("the Router is created inside the shared 默认 workspace, which is remembered and reused", async (t) => {
+test("the Router is created inside a background workspace, which is remembered and reused", async (t) => {
   const f = fixture(t);
   f.state.kv.routerAgentId = null;
   f.controls.verdict = { actions: [{ action: "ignore" }] };
   await evaluateRouter(f);
   assert.equal(f.calls.creates, 1, "exactly one shared workspace is created for the Router");
-  assert.equal(f.daemonWorkspaces.get("new-workspace").name, "默认 workspace");
+  assert.equal(f.daemonWorkspaces.get("new-workspace").name, BACKGROUND_WORKSPACE_TITLE);
+  assert.equal(f.daemonWorkspaces.get("new-workspace").background, true);
   assert.equal(f.daemonWorkspaces.get("new-workspace").workspaceDirectory, "/mock/repo");
   assert.equal(f.calls.routerCreates.length, 1);
   assert.equal(f.calls.routerCreates[0].cwd, undefined, "the workspace, not the engine, supplies the cwd");
-  assert.equal(f.state.kv.sharedWorkspaces["/mock/repo"], "new-workspace");
+  assert.equal(f.state.kv.backgroundWorkspaces["/mock/repo"], "new-workspace");
+  assert.equal(f.state.kv.sharedWorkspaces, undefined);
+  assert.equal(SuperagentStateSchema.parse(f.state).kv.backgroundWorkspaces["/mock/repo"], "new-workspace");
 
   // 引擎重启(缓存清空)后 Router 丢失:登记过的 workspace 直接复用,不再新建。
   f.state.kv.routerAgentId = null;
@@ -1546,7 +1575,7 @@ test("the Router is created inside the shared 默认 workspace, which is remembe
   await setImmediate();
   pendingTrigger(f.state);
   await restarted.runEval("thread");
-  assert.equal(f.calls.creates, 1, "the remembered 默认 workspace is reused after a restart");
+  assert.equal(f.calls.creates, 1, "the remembered background workspace is reused after a restart");
   assert.equal(f.calls.routerCreates.length, 2);
 });
 
@@ -1557,10 +1586,82 @@ test("shared workers join the 默认 workspace and retiring them never archives 
   assert.equal(f.ticket.workspaceId, "new-workspace");
   assert.equal(f.ticket.ownsWorkspace, false);
   assert.equal(f.daemonWorkspaces.get("new-workspace").name, "默认 workspace");
+  assert.equal(f.daemonWorkspaces.get("new-workspace").background, false);
   await f.engine.cancelTicket("ticket");
   assert.deepEqual(f.calls.archives, ["new-worker"]);
   assert.deepEqual(f.calls.workspaceArchives, [], "the shared workspace is not ticket-owned and survives");
   assert.ok(f.daemonWorkspaces.has("new-workspace"));
+});
+
+test("legacy Router and watchdog sessions move to one background workspace without hiding Workers", async (t) => {
+  const f = fixture(t, "running");
+  f.daemonWorkspaces.set("legacy-workspace", {
+    id: "legacy-workspace", name: "默认 workspace", workspaceDirectory: "/mock/repo", background: false,
+  });
+  f.state.kv.sharedWorkspaces = { "/mock/repo": "legacy-workspace" };
+  f.controls.agentWorkspaces.set("router", "legacy-workspace");
+  f.controls.agentWorkspaces.set("worker", "legacy-workspace");
+  f.controls.agentWorkspaces.set("legacy-watchdog", "legacy-workspace");
+  f.state.kv.watchdog = { agentId: "legacy-watchdog", provider: "codex/test", seen: {} };
+  f.ticket.workspaceId = "legacy-workspace";
+  f.values.watchdogEnabled = true;
+  f.controls.verdict = { actions: [{ action: "ignore" }] };
+
+  await evaluateRouter(f);
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.creates, 1, "both roles use the same background workspace");
+  assert.equal(f.daemonWorkspaces.get("new-workspace").background, true);
+  assert.equal(f.controls.agentWorkspaces.get("new-router"), "new-workspace");
+  assert.equal(f.controls.agentWorkspaces.get("watchdog"), "new-workspace");
+  assert.deepEqual(f.calls.archives, ["router", "legacy-watchdog"]);
+  assert.deepEqual(f.calls.detaches, ["worker"], "the shared Worker survives parent archival");
+  assert.deepEqual(f.calls.workspaceArchives, [], "the legacy workspace still houses Workers");
+  assert.equal(f.daemonWorkspaces.get("legacy-workspace").background, false);
+  assert.equal(f.ticket.workspaceId, "legacy-workspace");
+
+  f.values.workerIsolation = "shared";
+  f.ticket.status = "pending";
+  f.ticket.workerAgentId = null;
+  await f.engine.startTicket("ticket");
+  assert.equal(f.ticket.workspaceId, "legacy-workspace", "new shared Workers keep using the ordinary workspace");
+  assert.equal(f.calls.creates, 1);
+});
+
+test("failed background replacement preserves the legacy Router for retry", async (t) => {
+  const f = fixture(t);
+  f.controls.agentWorkspaces.set("router", null);
+  f.controls.createRouterAgent = async () => { throw new Error("provider unavailable"); };
+  await assert.rejects(evaluateRouter(f), /router agent creation failed/);
+  assert.deepEqual(f.calls.archives, [], "the old session is archived only after replacement succeeds");
+  assert.equal(f.state.kv.routerAgentId, "router");
+});
+
+test("a Worker detach failure leaves the legacy Router intact for a later replacement", async (t) => {
+  const f = fixture(t);
+  f.controls.agentWorkspaces.set("router", null);
+  f.ref("worker").detach = async () => { throw new Error("detach failed"); };
+  await assert.rejects(evaluateRouter(f), /detach failed/);
+  assert.equal(f.calls.creates, 0, "no replacement starts until all Workers can survive parent archival");
+  assert.deepEqual(f.calls.archives, []);
+  assert.equal(f.state.kv.routerAgentId, "router");
+});
+
+test("a busy legacy watchdog waits until idle before background replacement", async (t) => {
+  const f = fixture(t, "running");
+  f.values.watchdogEnabled = true;
+  f.state.kv.watchdog = { agentId: "legacy-watchdog", provider: "codex/test", seen: {} };
+  f.controls.sessionStatuses.set("legacy-watchdog", "running");
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.creates, 0);
+  assert.deepEqual(f.calls.archives, []);
+  assert.equal(f.calls.patrols.length, 0);
+  assert.match(f.state.kv.watchdog.lastSummary, /skipped/);
+
+  f.controls.sessionStatuses.set("legacy-watchdog", "idle");
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.creates, 1);
+  assert.equal(f.daemonWorkspaces.get("new-workspace").background, true);
+  assert.deepEqual(f.calls.archives, ["legacy-watchdog"]);
 });
 
 test("a worktree profile with its own working directory branches from that directory", async (t) => {

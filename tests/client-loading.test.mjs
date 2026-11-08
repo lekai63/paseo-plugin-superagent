@@ -25,15 +25,17 @@ async function compile(entry) {
 let fontBundle;
 let clientBundle;
 let webBundle;
+let queryBundle;
 before(async () => {
-  [fontBundle, clientBundle, webBundle] = await Promise.all([
+  [fontBundle, clientBundle, webBundle, queryBundle] = await Promise.all([
     compile("../client/host-font-scale.ts"),
     compile("../index.client.tsx"),
     compile("../client/web.ts"),
+    compile("../client/query.ts"),
   ]);
 });
 
-function load(code, platform, { turbo = null, legacy = null, storage = null } = {}) {
+function load(code, platform, { turbo = null, legacy = null, storage = null, paseo = null } = {}) {
   const reads = [];
   const native = { Platform: { OS: platform } };
   Object.defineProperties(native, {
@@ -55,9 +57,9 @@ function load(code, platform, { turbo = null, legacy = null, storage = null } = 
     "react/jsx-runtime": {},
     "react-native": native,
     "@getpaseo/plugin": plugin,
-    "@getpaseo/plugin/client": {},
+    "@getpaseo/plugin/client": { usePaseo: () => paseo },
     "@getpaseo/plugin/client/ui": {},
-    "@tanstack/react-query": {},
+    "@tanstack/react-query": { useQuery: (options) => options },
     zod,
   };
   const sandbox = {
@@ -71,6 +73,29 @@ function load(code, platform, { turbo = null, legacy = null, storage = null } = 
   runInNewContext(code, sandbox);
   return { exports: sandbox.module.exports, reads };
 }
+
+test("plugin Router status includes background sessions, filters archived sessions, and retains the remembered fallback", async () => {
+  const records = [
+    { id: "hidden", background: true, labels: { "superagent.role": "router" } },
+    { id: "archived", background: true, labels: { "superagent.role": "router" }, archivedAt: "2026-01-01" },
+    { id: "worker", background: false, labels: { "superagent.role": "worker" } },
+  ];
+  const paseo = {
+    agents: {
+      list: async ({ filter }) => ({
+        entries: records
+          .filter((agent) => (filter.includeBackground || !agent.background)
+            && Object.entries(filter.labels).every(([key, value]) => agent.labels[key] === value))
+          .map((agent) => ({ agent })),
+      }),
+      ref: (id) => ({ refresh: async () => ({ agent: { id, archivedAt: null } }) }),
+    },
+  };
+  const { exports } = load(queryBundle, "web", { paseo });
+  const query = exports.useRouterAgents("host", "remembered", true);
+  const agents = await query.queryFn();
+  assert.deepEqual(Array.from(agents, (agent) => agent.id), ["hidden", "remembered"]);
+});
 
 for (const platform of ["ios", "android", "web"]) {
   test(`full plugin loads and registers on ${platform} without initializing unrelated native modules`, () => {

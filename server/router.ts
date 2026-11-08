@@ -1,6 +1,7 @@
 import type { PaseoApi, PaseoAgent, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { SuperagentState, Thread, Ticket, Trigger, Decision } from "../shared/model";
 import { followsOf } from "../shared/execution";
+import { agentUsesBackgroundWorkspace, detachRoleChildren } from "./workspace";
 import {
   newId,
   truncate,
@@ -659,7 +660,7 @@ export function newDecision(
 
 /**
  * 确保 Router agent 存在且可用:kv 记住的 id 还活着就直接复用(会话即记忆),
- * 丢失/归档则经 ensureWorkspace 取得默认 workspace 并在其中重建。
+ * 丢失/归档则在后台工作区重建;旧前台会话换建成功后归档,不归档其 Worker 工作区。
  * 返回 error 表示 provider 尚未就绪。
  */
 export async function ensureRouter(
@@ -670,18 +671,22 @@ export async function ensureRouter(
   instructions: string,
 ): Promise<{ handle: PaseoAgentHandle; agentId: string; created: boolean; sessionId: string | null } | { error: string }> {
   const remembered = state.kv.routerAgentId;
+  let foreground: PaseoAgentHandle | null = null;
   if (remembered) {
-    try {
-      const handle = paseo.agents.ref(remembered);
-      const refetched = await handle.refresh();
-      if (refetched && !refetched.agent.archivedAt) {
+    const handle = paseo.agents.ref(remembered);
+    const refetched = await handle.refresh().catch((error) => {
+      console.error("[superagent] router refresh failed, recreating", error);
+      return null;
+    });
+    if (refetched && !refetched.agent.archivedAt) {
+      if (await agentUsesBackgroundWorkspace(paseo, refetched.agent)) {
         return { handle, agentId: remembered, created: false, sessionId: routerSessionId(refetched.agent) };
       }
-    } catch (error) {
-      console.error("[superagent] router refresh failed, recreating", error);
+      foreground = handle;
     }
   }
   if (!provider) return { error: "router provider is not configured" };
+  if (foreground) await detachRoleChildren(paseo, foreground.id);
   let handle: PaseoAgentHandle;
   try {
     const workspace = await ensureWorkspace();
@@ -699,6 +704,9 @@ export async function ensureRouter(
     // provider 侧的失败往往只有 "Internal error",补上 provider 便于定位。
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`router agent creation failed (provider "${provider}"): ${message}`, { cause: error });
+  }
+  if (foreground) {
+    await foreground.archive().catch((error) => console.error("[superagent] foreground router archive failed", error));
   }
   return { handle, agentId: handle.id, created: true, sessionId: routerSessionId(handle.current()) };
 }

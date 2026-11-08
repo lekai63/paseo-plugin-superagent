@@ -6,8 +6,8 @@ import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 
 /**
  * Worker 层:每个 Ticket 一个独立隔离的 Paseo agent。
- * worktree 隔离时每个 Ticket 一个独立 worktree 工作区;shared 隔离时 Worker 与
- * Router 一起落在该目录的持久共享工作区里。parent 指向 Router,因此全部 Worker
+ * worktree 隔离时每个 Ticket 一个独立 worktree 工作区;shared 隔离时 Worker
+ * 落在该目录的普通持久共享工作区里。parent 指向后台工作区中的 Router,因此全部 Worker
  * 出现在 Router 会话的 Subagents track 里,可随时人工介入。
  */
 
@@ -189,6 +189,7 @@ export async function launchWorker(
     if (env.isolation === "worktree" && branchName) {
       workspace = await paseo.workspaces.create({
         title: ticket.title,
+        background: false,
         source: {
           kind: "worktree",
           cwd: env.workingDir,
@@ -283,7 +284,7 @@ export async function retireWorker(
       console.error("[superagent] worker archive failed", error);
     }
   }
-  // 共享工作区(默认 workspace / 档位工作区)由多个 Ticket 与 Router 共用,永不归档。
+  // 共享工作区(默认 workspace / 档位工作区)由多个 Ticket 共用,永不归档。
   if (includeWorkspace && ticket.workspaceId && ticket.ownsWorkspace) {
     try {
       await paseo.workspaces.ref(ticket.workspaceId).archive();

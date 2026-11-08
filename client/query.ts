@@ -137,7 +137,7 @@ export function useRouterAgents(hostId: string, routerAgentId: string | null | u
   return useQuery({
     queryKey: ["superagent", "routers", hostId, routerAgentId ?? null],
     queryFn: async (): Promise<PaseoAgent[]> => {
-      const listed = await paseo.agents.list({ filter: { labels: { [ROUTER_AGENT_LABEL]: ROUTER_AGENT_LABEL_VALUE } } });
+      const listed = await paseo.agents.list({ filter: { includeBackground: true, labels: { [ROUTER_AGENT_LABEL]: ROUTER_AGENT_LABEL_VALUE } } });
       const agents = listed.entries.map((entry) => entry.agent).filter((agent) => !agent.archivedAt);
       if (routerAgentId && !agents.some((agent) => agent.id === routerAgentId)) {
         const remembered = (await paseo.agents.ref(routerAgentId).refresh())?.agent ?? null;

@@ -2,6 +2,7 @@ import type { PaseoApi, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo
 import { z } from "zod";
 import { truncate, WATCHDOG_AGENT_LABEL_VALUE, type SuperagentState } from "../shared/model";
 import { decisionOnlyOptions, jsonCandidates, parseJsonCandidate, ROUTER_LABEL, routerSessionId, routerUsesSystemPrompt } from "./router";
+import { agentUsesBackgroundWorkspace, detachRoleChildren } from "./workspace";
 
 /**
  * LLM 看门狗(§6):主系统之外的独立巡检会话,由定时消息驱动。
@@ -184,7 +185,7 @@ export function composePatrolPrompt(digest: PatrolDigest, instructions: string |
 
 /**
  * 确保看门狗 agent 存在:kv 记住的 id 还活着就复用(会话即记忆,维护者的问诊上下文也在里面),
- * 否则在默认 workspace 里新建。返回 created 以便首轮补发规则。
+ * 否则在后台工作区里新建。旧前台会话空闲时换建并归档。返回 created 以便首轮补发规则。
  */
 export async function ensureWatchdog(
   paseo: PaseoApi,
@@ -194,17 +195,22 @@ export async function ensureWatchdog(
   instructions: string,
 ): Promise<{ handle: PaseoAgentHandle; agentId: string; created: boolean; sessionId: string | null }> {
   const remembered = state.kv.watchdog?.agentId;
+  let foreground: PaseoAgentHandle | null = null;
   if (remembered && state.kv.watchdog?.provider === provider) {
-    try {
-      const handle = paseo.agents.ref(remembered);
-      const refetched = await handle.refresh();
-      if (refetched && !refetched.agent.archivedAt) {
+    const handle = paseo.agents.ref(remembered);
+    const refetched = await handle.refresh().catch((error) => {
+      console.error("[superagent] watchdog refresh failed, recreating", error);
+      return null;
+    });
+    if (refetched && !refetched.agent.archivedAt) {
+      // 维护者正在问诊时让巡检继续走 busy 分支,下次空闲再换建。
+      if (refetched.agent.status === "running" || await agentUsesBackgroundWorkspace(paseo, refetched.agent)) {
         return { handle, agentId: remembered, created: false, sessionId: routerSessionId(refetched.agent) };
       }
-    } catch (error) {
-      console.error("[superagent] watchdog refresh failed, recreating", error);
+      foreground = handle;
     }
   }
+  if (foreground) await detachRoleChildren(paseo, foreground.id);
   const workspace = await ensureWorkspace();
   let handle: PaseoAgentHandle;
   try {
@@ -220,6 +226,9 @@ export async function ensureWatchdog(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`watchdog agent creation failed (provider "${provider}"): ${message}`, { cause: error });
+  }
+  if (foreground) {
+    await foreground.archive().catch((error) => console.error("[superagent] foreground watchdog archive failed", error));
   }
   return { handle, agentId: handle.id, created: true, sessionId: routerSessionId(handle.current()) };
 }

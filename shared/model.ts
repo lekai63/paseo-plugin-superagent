@@ -408,6 +408,8 @@ export const SuperagentStateSchema = z.object({
     routerPromptState: RouterPromptStateSchema.nullish(),
     /** 共享隔离的持久工作区登记:绝对路径(已 resolve)→ workspace id,跨重启复用。 */
     sharedWorkspaces: z.record(z.string(), z.string()).nullish(),
+    /** Router/看门狗专用后台工作区,绝对路径 → workspace id;与 Worker 登记分离。 */
+    backgroundWorkspaces: z.record(z.string(), z.string()).nullish(),
     /** 对话页打开着的标签;从未保存过时为空,快照按界面发起的对话给出初始标签。 */
     chatTabs: ChatTabsSchema.nullish(),
     watchdog: WatchdogStateSchema.nullish(),
