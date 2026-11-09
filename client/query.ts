@@ -35,17 +35,56 @@ export interface ProviderSnapshotEntry {
   modes?: ReadonlyArray<{ id: string; label: string; description?: string }> | null;
 }
 
+/** wire 模式 compact 快照的模型条目:thinking 选项收进共享的 thinkingSets,模型只带索引。 */
+interface CompactSnapshotModel {
+  id: string;
+  label?: string;
+  isDefault?: boolean;
+  thinkingSet?: number;
+}
+
+interface CompactSnapshot {
+  entries: ReadonlyArray<Omit<ProviderSnapshotEntry, "models"> & { models?: ReadonlyArray<CompactSnapshotModel> | null }>;
+  thinkingSets?: ReadonlyArray<{
+    options: ReadonlyArray<{ id: string; label?: string; description?: string; isDefault?: boolean }>;
+    defaultOptionId?: string;
+  }>;
+}
+
+type SnapshotModel = NonNullable<ProviderSnapshotEntry["models"]>[number];
+
+/**
+ * 把 wire 模式 compact 快照归一成展开形态:模型引用的 thinkingSet 索引还原成
+ * thinkingOptions(与 @getpaseo/protocol 的 expandProviderSnapshot 同构,只搬本插件用到的字段)。
+ * thinkingSet 索引越界时保守地视为未上报(不抛错,选择器退化为保存值 + 手工输入)。
+ */
+export function expandCompactSnapshot(snapshot: CompactSnapshot): ProviderSnapshotEntry[] {
+  const sets = snapshot.thinkingSets ?? [];
+  return snapshot.entries.map((entry): ProviderSnapshotEntry => {
+    if (!entry.models) return entry;
+    return {
+      ...entry,
+      models: entry.models.map((model): SnapshotModel => {
+        if (model.thinkingSet === undefined) return model;
+        const set = sets[model.thinkingSet];
+        if (!set) return { ...model, thinkingOptions: null };
+        return { ...model, thinkingOptions: set.options.map((option) => ({ ...option })) };
+      }),
+    };
+  });
+}
+
 /**
  * 读取 daemon 的 provider 快照(含每个 provider 的 model 清单),供设置页下拉选择。
  * 快照不可用(旧 daemon、连接异常)时调用方回退为手工输入;列表较稳,缓存一分钟。
  *
  * App 宿主共享给插件的连接以 wire 模式取快照:`entries` 为空数组,内容在
  * `compactSnapshot.entries` 里(宿主自家 UI 自行展开)。compact 条目保留了
- * provider/status/enabled/label 与模型清单(缺 thinking 详情,选择器用不到),
- * 这里归一成同一种形状。快照的 thinkingOptions 存在于展开后的模型定义里(wire 客户端
- * 可用 compactSnapshot.thinkingSets 还原,本地连接直接拿到展开形态),思考档位选择器依赖它;
- * 取不到时选择器退化为保存值 + 手工输入,不在插件层拦截。wire 模式下 SDK 的 waitForReady 看到的 entries 恒为空、
- * 不会等待发现,故自行按 status 轮询。
+ * provider/status/enabled/label 与模型清单,但模型的 thinkingOptions 被收进共享的
+ * `compactSnapshot.thinkingSets`、模型上只剩 `thinkingSet` 索引,这里就地展开归一成
+ * 同一种形状(wire 客户端也可用 compactSnapshot.thinkingSets 还原,本地连接直接拿到
+ * 展开形态),思考档位选择器依赖它;取不到时选择器退化为保存值 + 手工输入,不在插件层拦截。
+ * wire 模式下 SDK 的 waitForReady 看到的 entries 恒为空、不会等待发现,故自行按 status 轮询。
  */
 export function useProviderSnapshot(hostId: string) {
   const paseo = usePaseo();
@@ -56,7 +95,7 @@ export function useProviderSnapshot(hostId: string) {
         const payload = await paseo.providers.snapshot();
         return payload.entries.length > 0
           ? ([...payload.entries] as ProviderSnapshotEntry[])
-          : ((payload.compactSnapshot?.entries ?? []) as ProviderSnapshotEntry[]);
+          : (payload.compactSnapshot ? expandCompactSnapshot(payload.compactSnapshot as CompactSnapshot) : []);
       };
       let entries = await read();
       for (let attempt = 0; attempt < 6 && entries.some((entry) => entry.status === "loading"); attempt++) {

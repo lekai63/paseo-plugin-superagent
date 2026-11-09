@@ -705,7 +705,7 @@ function ModePicker({
 
 /**
  * thinking 档位选择:候选取所选 provider/model 的 thinkingOptions(pi 为 low/medium/high/…)。
- * 快照缺 thinking 清单时退化为「已保存值 + 手工输入」,不在插件层拦截。
+ * 快照缺 thinking 清单时退化为手工输入(已保存值带入),不在插件层拦截。
  */
 function ThinkingPicker({
   label, providerSelection, value, onChange, disabled, error, snapshot, fallbackHint,
@@ -724,6 +724,21 @@ function ThinkingPicker({
   const models = entry?.models ?? [];
   const candidates = model ? models.filter((row) => row.id === model) : models;
   const reported = candidates.filter((row) => Array.isArray(row.thinkingOptions));
+  // 该 provider/model 未上报 thinking 清单(或快照不可用):退化为手工输入,保留空值=provider 默认。
+  if (reported.length === 0) {
+    return (
+      <SettingsInput
+        key={providerSelection}
+        label={label}
+        hint={`${fallbackHint};当前快照未上报 thinking 档位,可手工填写档位 id(如 high),留空使用 provider 默认`}
+        placeholder="留空使用 provider 默认"
+        initialValue={value}
+        onChangeText={onChange}
+        disabled={disabled}
+        error={error}
+      />
+    );
+  }
   const options = [
     { label: "Provider 默认", value: "" },
     ...reported.flatMap((row) =>
@@ -733,13 +748,10 @@ function ThinkingPicker({
       ? [{ label: `${value}(已保存,未在快照中)`, value }]
       : []),
   ];
-  const hint = reported.length === 0
-    ? `${fallbackHint};当前快照未上报 thinking 档位,可手工填写档位 id(如 high)`
-    : `留空沿用 provider 默认档位;${fallbackHint}`;
   return (
     <SettingsSelect
       label={label}
-      hint={hint}
+      hint={`留空沿用 provider 默认档位;${fallbackHint}`}
       value={value}
       options={options}
       onValueChange={onChange}
