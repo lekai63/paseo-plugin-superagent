@@ -139,6 +139,8 @@ export interface WorkerLaunch {
 export interface WorkerLaunchEnv {
   /** 显式选择的 provider 模式;省略时由 Paseo 决定。 */
   modeId?: string;
+  /** 显式选择的 thinking 档位;省略时回落 provider 默认(如 pi 的 defaultThinkingLevel)。 */
+  thinkingOptionId?: string;
   /** 该 Ticket 的基础目录(档位专属目录已覆盖全局 workingDir)。 */
   workingDir: string;
   isolation: "worktree" | "shared";
@@ -218,6 +220,7 @@ export async function launchWorker(
       config: {
         provider,
         ...(env.modeId ? { modeId: env.modeId } : {}),
+        ...(env.thinkingOptionId ? { thinkingOptionId: env.thinkingOptionId } : {}),
         systemPrompt: WORKER_SYSTEM_PROMPT,
       },
       title: ticket.title,

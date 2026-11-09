@@ -15,6 +15,40 @@ export interface ProviderSnapshotEntryLike {
   modes?: ReadonlyArray<{ id: string }> | null;
 }
 
+/** 扩展档:模型自带 thinking 档位清单时,设置校验能提前发现非法档位。 */
+export interface ProviderThinkingEntryLike extends ProviderSnapshotEntryLike {
+  models?: ReadonlyArray<{
+    id: string;
+    isDefault?: boolean;
+    thinkingOptions?: ReadonlyArray<{ id: string }> | null;
+  }> | null;
+}
+
+/**
+ * 显式 thinking 档位必须属于所选 provider 的模型。与 validateProviderMode 同风格:
+ * 快照未就绪/provider 未上报 thinking 清单/模型不在快照中时不在插件层拦截,交由 Paseo 创建时兜底。
+ */
+export function validateProviderThinkingOption(
+  selection: string,
+  thinkingOptionId: string,
+  entries: ReadonlyArray<ProviderThinkingEntryLike>,
+): void {
+  if (!thinkingOptionId) return;
+  const [provider, modelId] = selection.split("/");
+  const entry = entries.find((candidate) => candidate.provider === provider);
+  if (!entry || entry.status !== "ready" || !entry.models) return;
+  // provider/model 二段式只看该模型;裸 provider 看任一模型(允许 model 级差异)。
+  const candidates = modelId ? entry.models.filter((model) => model.id === modelId) : entry.models;
+  if (modelId && candidates.length === 0) return;
+  const reported = candidates.filter((model) => Array.isArray(model.thinkingOptions));
+  if (reported.length === 0) return; // 该模型/provider 未上报 thinking 清单:创建时兜底
+  if (reported.some((model) => model.thinkingOptions!.some((option) => option.id === thinkingOptionId))) return;
+  const available = [...new Set(reported.flatMap((model) => model.thinkingOptions!.map((option) => option.id)))].join(", ") || "none";
+  throw new Error(
+    `thinking option "${thinkingOptionId}" is not offered by provider "${selection}" (available: ${available})`,
+  );
+}
+
 /** 显式模式必须属于当前 provider;清单尚未就绪时交由 Paseo 在创建时校验。 */
 export function validateProviderMode(
   selection: string,

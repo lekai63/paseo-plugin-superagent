@@ -61,7 +61,7 @@ function toForm(values: Values): FormValues {
 }
 
 function stripProfileKeys(rows: ProfileRow[]): WorkerProfile[] {
-  return rows.map(({ name, provider, modeId, description, workingDir }) => ({ name, provider, modeId, description, workingDir }));
+  return rows.map(({ name, provider, modeId, thinkingOptionId, description, workingDir }) => ({ name, provider, modeId, thinkingOptionId, description, workingDir }));
 }
 
 /** 草稿比较用的序列化:去掉档位行的本地 key。 */
@@ -203,7 +203,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
     const key = `new-${nextProfileKey.current}`;
     setForm((current) => ({
       ...current,
-      workerProfiles: [...current.workerProfiles, { key, name: "", provider: "", modeId: "", description: "", workingDir: "" }],
+      workerProfiles: [...current.workerProfiles, { key, name: "", provider: "", modeId: "", thinkingOptionId: "", description: "", workingDir: "" }],
     }));
   }, []);
   const removeProfile = useCallback((key: string) => {
@@ -287,6 +287,16 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             hint="只做评估与分派,轻量模型即可"
             emptyLabel="自动选择"
           />
+          <ThinkingPicker
+            label="Router thinking 档位(可选)"
+            providerSelection={form.routerProvider}
+            value={form.routerThinkingOptionId}
+            onChange={(value) => set("routerThinkingOptionId", value)}
+            disabled={disabled}
+            error={errors.routerThinkingOptionId ?? null}
+            snapshot={snapshot}
+            fallbackHint="用于新建或重建的 Router 会话,不影响运行中的会话"
+          />
           <ModelField
             {...field}
             name="workerProvider"
@@ -306,6 +316,16 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             disabled={disabled}
             error={errors.workerModeId ?? null}
             snapshot={snapshot}
+          />
+          <ThinkingPicker
+            label="默认 Worker thinking 档位(可选)"
+            providerSelection={form.workerProvider}
+            value={form.workerThinkingOptionId}
+            onChange={(value) => set("workerThinkingOptionId", value)}
+            disabled={disabled}
+            error={errors.workerThinkingOptionId ?? null}
+            snapshot={snapshot}
+            fallbackHint="随新建或重试的 Worker 传入,不修改运行中的会话"
           />
           {form.workerProfiles.length > 0 ? (
             <TextField
@@ -522,6 +542,16 @@ function ProfileCard({
         error={errors.modeId ?? null}
         snapshot={snapshot}
       />
+      <ThinkingPicker
+        label="thinking 档位(可选)"
+        providerSelection={row.provider}
+        value={row.thinkingOptionId}
+        onChange={(value) => onChange(row.key, "thinkingOptionId", value)}
+        disabled={disabled}
+        error={errors.thinkingOptionId ?? null}
+        snapshot={snapshot}
+        fallbackHint="留空不继承默认 Worker 的档位"
+      />
       <SettingsInput
         label="工作目录(可选)"
         hint="该档位 Worker 的专属基础目录,可与上方的工作目录不同;留空使用它。共享目录隔离时以其档位名单独建工作区"
@@ -660,6 +690,52 @@ function ModePicker({
           : modes.length === 0
             ? "该 provider 未上报可选模式,留空沿用 Paseo 默认"
             : selected?.description ?? "留空沿用 Paseo 默认;所选模式用于新建或重试的 Worker";
+  return (
+    <SettingsSelect
+      label={label}
+      hint={hint}
+      value={value}
+      options={options}
+      onValueChange={onChange}
+      disabled={disabled}
+      error={error}
+    />
+  );
+}
+
+/**
+ * thinking 档位选择:候选取所选 provider/model 的 thinkingOptions(pi 为 low/medium/high/…)。
+ * 快照缺 thinking 清单时退化为「已保存值 + 手工输入」,不在插件层拦截。
+ */
+function ThinkingPicker({
+  label, providerSelection, value, onChange, disabled, error, snapshot, fallbackHint,
+}: {
+  label: string;
+  providerSelection: string;
+  value: string;
+  onChange(value: string): void;
+  disabled: boolean;
+  error: string | null;
+  snapshot: SnapshotState;
+  fallbackHint: string;
+}) {
+  const { provider, model } = splitProviderModel(providerSelection);
+  const entry = snapshot.entries?.find((candidate) => candidate.provider === provider);
+  const models = entry?.models ?? [];
+  const candidates = model ? models.filter((row) => row.id === model) : models;
+  const reported = candidates.filter((row) => Array.isArray(row.thinkingOptions));
+  const options = [
+    { label: "Provider 默认", value: "" },
+    ...reported.flatMap((row) =>
+      (row.thinkingOptions ?? []).map((option) => ({ label: option.label || option.id, value: option.id })),
+    ),
+    ...(value && !reported.some((row) => (row.thinkingOptions ?? []).some((option) => option.id === value))
+      ? [{ label: `${value}(已保存,未在快照中)`, value }]
+      : []),
+  ];
+  const hint = reported.length === 0
+    ? `${fallbackHint};当前快照未上报 thinking 档位,可手工填写档位 id(如 high)`
+    : `留空沿用 provider 默认档位;${fallbackHint}`;
   return (
     <SettingsSelect
       label={label}

@@ -31,6 +31,16 @@ export const WORKER_PROFILE_NAME_HINT = "小写字母开头,只含小写字母�
 /** 共享隔离下 Router 与默认 Worker 合用的持久工作区标题;按「标题 + 目录」找回或新建。 */
 export const DEFAULT_WORKSPACE_TITLE = "默认 workspace";
 
+/** thinking 档位 id(pi: low/medium/high/…);空串 = 不指定。 */
+export const THINKING_OPTION_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
+const THINKING_OPTION_HINT = "thinking 档位 id:小写字母开头,只含小写字母/数字/./_/-,留空用 provider 默认";
+const ThinkingOptionSchema = z
+  .string()
+  .trim()
+  .max(64)
+  .regex(new RegExp(`^(?:${THINKING_OPTION_PATTERN.source})?$`), THINKING_OPTION_HINT)
+  .default("");
+
 export const WorkerProfileSchema = z.object({
   /** Router 在 dispatch 里填写的档位名。 */
   name: z
@@ -42,6 +52,8 @@ export const WorkerProfileSchema = z.object({
   provider: z.string().trim().min(1, "需要填写 provider").max(120),
   /** provider 上报的模式 ID;留空不覆盖 Paseo 默认模式。 */
   modeId: z.string().trim().max(500).default(""),
+  /** 该档位 Worker 的 thinking 档位;留空不指定(回落 provider 默认)。 */
+  thinkingOptionId: ThinkingOptionSchema,
   /** 用途说明:原样写进 Router 提示词,是 Router 选档位的唯一依据。 */
   description: z.string().trim().min(1, "需要写明用途,Router 靠它选择档位").max(300),
   /** 该档位 Worker 的专属基础目录(绝对路径);留空用全局 workingDir。 */
@@ -75,16 +87,20 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 11,
+  version: 12,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
+    /** Router 会话的 thinking 档位;留空不指定(回落 provider 默认)。 */
+    routerThinkingOptionId: ThinkingOptionSchema,
     /** 每次评估直接注入,不依赖 provider 读取工作目录中的规则文件。 */
     routerInstructions: z.string().trim().max(MAX_ROUTER_INSTRUCTIONS_CHARS).default(""),
     /** 默认 Worker:dispatch 未指定档位(或档位不存在)时使用。 */
     workerProvider: z.string().trim().max(120).default(""),
     /** 默认 Worker 的模式;留空不覆盖 Paseo 默认模式。 */
     workerModeId: z.string().trim().max(500).default(""),
+    /** 默认 Worker 的 thinking 档位;留空不指定(回落 provider 默认)。 */
+    workerThinkingOptionId: ThinkingOptionSchema,
     /** 默认 Worker 的用途说明;配置了其他档位时写进 Router 提示词,留空用通用说明。 */
     workerDescription: z.string().trim().max(300).default(""),
     /** 默认 Worker 之外的具名档位,Router 按用途说明为每个 dispatch 选择。 */
@@ -191,7 +207,9 @@ export const superagentSettings = defineSettings({
    * v7 → v8:新增 feishuObserve/qqObserve(默认关闭,行为与旧版一致);
    * v8 → v9:新增 speculativeEnabled 与 watchdog* 字段(默认关闭,行为与旧版一致);
    * v9 → v10:新增 workerModeId 与档位 modeId(留空沿用 Paseo 默认模式);
-   * v10 → v11:新增 weixinEnabled/weixinAllowUsers(默认关闭,行为与旧版一致)。
+   * v10 → v11:新增 weixinEnabled/weixinAllowUsers(默认关闭,行为与旧版一致);
+   * v11 → v12:新增 routerThinkingOptionId/workerThinkingOptionId 与档位 thinkingOptionId
+   * (留空不传,回落 provider 默认,行为与旧版一致)。
    */
   migrate: (values) => values,
 });

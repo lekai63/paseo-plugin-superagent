@@ -26,7 +26,12 @@ export interface ProviderSnapshotEntry {
   status: string;
   enabled?: boolean;
   label?: string;
-  models?: ReadonlyArray<{ id: string; label: string; isDefault?: boolean }> | null;
+  models?: ReadonlyArray<{
+    id: string;
+    label?: string;
+    isDefault?: boolean;
+    thinkingOptions?: ReadonlyArray<{ id: string; label?: string; description?: string; isDefault?: boolean }> | null;
+  }> | null;
   modes?: ReadonlyArray<{ id: string; label: string; description?: string }> | null;
 }
 
@@ -37,7 +42,9 @@ export interface ProviderSnapshotEntry {
  * App 宿主共享给插件的连接以 wire 模式取快照:`entries` 为空数组,内容在
  * `compactSnapshot.entries` 里(宿主自家 UI 自行展开)。compact 条目保留了
  * provider/status/enabled/label 与模型清单(缺 thinking 详情,选择器用不到),
- * 这里归一成同一种形状。wire 模式下 SDK 的 waitForReady 看到的 entries 恒为空、
+ * 这里归一成同一种形状。快照的 thinkingOptions 存在于展开后的模型定义里(wire 客户端
+ * 可用 compactSnapshot.thinkingSets 还原,本地连接直接拿到展开形态),思考档位选择器依赖它;
+ * 取不到时选择器退化为保存值 + 手工输入,不在插件层拦截。wire 模式下 SDK 的 waitForReady 看到的 entries 恒为空、
  * 不会等待发现,故自行按 status 轮询。
  */
 export function useProviderSnapshot(hostId: string) {

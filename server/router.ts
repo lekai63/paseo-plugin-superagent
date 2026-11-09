@@ -669,6 +669,7 @@ export async function ensureRouter(
   provider: string,
   ensureWorkspace: () => Promise<PaseoWorkspaceHandle>,
   instructions: string,
+  thinkingOptionId: string = "",
 ): Promise<{ handle: PaseoAgentHandle; agentId: string; created: boolean; sessionId: string | null } | { error: string }> {
   const remembered = state.kv.routerAgentId;
   let foreground: PaseoAgentHandle | null = null;
@@ -696,6 +697,7 @@ export async function ensureRouter(
         provider,
         ...(routerUsesSystemPrompt(provider) ? { systemPrompt: instructions } : {}),
         ...decisionOnlyOptions(provider),
+        ...(thinkingOptionId ? { thinkingOptionId } : {}),
       },
       title: "Superagent Router",
       labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE },
