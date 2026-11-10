@@ -221,6 +221,22 @@ test("parseVerdict normalizes legacy single-decision verdicts", () => {
   ]);
 });
 
+test("parseVerdict reports the actual JSON syntax error and the malformed reply properties", () => {
+  const parsed = parseVerdict('```json\n{"actions":[{"action":"reply":"收到"}]}\n```');
+  assert.match(parsed.error, /JSON syntax:/);
+  assert.match(parsed.error, /position \d+/);
+  assert.match(parsed.error, /near/);
+  assert.ok(parsed.error.includes('{"action":"reply","reply":"text"}'));
+  assert.ok(parsed.error.includes('{"action":"reply":"text"}'));
+});
+
+test("parseVerdict reports syntax errors other than malformed reply properties", () => {
+  const parsed = parseVerdict('```json\n{"actions":[{"action":"ignore",}]}\n```');
+  assert.match(parsed.error, /JSON syntax:/);
+  assert.match(parsed.error, /position \d+/);
+  assert.ok(!parsed.error.includes("Reply syntax must be"));
+});
+
 // 模型多块自我纠正的回复形态:首个围栏块结构错误,第二个围栏块照抄提示词示例的
 // 占位值("..." / "tkt_..."),真正的裁决反而是围栏外的裸 JSON(线上实际事故)。
 

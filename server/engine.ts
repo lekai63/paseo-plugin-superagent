@@ -36,6 +36,7 @@ import {
 import {
   composeEvalPrompt,
   composeRouterInstructions,
+  composeVerdictRepairPrompt,
   ensureRouter,
   newDecision,
   parseVerdict,
@@ -854,18 +855,32 @@ export class SuperagentEngine {
       chatter,
       options: ruleOptions,
     });
+    const evalDeadline = Date.now() + ROUTER_EVAL_TIMEOUT_MS;
     const result = await router.handle.run(prompt, { timeoutMs: ROUTER_EVAL_TIMEOUT_MS });
-    const replyText =
+    let replyText =
       result.lastMessage?.trim() || (await readLastAssistantMessage(paseo, routerAgentId)) || "";
 
-    // 3. 解析裁决;失败即记录 unparsed(触发保留 pending 供重试),连续失败计数防失控循环。
-    const parsed = parseVerdict(replyText);
+    // 3. 解析失败时把具体错误发回同一 Router,预算内仅纠正一次;期间不执行任何动作。
+    let parsed = parseVerdict(replyText);
     state = this.store.get();
     // 评估期间线程可能被关闭;丢弃迟到裁决,不能重新派发已取消的工作。
     if (
       state.threads.find((t) => t.id === threadId)?.state !== "active" ||
       batch.some((trigger) => state.triggers.find((t) => t.id === trigger.id)?.status !== "pending")
     ) return;
+    const remainingMs = evalDeadline - Date.now();
+    if ("error" in parsed && remainingMs > 0) {
+      const corrected = await router.handle.run(composeVerdictRepairPrompt(threadId, parsed.error), { timeoutMs: remainingMs });
+      replyText = corrected.lastMessage?.trim() || (await readLastAssistantMessage(paseo, routerAgentId)) || "";
+      parsed = parseVerdict(replyText);
+      state = this.store.get();
+      // 人工关闭或消费触发同样优先于迟到的纠正结果。
+      if (
+        state.threads.find((t) => t.id === threadId)?.state !== "active" ||
+        batch.some((trigger) => state.triggers.find((t) => t.id === trigger.id)?.status !== "pending")
+      ) return;
+    }
+    // 纠正后仍失败才记一次 unparsed,触发保留 pending,连续失败计数防失控循环。
     const recordUnparsed = async (reason: string) => {
       this.evalFailures.set(threadId, (this.evalFailures.get(threadId) ?? 0) + 1);
       await this.store.update((next) => {

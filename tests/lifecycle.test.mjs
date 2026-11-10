@@ -1041,6 +1041,96 @@ test("a placeholder dispatch mandate is recorded unparsed and the trigger stays 
   assert.equal(f.state.tickets.filter((ticket) => ticket.title === "...").length, 0);
 });
 
+test("Router receives the syntax error and resends all actions before any are executed", async (t) => {
+  const f = fixture(t, "completed");
+  pendingTrigger(f.state);
+  const initial = '{"actions":[{"action":"dispatch","title":"Job","mandate":"do the job"},{"action":"reply":"on it"}]}';
+  const repaired = { actions: [
+    { action: "dispatch", title: "Job", mandate: "do the job" },
+    { action: "reply", reply: "on it" },
+  ] };
+  const prompts = [];
+  const timeouts = [];
+  f.ref("router").run = async (prompt, options) => {
+    prompts.push(prompt);
+    timeouts.push(options.timeoutMs);
+    assert.equal(f.calls.creates, 0);
+    assert.equal(f.state.decisions.length, 0);
+    assert.equal(f.state.triggers[0].status, "pending");
+    return { lastMessage: prompts.length === 1 ? initial : JSON.stringify(repaired) };
+  };
+  f.engine.evalFailures.set("thread", 2);
+  await f.engine.runEval("thread");
+  await until(() => f.calls.creates === 1);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /thread thread/);
+  assert.match(prompts[1], /No actions from it were executed/);
+  assert.match(prompts[1], /COMPLETE verdict/);
+  assert.match(prompts[1], /JSON syntax:/);
+  assert.match(prompts[1], /position \d+/);
+  assert.ok(prompts[1].includes('{"action":"reply","reply":"message text"}'));
+  assert.ok(timeouts[1] > 0 && timeouts[1] <= timeouts[0]);
+  assert.deepEqual(f.state.decisions.map((decision) => decision.outcome), ["dispatch", "reply"]);
+  assert.equal(f.state.decisions[0].raw, JSON.stringify(repaired));
+  assert.equal(f.state.triggers[0].status, "evaluated");
+  assert.equal(f.engine.evalFailures.has("thread"), false);
+});
+
+test("Router gets one correction attempt then records the final error and keeps the batch pending", async (t) => {
+  const f = fixture(t, "completed");
+  pendingTrigger(f.state);
+  let attempts = 0;
+  const final = '{"actions":[{"action":"reply":"still broken"}]}';
+  f.ref("router").run = async () => ({ lastMessage: ++attempts === 1 ? 'no JSON' : final });
+  f.engine.evalFailures.set("thread", 2);
+  await f.engine.runEval("thread");
+  assert.equal(attempts, 2);
+  assert.equal(f.calls.creates, 0);
+  assert.equal(f.state.decisions.length, 1);
+  assert.equal(f.state.decisions[0].outcome, "unparsed");
+  assert.equal(f.state.decisions[0].raw, final);
+  assert.match(f.state.decisions[0].rationale, /JSON syntax:/);
+  assert.equal(f.state.triggers[0].status, "pending");
+  assert.equal(f.engine.evalFailures.get("thread"), 3);
+});
+
+test("Router can correct a schema error using the same feedback path", async (t) => {
+  const f = fixture(t, "completed");
+  pendingTrigger(f.state);
+  const prompts = [];
+  f.ref("router").run = async (prompt) => {
+    prompts.push(prompt);
+    return { lastMessage: JSON.stringify({ actions: prompts.length === 1
+      ? [{ action: "reply" }] : [{ action: "reply", reply: "corrected" }] }) };
+  };
+  await f.engine.runEval("thread");
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /verdict schema/);
+  assert.equal(f.state.decisions[0].reply, "corrected");
+});
+
+test("closing a thread during Router correction discards its late dispatch", async (t) => {
+  const f = fixture(t, "completed");
+  pendingTrigger(f.state);
+  const correction = deferred();
+  const entered = deferred();
+  let attempts = 0;
+  f.ref("router").run = async () => {
+    if (++attempts === 1) return { lastMessage: 'no JSON' };
+    entered.resolve();
+    return correction.promise;
+  };
+  const evaluating = f.engine.runEval("thread");
+  await entered.promise;
+  await f.engine.closeThread("thread");
+  correction.resolve({ lastMessage: JSON.stringify({ actions: [{ action: "dispatch", title: "late", mandate: "do work" }] }) });
+  await evaluating;
+  assert.equal(attempts, 2);
+  assert.equal(f.state.tickets.length, 1);
+  assert.equal(f.calls.creates, 0);
+  assert.equal(f.state.decisions.length, 0);
+});
+
 test("a Router steer action reaches the ticket's worker and revives a waiting one", async (t) => {
   const f = fixture(t, "waiting");
   pendingTrigger(f.state);
