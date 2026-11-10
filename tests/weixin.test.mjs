@@ -6,7 +6,8 @@ import path from "node:path";
 import test from "node:test";
 import { parseWeixinJson } from "../server/weixin-api.ts";
 import { WeixinSource, extractWeixinText } from "../server/weixin.ts";
-import { parseWeixinAesKey, safeWeixinFileName, weixinMediaRefs } from "../server/weixin-media.ts";
+import { safeFileName } from "../server/im-attachments.ts";
+import { parseWeixinAesKey, weixinMediaRefs } from "../server/weixin-media.ts";
 import { WeixinLogin, qrModules } from "../server/weixin-login.ts";
 import { zipOf } from "./zip-fixture.mjs";
 import { loadWeixinAccount, loadWeixinCursor, saveWeixinAccount, saveWeixinCursor } from "../server/weixin-store.ts";
@@ -225,13 +226,13 @@ test("weixin media helpers: key encodings, safe file names, quoted fallback", ()
   assert.deepEqual(parseWeixinAesKey(fileAesKey), fileKey, "base64 of the 32-char hex key");
   assert.throws(() => parseWeixinAesKey(Buffer.from("short").toString("base64")), /格式不对/);
 
-  assert.equal(safeWeixinFileName("../../etc/passwd"), "passwd");
-  assert.equal(safeWeixinFileName("C:\\Users\\me\\报表.xlsx"), "报表.xlsx");
-  assert.equal(safeWeixinFileName("..hidden"), "hidden");
-  assert.equal(safeWeixinFileName("a\u0000b\nc.txt"), "abc.txt");
-  assert.equal(safeWeixinFileName(".."), null);
-  assert.equal(safeWeixinFileName(undefined), null);
-  const long = safeWeixinFileName(`${"发".repeat(100)}.pdf`);
+  assert.equal(safeFileName("../../etc/passwd"), "passwd");
+  assert.equal(safeFileName("C:\\Users\\me\\报表.xlsx"), "报表.xlsx");
+  assert.equal(safeFileName("..hidden"), "hidden");
+  assert.equal(safeFileName("a\u0000b\nc.txt"), "abc.txt");
+  assert.equal(safeFileName(".."), null);
+  assert.equal(safeFileName(undefined), null);
+  const long = safeFileName(`${"发".repeat(100)}.pdf`);
   assert.ok(Buffer.byteLength(long) <= 200 && long.endsWith(".pdf"));
 
   const quotedOnly = weixinMediaRefs([{ type: 1, text_item: { text: "看看" }, ref_msg: { message_item: { type: 2, image_item: {} } } }]);

@@ -102,6 +102,8 @@ cp pi-extension/superagent.js ~/.pi/agent/extensions/
 
 **分级准入**:白名单命中但未 @ 机器人的群消息(飞书/QQ)默认记为**已过滤**留痕(对话气泡显示「已过滤 · 群消息未 @ 机器人」,不评估、不直通、每线程上限 30 条);打开该通道的**群聊观察模式**后,这类消息改为上下文触发交给 Router 判断(可忽略,也可按需行动)——对齐文章「观察公共聊天、未被点名也可介入」的候选档。钉钉/企微的未 @ 群消息在平台侧就不会投递,无此档位。
 
+**非文本内容**(飞书 / 钉钉 / 企微 / 微信):图片、文件、视频、语音下载到「IM 附件收件目录」(`imInboxDir`,`<目录>/<通道>/<日期>/<消息 id>/<文件名>`,0600,单个上限 100 MB),在触发正文里写成一行 `[<通道><类型>] 名称(大小)已保存到本机:<路径>`(如 `[飞书文件]`、`[钉钉图片]`、`[企微视频]`、`[引用的微信文件]`);`.zip`/`.7z`/`.rar` 再附包内清单(见微信一节);下载失败也照常触发,写明原因并提示让用户重发。平台自带语音转写时(钉钉、企微、微信)直接用转写文字。群里未 @ 的消息(留痕、观察模式上下文)只写附件描述,不下载。事件回调立即返回,下载在每个通道的队列里进行,同一通道的消息仍按到达顺序交给引擎。消息里给了文件名就用它;没有时用下载响应头里的名字,再没有则按内容判断类型命名(如 `image-1.png`、`audio-1.ogg`)。QQ 通道仍只收文本。
+
 > 选型说明:调研过 [openclaw-china](https://github.com/BytePioneer-AI/openclaw-china)(MIT,TypeScript)——其 adapter 深度绑定 OpenClaw 宿主 runtime(消息路由/会话存储/流式回复均走宿主),无法脱离 OpenClaw 独立 import。因此本插件采用与其**相同的官方 SDK 矩阵**直接接入:飞书 `@larksuiteoapi/node-sdk`、钉钉 `dingtalk-stream`、企微 `@wecom/aibot-node-sdk`,全部官方 API、长连接、免公网。微信同理:腾讯官方插件 [`@tencent-weixin/openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) 以 openclaw 为 peer 依赖、走 OpenClaw 的渠道运行时,因此按其公开的 iLink 协议([protocol.md](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol.md))直接调用同一官方接口 `ilinkai.weixin.qq.com`。
 
 ### 飞书(官方长连接)
@@ -114,6 +116,8 @@ cp pi-extension/superagent.js ~/.pi/agent/extensions/
 
 行为:私聊直接触发;群聊需 **@机器人**(或打开「群聊观察模式」收上下文)。同一聊天 = 同一 Thread(话题按 root 分线程)。答复以引用回复回到原消息。
 
+非文本:富文本(post)取标题、文字、链接、代码块,以及其中的图片和视频;图片、文件、语音(原始音频,飞书不给转写)、视频经「获取消息中的资源文件」接口下载。回复一条带附件的消息时(比如在群里回复那份文件并 @机器人 说"处理这个"),经「获取指定消息的内容」接口取回原消息、下载被回复的那份。合并转发列出最多 50 条子消息的文字;飞书不允许机器人下载合并转发和卡片里的资源,这类附件只注明类型。文件夹、名片、位置只写一句说明,表情包忽略。本机应用 2026-11-10 已实测两个接口都有权限;新应用若报权限不足,按错误提示在开放平台补开。
+
 ### 钉钉(官方 Stream 模式,免公网)
 
 1. [钉钉开发者后台](https://open-dev.dingtalk.com) 创建企业内部应用,记录 AppKey / AppSecret;
@@ -122,12 +126,16 @@ cp pi-extension/superagent.js ~/.pi/agent/extensions/
 
 行为:单聊直接触发;群聊被 @ 才会收到(钉钉机制)。同一 conversationId = 同一 Thread。回复经消息自带的 sessionWebhook(**有过期时间**,Worker 长任务的晚到回复可能失败,失败会记录日志)。
 
+非文本:富文本(文字 + 图片)、图片、文件、视频用消息里的 `downloadCode` 调 `/v1.0/robot/messageFiles/download` 换临时地址下载(access token 用 AppKey/AppSecret 换取并缓存,robotCode 取消息自带的,缺省用 AppKey);语音优先用自带转写 `recognition`,没有转写才下载音频;其余类型只写一句说明。群里只有 @ 消息会投递,群文件无法直接交给机器人,请私聊发送。
+
 ### 企业微信(智能机器人官方长连接,免公网)
 
 1. 企业微信管理后台创建**智能机器人**,记录 botId 与 Secret;
 2. 设置页填:botId、Secret、允许的发送者 `userid`(或群 `chatid`)。
 
 行为:单聊直接触发;群聊需 @机器人。答复通过 `chatId` 主动发送独立 Markdown 消息,支持多段续发,不复用已完成的 `req_id` 回复流。通道拒绝时保留未发送内容与进度供补发。
+
+非文本:语音用平台转写文字;图片、图文混排、文件、视频按消息里的 url 下载(链接 5 分钟内有效,所以收到即下载),用每个链接自带的 aeskey 做 AES-256-CBC 解密,文件名取自下载响应头。引用了带附件的消息时下载被引用的那份;引用的文字附在正文末尾(企微的引用不带消息 id,无法按线程归档)。
 
 ### 微信(腾讯官方 ClawBot / iLink,扫码登录,免公网)
 

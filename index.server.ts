@@ -143,6 +143,9 @@ export default function contribute(server: PluginServerContext) {
     });
   }
 
+  /** IM 附件收件目录:各通道每条消息现取,改设置不必重连。 */
+  const imInboxDir = () => resolveImInboxDir(current.imInboxDir);
+
   // 微信:凭证来自扫码登录(daemon 本机文件),不在设置里;扫码人自动进白名单。
   let weixinSource: WeixinSource | null = null;
 
@@ -158,7 +161,7 @@ export default function contribute(server: PluginServerContext) {
       console.warn("[superagent] weixin source enabled but allowlist is empty; not starting (unsafe)");
       return null;
     }
-    return new WeixinSource({ account, allowUsers: users, inboxDir: () => resolveImInboxDir(current.imInboxDir) });
+    return new WeixinSource({ account, allowUsers: users, inboxDir: imInboxDir });
   }
 
   // IM 启停串行执行:设置保存与扫码登录可能同时触发重连。
@@ -250,6 +253,7 @@ export default function contribute(server: PluginServerContext) {
               allowUsers: users,
               allowChats: chats,
               observeGroups: values.feishuObserve,
+              inboxDir: imInboxDir,
             }),
           ),
         );
@@ -293,6 +297,7 @@ export default function contribute(server: PluginServerContext) {
               clientSecret: values.dingtalkClientSecret,
               allowUsers: users,
               allowChats: chats,
+              inboxDir: imInboxDir,
             }),
           ),
         );
@@ -314,6 +319,7 @@ export default function contribute(server: PluginServerContext) {
               secret: values.wecomSecret,
               allowUsers: users,
               allowChats: chats,
+              inboxDir: imInboxDir,
             }),
           ),
         );

@@ -63,10 +63,10 @@ const feishuEvent = (over = {}) => ({
   },
 });
 
-test("feishu group messages without a mention drop with a record, or become context in observe mode", () => {
+test("feishu group messages without a mention drop with a record, or become context in observe mode", async () => {
   const drops = [];
   const strict = new FeishuSource({ appId: "a", appSecret: "b", allowUsers: [], allowChats: ["oc_group"], observeGroups: false });
-  assert.equal(strict.translate(feishuEvent(), (drop) => drops.push(drop)), null);
+  assert.equal(await strict.translate(feishuEvent(), (drop) => drops.push(drop)), null);
   assert.equal(drops.length, 1);
   assert.equal(drops[0].reason, "群消息未 @ 机器人");
   assert.equal(drops[0].threadKey, "feishu:chat:oc_group");
@@ -75,19 +75,19 @@ test("feishu group messages without a mention drop with a record, or become cont
 
   const observing = new FeishuSource({ appId: "a", appSecret: "b", allowUsers: [], allowChats: ["oc_group"], observeGroups: true });
   const observed = [];
-  const inbound = observing.translate(feishuEvent(), (drop) => observed.push(drop));
+  const inbound = await observing.translate(feishuEvent(), (drop) => observed.push(drop));
   assert.equal(observed.length, 0, "observe mode does not drop");
   assert.equal(inbound.context, true);
   assert.ok(inbound.text.includes("群里闲聊"));
 
   // 被 @ 的群消息与私聊行为不变:正常触发、非上下文。
-  const mentioned = observing.translate(
+  const mentioned = await observing.translate(
     feishuEvent({ content: JSON.stringify({ text: "@_user_1 帮我查一下" }), mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" } }] }),
     () => {},
   );
   assert.equal(mentioned.context, undefined);
   assert.equal(mentioned.text, "帮我查一下");
-  const direct = observing.translate(
+  const direct = await observing.translate(
     feishuEvent({ chat_type: "p2p" }),
     () => {},
   );

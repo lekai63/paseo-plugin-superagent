@@ -131,7 +131,7 @@ test("the worker unsubscribe tool can leave a single followed thread", async (t)
 
 test("Feishu carries the quoted parent and root ids and returns sent message ids", async () => {
   const source = new FeishuSource({ appId: "a", appSecret: "b", allowUsers: ["ou_1"], allowChats: [], observeGroups: false });
-  const inbound = source.translate({
+  const inbound = await source.translate({
     sender: { sender_id: { open_id: "ou_1" }, sender_type: "user" },
     message: {
       message_id: "om_new", parent_id: "om_parent", root_id: "om_root", chat_id: "oc_g", chat_type: "p2p",

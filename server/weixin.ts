@@ -15,12 +15,8 @@ import {
   type WeixinMessage,
   type WeixinMessageItem,
 } from "./weixin-api";
-import {
-  describeWeixinAttachment,
-  describeWeixinMediaRef,
-  saveWeixinAttachments,
-  weixinMediaRefs,
-} from "./weixin-media";
+import { describePendingAttachment, describeSavedAttachment, joinLines, saveAttachments } from "./im-attachments";
+import { weixinMediaRefs, weixinPendingAttachment } from "./weixin-media";
 import { loadWeixinCursor, saveWeixinCursor, type WeixinAccount } from "./weixin-store";
 
 /**
@@ -29,7 +25,7 @@ import { loadWeixinCursor, saveWeixinCursor, type WeixinAccount } from "./weixin
  * - fast-path:allowUsers(xxx@im.wechat)白名单,扫码人自动在内。
  * - 回复必须带入站消息的 context_token:按用户记最新一枚,重启后回落到触发记录里保存的那枚。
  * - 群消息(group_id)官方插件也未支持:白名单命中时记 filtered 留痕,不触发。
- * - 图片/文件/视频下载解密到本机收件目录,路径写进触发正文(见 weixin-media.ts)。
+ * - 图片/文件/视频下载解密到本机收件目录,路径写进触发正文(见 weixin-media.ts / im-attachments.ts)。
  */
 
 interface WeixinConfig {
@@ -271,7 +267,7 @@ export class WeixinSource implements ImSource {
     const groupId = message.group_id?.trim();
     if (groupId) {
       // 群里的 context_token 属于群会话,不能拿来回私聊,因此不记;群附件也不下载。
-      const summary = [text, ...media.map(describeWeixinMediaRef)].filter(Boolean).join("\n");
+      const summary = joinLines([text, ...media.map((ref) => describePendingAttachment("weixin", ref))]);
       if (summary) {
         onDrop?.({
           origin: { channel: "weixin", chatId: groupId, messageId, senderId: from, senderName: null },
@@ -291,13 +287,12 @@ export class WeixinSource implements ImSource {
       console.log(`[superagent] weixin message ${messageId ?? "?"} ignored: no text or attachment (item types: ${types})`);
       return null;
     }
-    const attachments = media.length > 0 ? await saveWeixinAttachments(media, messageId, { signal, inboxDir: this.config.inboxDir?.() }) : [];
-    for (const attachment of attachments) {
-      if (attachment.path) console.log(`[superagent] weixin ${attachment.kind} saved: ${attachment.path} (${attachment.bytes} bytes)`);
-      else console.warn(`[superagent] weixin ${attachment.kind} ${attachment.name ?? ""} download failed: ${attachment.error}`);
-    }
-    const body = [text, ...attachments.map(describeWeixinAttachment)].filter(Boolean).join("\n");
-    const headline = text || media.map(describeWeixinMediaRef).join(" ");
+    const attachments =
+      media.length > 0
+        ? await saveAttachments("weixin", messageId, media.map(weixinPendingAttachment), { signal, inboxDir: this.config.inboxDir?.() })
+        : [];
+    const body = joinLines([text, ...attachments.map((attachment) => describeSavedAttachment("weixin", attachment))]);
+    const headline = text || media.map((ref) => describePendingAttachment("weixin", ref)).join(" ");
     return {
       origin: {
         channel: "weixin",
