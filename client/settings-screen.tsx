@@ -88,6 +88,8 @@ function parseForm(form: FormValues): { values: Values | null; errors: FormError
   }
   const workingDir = form.workingDir.trim();
   if (workingDir && !isAbsolutePath(workingDir)) errors.workingDir = "需要绝对路径,例如 /home/me/project";
+  const imInboxDir = form.imInboxDir.trim();
+  if (imInboxDir && !isAbsolutePath(imInboxDir)) errors.imInboxDir = "需要绝对路径,留空使用默认目录";
   // 档位专属目录:留空合法(用全局工作目录),填写时必须是绝对路径。
   form.workerProfiles.forEach((row, index) => {
     const dir = row.workingDir.trim();
@@ -467,6 +469,13 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
         ))}
         <SettingsCard>
           <TextField {...field} name="imReplyMaxChars" label="IM 单条消息上限(字符)" hint="包含分段序号;长答复自动分成多条依次发完" />
+          <TextField
+            {...field}
+            name="imInboxDir"
+            label="IM 附件收件目录"
+            hint="daemon 主机上的绝对路径。聊天里收到的文件存到 <目录>/<通道>/<日期>/<消息 id>/ 下,压缩包附清单交给 Router;改后立即生效"
+            placeholder="留空:$PASEO_HOME/plugin-data/superagent/inbox"
+          />
         </SettingsCard>
       </SettingsSection>
 

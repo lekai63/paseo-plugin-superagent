@@ -1,5 +1,18 @@
+import path from "node:path";
 import type { TriggerOrigin } from "../shared/model";
 import type { ReplySink } from "./engine";
+import { resolvePaseoHome } from "./store";
+
+/**
+ * IM 附件的收件根目录(各通道再分子目录,如 `weixin/`)。设置 imInboxDir 留空或不是
+ * 绝对路径时用默认的 `$PASEO_HOME/plugin-data/superagent/inbox`。
+ */
+export function resolveImInboxDir(configured: string | undefined): string {
+  const value = configured?.trim() ?? "";
+  if (value && path.isAbsolute(value)) return path.resolve(value);
+  if (value) console.warn(`[superagent] imInboxDir ${JSON.stringify(value)} is not an absolute path; using the default inbox`);
+  return path.join(resolvePaseoHome(), "plugin-data", "superagent", "inbox");
+}
 
 /** IM 入站消息(经 fast-path 白名单后)交给引擎的统一形状。 */
 export interface InboundMessage {

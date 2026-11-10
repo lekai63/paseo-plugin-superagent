@@ -14,7 +14,7 @@ import {
 } from "./server/handlers";
 import { createSessionOpenTransform, orchestrationPermission, resolveMcpProviders } from "./server/agent-mcp";
 import { startDispatchMcpServer, type SuperagentMcpEndpoint } from "./server/mcp-server";
-import { ImManager } from "./server/im";
+import { ImManager, resolveImInboxDir } from "./server/im";
 import { FeishuSource } from "./server/feishu";
 import { QqSource } from "./server/qq";
 import { DingtalkSource } from "./server/dingtalk";
@@ -158,7 +158,7 @@ export default function contribute(server: PluginServerContext) {
       console.warn("[superagent] weixin source enabled but allowlist is empty; not starting (unsafe)");
       return null;
     }
-    return new WeixinSource({ account, allowUsers: users });
+    return new WeixinSource({ account, allowUsers: users, inboxDir: () => resolveImInboxDir(current.imInboxDir) });
   }
 
   // IM 启停串行执行:设置保存与扫码登录可能同时触发重连。

@@ -72,6 +72,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 | Router provider/model | 设置页从 daemon 的 provider 快照中下拉选取(model id 原样带入,含 ACP 系的反斜杠 id;清单读取失败或所选 provider 未上报模型时退回手填)。留空自动选用宿主可用默认(claude → codex → opencode → 任意);填错时 Router 评估会报出可用 id |
 | thinking 档位(可选) | Router、默认 Worker 与每个具名档位都可独立选 thinking 档位(字段 `routerThinkingOptionId`/`workerThinkingOptionId`/档位 `thinkingOptionId`),候选来自所选 provider/model 的 `thinkingOptions`(如 pi 的 low/medium/high/max)。选「Provider 默认」时不传 `thinkingOptionId`,回落 provider 自己的默认(pi 为 `~/.pi/agent/settings.json` 的 `defaultThinkingLevel`);快照未上报清单时可手工填档位 id。Router 的档位用于新建或重建的 Router 会话(存量会话不受影响,可用 `paseo agent update <id> --thinking <档位>` 热切);Worker 的档位随首条任务传入,只用于新建或重试的 Worker;具名档位留空不继承默认 Worker 的档位。启动前会对照快照校验,非法档位报出可用 ID,不静默回退 |
 | Router 自定义规则 | 设置页「Router 规则」直接填写,支持多行,最多 12000 字符,配置字段为 `routerInstructions`。用于答复语言、分派偏好和汇报格式,留空使用默认规则。配置变化后在下一次评估补发一次,之后复用,无需重建 Router 会话,也不依赖 provider 读取 `AGENTS.md`/`ROUTER.md`;不改变 Worker 的项目规则。自定义规则补充内置编排约束,Router 仍只做裁决并按 JSON actions 输出 |
+| IM 附件收件目录 | `imInboxDir`,daemon 主机上的绝对路径;留空为 `$PASEO_HOME/plugin-data/superagent/inbox`。聊天里收到的文件存到 `<目录>/<通道>/<日期>/<消息 id>/` 下,改后对下一条消息立即生效,不重连通道。各 Worker 档位的工作目录有自己的归档规则时,宜设成它们之外的中立目录,由 Worker 按规则移入任务目录 |
 | IM 单条消息上限 | 默认 600,可设 100–4000 字符,沿用配置字段 `imReplyMaxChars`。超长答复按段落/换行优先拆分为多条,添加 `[1/N]` 序号(计入上限)后顺序发送,正文完整保留;普通 emoji 按字素边界拆分。发送前保存全部分段,每段确认成功后记录进度;失败暂停,在对话页右侧栏「状态 → 未送达的 IM 回复」从失败段补发(这一栏只列发送中与发送失败的回复,全部发出后即消失)。重启恢复未完成的发送,已确认的段不重发。远端已接收但回执丢失或落盘前崩溃时,该段仍可能重复,通道未提供统一的恰好一次投递保证 |
 | Worker provider/model | 同上,建议配最强模型。配置了 Worker 档位时它是**默认 Worker**,可另填一句用途说明 |
 | Worker 模式(可选) | 默认 Worker 与每个具名档位都可独立选择模式,候选直接来自所选 provider 的快照(含 ACP 动态模式),与 Paseo 输入框的模式 ID 一致。选「Paseo 默认」时不传 `modeId`,按 Paseo 默认行为启动;具名档位留空也不继承默认 Worker 的模式。切换 provider 会清空旧模式,同一 provider 更换模型会保留模式。模式随首条任务一起传入,修改用于新建或重试的 Worker,不修改运行中的会话;不支持的模式会在启动前报出可用 ID,不会静默退回默认模式 |
@@ -134,7 +135,7 @@ cp pi-extension/superagent.js ~/.pi/agent/extensions/
 2. 按需在「另外允许的用户」里填其他人的微信用户 ID(`xxx@im.wechat`)——扫码人自动允许,可以留空;
 3. 保存设置。之后换号或凭证失效时点「重新扫码」,不用改设置;「退出登录」删除本机凭证并停止通道。
 
-行为:仅私聊(官方插件同样未开放群聊;白名单内用户的群消息记为已过滤「微信群消息暂不支持」)。同一用户 = 同一 Thread。收消息走 `getupdates` 长轮询,游标落盘,重启后从断点续收;回复带入站消息的 `context_token`(按用户取最新一枚,重启后回落到触发记录里保存的那枚)。支持文本与语音转写,图片/文件等纯媒体消息暂不处理;引用回复按 `ref_msg` 的消息 id 归回线程。服务端返回 `-14`(会话失效)时按官方插件的做法暂停 1 小时再试,设置页显示原因。
+行为:仅私聊(官方插件同样未开放群聊;白名单内用户的群消息记为已过滤「微信群消息暂不支持」)。同一用户 = 同一 Thread。收消息走 `getupdates` 长轮询,游标落盘,重启后从断点续收;回复带入站消息的 `context_token`(按用户取最新一枚,重启后回落到触发记录里保存的那枚)。支持文本与语音转写;图片、文件、视频从微信 CDN 下载并按协议 AES-128-ECB 解密,存到 `<IM 附件收件目录>/weixin/<日期>/<消息 id>/<原文件名>`(0600,单个上限 100 MB),本机路径以 `[微信文件] 名称(大小)已保存到本机:<路径>` 一行写进触发正文交给 Router。`.zip`/`.7z`/`.rar` 压缩包只列清单、不解压:在这一行后面缩进列出文件数、解压后总大小和前 30 个文件名(zip 自带解析,不带 UTF-8 标记的文件名按 GBK 解码;7z/rar 调用本机 `7z`),并标出内含的压缩包、加密条目、会越出解压目录的路径、符号链接与疑似压缩炸弹,`__MACOSX/`、`.DS_Store` 等打包元数据只计数;解压交给 Worker,大小取自压缩包自报的元数据,只作提示。下载失败也照常触发,并写明原因、提示让用户重发。消息本身不带附件而引用了一条带附件的消息时,下载被引用的那份(标为「引用的微信文件」)。群消息里的附件不下载。引用回复按 `ref_msg` 的消息 id 归回线程。服务端返回 `-14`(会话失效)时按官方插件的做法暂停 1 小时再试,设置页显示原因。
 
 凭证(bot token)只保存在 daemon 主机的 `$PASEO_HOME/plugin-data/superagent/weixin/account.json`(0600),不进插件设置,客户端只看得到 bot ID 与扫码人 ID。使用须遵守腾讯《微信ClawBot功能使用条款》;腾讯可随时限流或终止该能力,不宜作为唯一的通知通道。
 

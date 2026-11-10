@@ -23,11 +23,25 @@ export const WeixinMessageState = { FINISH: 2 } as const;
 /** getupdates 返回此码表示 bot token 失效(官方插件暂停该账号一小时)。 */
 export const WEIXIN_STALE_TOKEN_ERRCODE = -14;
 
+/** 微信 CDN 上的一份加密媒体。 */
+export interface WeixinCdnMedia {
+  encrypt_query_param?: string;
+  /** base64:图片为 16 字节原始密钥,文件/语音/视频为 32 位十六进制字符串。 */
+  aes_key?: string;
+  /** 服务端给出的完整下载地址;缺省时用 encrypt_query_param 拼。 */
+  full_url?: string;
+}
+
 export interface WeixinMessageItem {
   type?: number;
   msg_id?: string;
   text_item?: { text?: string };
-  voice_item?: { text?: string };
+  voice_item?: { text?: string; media?: WeixinCdnMedia };
+  /** aeskey:16 字节密钥的十六进制形式,入站解密优先于 media.aes_key。 */
+  image_item?: { media?: WeixinCdnMedia; aeskey?: string };
+  /** len:明文字节数(十进制字符串)。 */
+  file_item?: { media?: WeixinCdnMedia; file_name?: string; len?: string };
+  video_item?: { media?: WeixinCdnMedia };
   ref_msg?: { svr_id?: string; title?: string; message_item?: WeixinMessageItem };
 }
 

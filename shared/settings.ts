@@ -87,7 +87,7 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 12,
+  version: 13,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
@@ -182,6 +182,11 @@ export const superagentSettings = defineSettings({
 
     /** IM 单条消息上限(含分段序号);长答复完整分段发送。 */
     imReplyMaxChars: boundedInt("imReplyMaxChars", 600),
+    /**
+     * IM 附件的收件根目录(daemon 主机上的绝对路径),各通道再分子目录(如 weixin/);
+     * 留空 = $PASEO_HOME/plugin-data/superagent/inbox。
+     */
+    imInboxDir: z.string().trim().max(1024).default(""),
 
     // ---- 主动与巡检(§3.4 投机执行 / §6 看门狗) ----
     /**
@@ -209,7 +214,8 @@ export const superagentSettings = defineSettings({
    * v9 → v10:新增 workerModeId 与档位 modeId(留空沿用 Paseo 默认模式);
    * v10 → v11:新增 weixinEnabled/weixinAllowUsers(默认关闭,行为与旧版一致);
    * v11 → v12:新增 routerThinkingOptionId/workerThinkingOptionId 与档位 thinkingOptionId
-   * (留空不传,回落 provider 默认,行为与旧版一致)。
+   * (留空不传,回落 provider 默认,行为与旧版一致);
+   * v12 → v13:新增 imInboxDir(留空 = 默认收件目录,行为与旧版一致)。
    */
   migrate: (values) => values,
 });

@@ -15,6 +15,12 @@ import {
   type WeixinMessage,
   type WeixinMessageItem,
 } from "./weixin-api";
+import {
+  describeWeixinAttachment,
+  describeWeixinMediaRef,
+  saveWeixinAttachments,
+  weixinMediaRefs,
+} from "./weixin-media";
 import { loadWeixinCursor, saveWeixinCursor, type WeixinAccount } from "./weixin-store";
 
 /**
@@ -23,11 +29,14 @@ import { loadWeixinCursor, saveWeixinCursor, type WeixinAccount } from "./weixin
  * - fast-path:allowUsers(xxx@im.wechat)白名单,扫码人自动在内。
  * - 回复必须带入站消息的 context_token:按用户记最新一枚,重启后回落到触发记录里保存的那枚。
  * - 群消息(group_id)官方插件也未支持:白名单命中时记 filtered 留痕,不触发。
+ * - 图片/文件/视频下载解密到本机收件目录,路径写进触发正文(见 weixin-media.ts)。
  */
 
 interface WeixinConfig {
   account: WeixinAccount;
   allowUsers: string[];
+  /** 附件收件根目录;每条消息现取,改设置不必重启通道。缺省用默认目录。 */
+  inboxDir?: () => string;
 }
 
 export interface WeixinSourceStatus {
@@ -221,7 +230,8 @@ export class WeixinSource implements ImSource {
       for (const message of response.msgs ?? []) {
         if (signal.aborted) return;
         try {
-          const inbound = this.translate(message, onDrop);
+          // 附件在这里同步下载完再派发,保证同一用户的消息按到达顺序进入 Router。
+          const inbound = await this.translate(message, onDrop, signal);
           if (!inbound) continue;
           this.current = { ...this.current, lastInboundAt: now };
           onTrigger(inbound);
@@ -238,8 +248,8 @@ export class WeixinSource implements ImSource {
     }
   }
 
-  /** 消息 → InboundMessage;fast-path 拒绝返回 null;群消息经 onDrop 留痕。 */
-  translate(message: WeixinMessage, onDrop?: DropHandler): InboundMessage | null {
+  /** 消息 → InboundMessage(附件已落盘);fast-path 拒绝返回 null;群消息经 onDrop 留痕。 */
+  async translate(message: WeixinMessage, onDrop?: DropHandler, signal?: AbortSignal): Promise<InboundMessage | null> {
     if (message.message_type !== WeixinMessageType.USER) return null;
     const from = message.from_user_id?.trim();
     if (!from) return null;
@@ -255,17 +265,19 @@ export class WeixinSource implements ImSource {
     }
     if (!this.config.allowUsers.includes(from)) return null;
     const { text, replyTo } = extractWeixinText(message.item_list);
+    const media = weixinMediaRefs(message.item_list);
     const sender = `weixin:${from}`;
 
     const groupId = message.group_id?.trim();
     if (groupId) {
-      // 群里的 context_token 属于群会话,不能拿来回私聊,因此不记。
-      if (text) {
+      // 群里的 context_token 属于群会话,不能拿来回私聊,因此不记;群附件也不下载。
+      const summary = [text, ...media.map(describeWeixinMediaRef)].filter(Boolean).join("\n");
+      if (summary) {
         onDrop?.({
           origin: { channel: "weixin", chatId: groupId, messageId, senderId: from, senderName: null },
           threadKey: `weixin:group:${groupId}`,
-          title: `微信群 ${truncate(text, 40)}`,
-          text,
+          title: `微信群 ${truncate(summary, 40)}`,
+          text: summary,
           sender,
           reason: "微信群消息暂不支持",
           replyTo,
@@ -274,7 +286,18 @@ export class WeixinSource implements ImSource {
       return null;
     }
     if (message.context_token) this.contextTokens.set(from, message.context_token);
-    if (!text) return null;
+    if (!text && media.length === 0) {
+      const types = (message.item_list ?? []).map((item) => item.type ?? "?").join(",") || "none";
+      console.log(`[superagent] weixin message ${messageId ?? "?"} ignored: no text or attachment (item types: ${types})`);
+      return null;
+    }
+    const attachments = media.length > 0 ? await saveWeixinAttachments(media, messageId, { signal, inboxDir: this.config.inboxDir?.() }) : [];
+    for (const attachment of attachments) {
+      if (attachment.path) console.log(`[superagent] weixin ${attachment.kind} saved: ${attachment.path} (${attachment.bytes} bytes)`);
+      else console.warn(`[superagent] weixin ${attachment.kind} ${attachment.name ?? ""} download failed: ${attachment.error}`);
+    }
+    const body = [text, ...attachments.map(describeWeixinAttachment)].filter(Boolean).join("\n");
+    const headline = text || media.map(describeWeixinMediaRef).join(" ");
     return {
       origin: {
         channel: "weixin",
@@ -285,8 +308,8 @@ export class WeixinSource implements ImSource {
         senderName: null,
       },
       threadKey: `weixin:user:${from}`,
-      title: `微信 ${truncate(text, 40)}`,
-      text,
+      title: `微信 ${truncate(headline, 40)}`,
+      text: body,
       sender,
       replyTo,
     };
