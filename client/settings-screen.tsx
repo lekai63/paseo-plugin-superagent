@@ -473,7 +473,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             {...field}
             name="imInboxDir"
             label="IM 附件收件目录"
-            hint="daemon 主机上的绝对路径。聊天里收到的文件存到 <目录>/<通道>/<日期>/<消息 id>/ 下,压缩包附清单交给 Router;改后立即生效"
+            hint="daemon 主机上的绝对路径。聊天里收到的文件存到 <目录>/<通道>/<北京时间日期>/<消息 id>/ 下,压缩包附清单交给 Router;改后立即生效"
             placeholder="留空:$PASEO_HOME/plugin-data/superagent/inbox"
           />
         </SettingsCard>

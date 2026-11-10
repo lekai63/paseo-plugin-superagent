@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { clearTimeout, setTimeout } from "node:timers";
-import type { TriggerOrigin } from "../shared/model";
+import { beijingDate, type TriggerOrigin } from "../shared/model";
 import { formatSize, inspectArchive } from "./archive";
 import { resolveImInboxDir } from "./im";
 
@@ -11,7 +11,7 @@ import { resolveImInboxDir } from "./im";
  * IM 附件的通用落盘:各通道只负责"怎么下载",这里负责命名、存放、压缩包清单和
  * 写进触发正文的那一行。
  *
- *   <IM 收件目录>/<通道>/<本地日期>/<消息 id>/<原文件名>
+ *   <IM 收件目录>/<通道>/<北京时间日期>/<消息 id>/<原文件名>
  *
  * 触发正文里每个附件一行:`[飞书文件] a.pdf(1.2 MB)已保存到本机:<路径>`,压缩包再跟清单;
  * 下载失败也写一行原因,让 Router 知道要请用户重发,而不是让附件无声消失。
@@ -230,11 +230,6 @@ function uniqueName(name: string, used: Set<string>): string {
   return candidate;
 }
 
-function localDate(now: Date): string {
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-}
-
 /** 逐个下载落盘;单个失败只记在该附件上,不影响其余附件与消息本身。 */
 export async function saveAttachments(
   channel: Channel,
@@ -244,7 +239,7 @@ export async function saveAttachments(
 ): Promise<SavedAttachment[]> {
   const folder = (messageId ?? "").replace(/[^0-9A-Za-z_-]/g, "") || randomUUID();
   const root = options.inboxDir ?? resolveImInboxDir("");
-  const dir = path.join(root, channel, localDate(options.now ?? new Date()), folder);
+  const dir = path.join(root, channel, beijingDate(options.now ?? new Date()), folder);
   const used = new Set<string>();
   const results: SavedAttachment[] = [];
   for (const [index, item] of pending.entries()) {

@@ -517,6 +517,18 @@ export function slugify(input: string, max = 32): string {
   return slug || "task";
 }
 
+/** 中国不实行夏令时,北京时间恒为 UTC+8。 */
+const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
+
+/**
+ * 北京时间日期 `YYYY-MM-DD`:插件落盘命名(IM 收件目录、Ticket 兜底目录)统一用它,
+ * 与 daemon 主机所在时区无关。无效时间按当前时间算。
+ */
+export function beijingDate(now: Date): string {
+  const time = Number.isFinite(now.getTime()) ? now.getTime() : Date.now();
+  return new Date(time + BEIJING_OFFSET_MS).toISOString().slice(0, 10);
+}
+
 export function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}…`;

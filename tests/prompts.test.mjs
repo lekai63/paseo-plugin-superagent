@@ -114,11 +114,11 @@ test("the Worker's first prompt carries its role and report instructions", () =>
 
 test("shared isolation gives each ticket its own task directory", () => {
   const ticket = { id: "tkt_abc123xyz789", title: "整理 Report", mandate: "m", createdAt: "2026-11-02T04:00:00.000Z" };
-  const created = new Date(ticket.createdAt);
-  const pad = (value) => String(value).padStart(2, "0");
-  const localDate = `${created.getFullYear()}${pad(created.getMonth() + 1)}${pad(created.getDate())}`;
-  const dir = `/srv/tmp/tasks/${localDate}-整理-report-xyz789`;
+  const dir = "/srv/tmp/tasks/20261102-整理-report-xyz789";
   assert.equal(taskDirectory("/srv/tmp", ticket), dir);
+  // 太平洋时间 11-09 晚上 = 北京时间 11-10 凌晨:按北京日期命名,与 daemon 主机时区无关。
+  assert.equal(taskDirectory("/srv/tmp", { ...ticket, createdAt: "2026-11-09T19:00:00.000Z" }), "/srv/tmp/tasks/20261110-整理-report-xyz789");
+  assert.match(taskDirectory("/srv/tmp", { ...ticket, createdAt: "not a date" }), /^\/srv\/tmp\/tasks\/\d{8}-整理-report-xyz789$/, "an invalid timestamp falls back to now");
   const shared = composeWorkerPrompt(ticket, "/srv/tmp", "shared");
   assert.ok(shared.includes(`Your task directory is ${dir} — create it`));
   assert.match(shared, /state where you put the outputs/);

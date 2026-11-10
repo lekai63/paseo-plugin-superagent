@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { Ticket } from "../shared/model";
-import { slugify, WATCHDOG_AGENT_LABEL_VALUE } from "../shared/model";
+import { beijingDate, slugify, WATCHDOG_AGENT_LABEL_VALUE } from "../shared/model";
 import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 
 /**
@@ -50,14 +50,13 @@ const WORKER_SYSTEM_PROMPT = [
 ].join("\n");
 
 /**
- * shared 隔离下每个 Ticket 的兜底子目录:`<workingDir>/tasks/<YYYYMMDD>-<标题>-<id 尾号>`(本地日期)。
+ * shared 隔离下每个 Ticket 的兜底子目录:`<workingDir>/tasks/<YYYYMMDD>-<标题>-<id 尾号>`
+ * (Ticket 创建时的北京时间日期,与 daemon 主机时区无关)。
  * 由插件确定(Router 派发时还不知道 Ticket id),在 Worker 首条 prompt 里明确告知。
  * 工作目录自带 AGENTS.md/CLAUDE.md 时,以其归档规则为准,本目录仅在规则未覆盖时使用。
  */
 export function taskDirectory(workingDir: string, ticket: Pick<Ticket, "id" | "title" | "createdAt">): string {
-  const created = new Date(ticket.createdAt || Date.now());
-  const pad = (value: number) => String(value).padStart(2, "0");
-  const date = `${created.getFullYear()}${pad(created.getMonth() + 1)}${pad(created.getDate())}`;
+  const date = beijingDate(new Date(ticket.createdAt || Date.now())).replace(/-/g, "");
   return join(workingDir, "tasks", `${date}-${slugify(ticket.title, 24)}-${ticket.id.slice(-6)}`);
 }
 

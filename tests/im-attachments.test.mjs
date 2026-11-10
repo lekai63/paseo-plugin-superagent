@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
+import { beijingDate } from "../shared/model.ts";
 import {
   downloadBuffer,
   fileNameFromDisposition,
@@ -91,6 +92,20 @@ test("saved attachments get sniffed names, archive listings and per-item failure
   assert.equal(saved[1].name, "批量.zip", "the server-provided name is used when the message has none");
   assert.deepEqual(saved[1].details, ["  zip 压缩包内 1 个文件,解压后共 10 B:", "  - a.pdf(10 B)"]);
   assert.deepEqual({ ...saved[2], details: undefined }, { kind: "file", quoted: true, name: "x.pdf", path: null, bytes: null, error: "boom", details: undefined });
+});
+
+test("inbox date folders follow Beijing time whatever the host time zone", async (t) => {
+  // 太平洋时间 11-09 晚上 7 点 = 北京时间 11-10 上午 11 点(本次实测的情形)。
+  assert.equal(beijingDate(new Date("2026-11-10T03:21:34Z")), "2026-11-10");
+  assert.equal(beijingDate(new Date("2026-11-09T15:59:59Z")), "2026-11-09", "23:59:59 in Beijing is still the same day");
+  assert.equal(beijingDate(new Date("2026-11-09T16:00:00Z")), "2026-11-10", "midnight in Beijing starts the next day");
+  assert.equal(beijingDate(new Date("2026-12-31T16:30:00Z")), "2027-01-01");
+
+  const inbox = await tempInbox(t);
+  const [saved] = await saveAttachments("weixin", "m1", [
+    { kind: "file", fileName: "a.pdf", quoted: false, download: async () => ({ data: Buffer.from("x") }) },
+  ], { inboxDir: inbox, now: new Date("2026-11-10T03:21:34Z") });
+  assert.equal(saved.path, path.join(inbox, "weixin", "2026-11-10", "m1", "a.pdf"));
 });
 
 test("the inbound queue keeps arrival order while downloads take time", async () => {
