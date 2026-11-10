@@ -22,6 +22,7 @@ import {
  * - 非文本内容:富文本(post)取文字与图片/视频;图片、文件、语音、视频经
  *   messageResource.get 下载到收件目录;合并转发经 message.get 列出子消息文字(飞书不允许
  *   机器人下载合并转发里的附件);消息本身不带附件而回复了一条带附件的消息时,下载被回复的那份。
+ *   卡片(interactive,如转发来的审批卡片):事件里只有降级内容,经 message.get 取原始卡片转成文字。
  *   群里未 @ 的消息(观察模式上下文、留痕)只写附件描述,不下载。
  *
  * SDK 以动态 import 懒加载:其模块作用域读取 __dirname 探测自身版本(仅用于
@@ -156,6 +157,175 @@ function parsePost(body: Record<string, unknown>): FeishuContent {
   return { text: lines.join("\n"), resources };
 }
 
+type Json = Record<string, unknown>;
+const isObject = (value: unknown): value is Json => Boolean(value && typeof value === "object" && !Array.isArray(value));
+
+/** 卡片里只是控件、没有可读内容的元素。 */
+const CARD_SKIP_TAGS = new Set([
+  "hr", "chart", "input", "overflow", "date_picker", "picker_time", "picker_datetime",
+  "select_static", "multi_select_static", "select_person", "multi_select_person", "select_img",
+]);
+
+/** lark_md 内联标签:@ 换成名字,<br> 换行,其余样式标签去掉只留文字。 */
+function cleanCardMarkdown(text: string, names: Record<string, string>): string {
+  return text
+    .replace(/<at\s+(?:id|user_id|open_id)=["']?([^"'\s>]+)["']?\s*>([^<]*)<\/at>/g, (_, id: string, inner: string) =>
+      `@${inner.trim() || names[id] || (id === "all" ? "所有人" : "用户")}`)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/?(?:font|text_tag|link|local_datetime|number_tag|u|s|i|b|strong|em)\b[^>]*>/gi, "");
+}
+
+/** 第一个链接:用户态 url / multi_url / behaviors[].default_url,原始渲染树 actions[].action.url,卡片 card_link / cardLink。 */
+function findCardUrl(node: unknown, depth = 0): string {
+  if (depth > 4) return "";
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const url = findCardUrl(item, depth + 1);
+      if (url) return url;
+    }
+    return "";
+  }
+  if (!isObject(node)) return "";
+  for (const key of ["url", "default_url", "pc_url", "pcURL"]) {
+    if (/^https?:\/\//.test(str(node[key]))) return str(node[key]);
+  }
+  for (const key of ["multi_url", "behaviors", "actions", "action", "property"]) {
+    const url = findCardUrl(node[key], depth + 1);
+    if (url) return url;
+  }
+  return "";
+}
+
+/**
+ * 卡片 → 文字行。同时认用户态卡片 JSON(1.0 elements / 2.0 body.elements)与原始渲染树
+ * (节点属性包在 property 里);只从文字类节点取字,其余结构原样往下找。
+ */
+class CardText {
+  readonly lines: string[] = [];
+  hasLink = false;
+
+  constructor(private readonly names: Record<string, string>) {}
+
+  /** 文字类节点 → 内联文字;不是文字节点返回 null。 */
+  inline(node: unknown): string | null {
+    if (!isObject(node)) return null;
+    const prop = isObject(node.property) ? node.property : node;
+    switch (node.tag) {
+      case "plain_text":
+      case "lark_md":
+      case "markdown":
+      case "text":
+        if (typeof prop.content === "string") return cleanCardMarkdown(prop.content, this.names);
+        if (typeof prop.text === "string") return prop.text;
+        if (Array.isArray(prop.elements)) return prop.elements.map((child) => this.inline(child) ?? "").join("");
+        return "";
+      case "at":
+      case "person": {
+        const id = str(prop.userID) || str(prop.user_id) || str(prop.id);
+        return `@${this.names[id] || str(prop.user_name) || "用户"}`;
+      }
+      case "a":
+      case "link": {
+        const label = str(prop.content) || str(prop.text);
+        const url = findCardUrl(prop);
+        return url && url !== label ? `${label}(${url})` : label;
+      }
+      default:
+        return null;
+    }
+  }
+
+  walk(node: unknown, depth = 0): void {
+    if (depth > 40) return;
+    if (Array.isArray(node)) {
+      for (const child of node) this.walk(child, depth + 1);
+      return;
+    }
+    if (!isObject(node)) return;
+    const text = this.inline(node);
+    if (text !== null) {
+      if (text.trim()) this.lines.push(text.trim());
+      return;
+    }
+    const tag = str(node.tag);
+    if (CARD_SKIP_TAGS.has(tag)) return;
+    const prop = isObject(node.property) ? node.property : node;
+    switch (tag) {
+      case "img":
+      case "image":
+      case "img_combination":
+        this.lines.push("[卡片图片]");
+        return;
+      case "button": {
+        const label = this.inline(prop.text)?.trim() || "按钮";
+        const url = findCardUrl(prop);
+        if (url) this.hasLink = true;
+        this.lines.push(url ? `[${label}](${url})` : `[按钮] ${label}`);
+        return;
+      }
+      case "div":
+        // 标签(text)在字段(fields)前面,原始渲染树里键序相反。
+        this.walk(prop.text, depth + 1);
+        this.walk(prop.fields, depth + 1);
+        this.walk(prop.extra, depth + 1);
+        return;
+      default:
+        break;
+    }
+    for (const [key, value] of Object.entries(prop)) {
+      if (key === "config") continue;
+      // 多语言:只取中文(没有则取第一种),否则每种语言各读一遍。
+      if (/^i18n/i.test(key)) {
+        if (isObject(value)) this.walk(value.zh_cn ?? Object.values(value)[0], depth + 1);
+        continue;
+      }
+      this.walk(value, depth + 1);
+    }
+  }
+}
+
+const CARD_TEXT_CHARS = 4000;
+
+/**
+ * 卡片消息内容 → 说明文字;读不出任何内容返回 null。认三种形态:
+ * - 原始卡片(message.get card_msg_content_type=raw_card_content):{json_card, json_attachment};
+ * - 用户态卡片 JSON:{header, elements} 或 {schema:"2.0", header, body};
+ * - 事件推送的降级内容:{title, elements:[[…]], card_link}——复杂卡片(如审批)这里只剩标题。
+ */
+export function parseFeishuCard(body: Json): string | null {
+  let card = body;
+  const names: Record<string, string> = {};
+  if (typeof body.json_card === "string") {
+    card = parseJson(body.json_card) ?? {};
+    const atUsers = isObject(body.json_attachment) ? body.json_attachment.at_users : null;
+    for (const [id, user] of Object.entries(isObject(atUsers) ? atUsers : {})) {
+      if (isObject(user) && str(user.content)) names[id] = str(user.content);
+    }
+  }
+  let title: string;
+  let lines: string[];
+  let hasLink = false;
+  if (typeof card.title === "string" && Array.isArray(card.elements) && card.elements.every(Array.isArray)) {
+    const post = parsePost({ title: "", content: card.elements });
+    title = card.title.trim();
+    lines = post.text ? post.text.split("\n") : [];
+  } else {
+    const header = new CardText(names);
+    header.walk(card.header);
+    const content = new CardText(names);
+    content.walk(Object.fromEntries(Object.entries(card).filter(([key]) => key !== "header")));
+    title = header.lines.join(" ");
+    lines = content.lines;
+    hasLink = content.hasLink;
+  }
+  if (!hasLink) {
+    const link = findCardUrl(card.card_link) || (isObject(card.config) ? findCardUrl(card.config.cardLink ?? card.config.card_link) : "");
+    if (link) lines.push(`[打开卡片](${link})`);
+  }
+  if (!title && lines.length === 0) return null;
+  return truncate(joinLines([`[飞书卡片]${title ? ` ${title}` : ""}`, ...lines]), CARD_TEXT_CHARS);
+}
+
 /** 消息内容 → 文字 + 可下载资源(+ 只能说明的部分)。 */
 export function parseFeishuContent(messageType: string, content: string | undefined): FeishuContent {
   // 只看类型即可判断的消息(合并转发的 content 不是 JSON 对象)。
@@ -198,9 +368,16 @@ export function parseFeishuContent(messageType: string, content: string | undefi
       const name = str(body.file_name);
       return { text: "", resources: [], note: `[飞书文件夹]${name ? ` ${name}` : ""}(文件夹无法下载,请打包成压缩包再发)` };
     }
+    case "interactive":
+      return { text: "", resources: [], note: parseFeishuCard(body) ?? "[飞书卡片] 内容为空" };
     default:
       return { text: "", resources: [], note: `[飞书${messageType}消息,暂不支持读取内容]` };
   }
+}
+
+/** 会话标题:单行,40 字以内。 */
+function titleText(text: string): string {
+  return truncate(text.replace(/\s+/g, " ").trim(), 40);
 }
 
 function stripMentions(text: string): string {
@@ -288,9 +465,13 @@ export class FeishuSource implements ImSource {
     return this.client;
   }
 
-  /** message.get:失败返回 null(调用方降级为说明文字)。 */
+  /** message.get:失败返回 null(调用方降级为说明文字)。卡片取原始内容(含字段标签与 @ 的人名)。 */
   private async fetchMessages(messageId: string): Promise<LarkApiMessage[] | null> {
-    const result = (await withTimeout(this.requireClient().im.v1.message.get({ path: { message_id: messageId } }), 15_000)) as unknown as {
+    const request = this.requireClient().im.v1.message.get({
+      path: { message_id: messageId },
+      params: { card_msg_content_type: "raw_card_content" },
+    });
+    const result = (await withTimeout(request, 15_000)) as unknown as {
       code?: number;
       data?: { items?: LarkApiMessage[] };
     };
@@ -314,6 +495,19 @@ export class FeishuSource implements ImSource {
         return { data, fileName: fileNameFromDisposition(headers["content-disposition"]) };
       },
     };
+  }
+
+  /** 事件推送的卡片是降级内容(审批等复杂卡片只剩标题):按 id 取完整卡片,取不到沿用事件内容。 */
+  private async fullCard(messageId: string, fallback: FeishuContent): Promise<FeishuContent> {
+    try {
+      const item = (await this.fetchMessages(messageId))?.[0];
+      const body = item?.msg_type === "interactive" ? parseJson(item.body?.content) : null;
+      const note = body ? parseFeishuCard(body) : null;
+      if (note) return { text: "", resources: [], note };
+    } catch (error) {
+      console.warn(`[superagent] feishu card ${messageId} lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return fallback;
   }
 
   /** 合并转发:列出子消息文字;附件只能说明(飞书不允许机器人下载合并转发里的资源)。 */
@@ -381,8 +575,9 @@ export class FeishuSource implements ImSource {
     if (!allowed) return null;
 
     const messageType = message.message_type ?? "";
-    const parsed = parseFeishuContent(messageType, message.content);
+    let parsed = parseFeishuContent(messageType, message.content);
     if (parsed.ignore) return null;
+    if (messageType === "interactive") parsed = await this.fullCard(message.message_id, parsed);
     const text = stripMentions(parsed.text);
     const mentions = message.mentions ?? [];
     const isGroup = message.chat_type === "group";
@@ -412,7 +607,7 @@ export class FeishuSource implements ImSource {
         onDrop?.({
           origin,
           threadKey,
-          title: `飞书群 ${truncate(summary, 40)}`,
+          title: `飞书群 ${titleText(summary)}`,
           text: summary,
           sender: `feishu:${senderOpenId}`,
           reason: "群消息未 @ 机器人",
@@ -425,7 +620,7 @@ export class FeishuSource implements ImSource {
     if (observe) {
       if (!summary) return null;
       return {
-        origin, threadKey, title: `${chatLabel} ${truncate(summary, 40)}`, text: summary,
+        origin, threadKey, title: `${chatLabel} ${titleText(summary)}`, text: summary,
         sender: `feishu:${senderOpenId}`, context: true, replyTo,
       };
     }
@@ -446,7 +641,7 @@ export class FeishuSource implements ImSource {
     return {
       origin,
       threadKey,
-      title: `${chatLabel} ${truncate(headline, 40)}`,
+      title: `${chatLabel} ${titleText(headline)}`,
       text: body,
       sender: `feishu:${senderOpenId}`,
       replyTo,

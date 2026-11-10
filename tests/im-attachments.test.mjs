@@ -144,6 +144,95 @@ test("feishu content: post text, links, code and media; files, audio, video; not
   assert.equal(parseFeishuContent("text", "not json").note, "[飞书text消息,内容无法解析]");
 });
 
+/** 审批卡片原始内容(message.get card_msg_content_type=raw_card_content)的精简样本:渲染树节点属性包在 property 里。 */
+const rawApprovalCard = {
+  json_card: JSON.stringify({
+    body: { elements: [
+      { id: "1", property: {}, tag: "hr" },
+      { id: "2", tag: "div", property: {
+        fields: [{ isShort: false, text: { tag: "markdown", property: { elements: [
+          { tag: "at", property: { userID: "ou_applicant" } },
+          { tag: "plain_text", property: { content: " 会务组" } },
+        ] } } }],
+        text: { tag: "markdown", property: { elements: [{ tag: "plain_text", property: { content: "申请人" } }] } },
+      } },
+      { id: "3", tag: "div", property: {
+        fields: [{ isShort: false, text: { tag: "plain_text", property: { content: "费用总额:  2,804.32 CNY" } } }],
+        text: { tag: "markdown", property: { elements: [{ tag: "plain_text", property: { content: "审批事由" } }] } },
+      } },
+      { id: "4", tag: "action", property: { actions: [{ tag: "button", property: {
+        actionType: "link",
+        actions: [{ type: "open_url", action: { url: "https://applink.feishu.cn/detail?instanceId=77", pcURL: "https://applink.feishu.cn/pc" } }],
+        text: { tag: "plain_text", property: { content: "查看详情" } },
+      } }] } },
+    ] },
+    config: { cardLink: { url: "https://applink.feishu.cn/card" } },
+    header: { tag: "card_header", property: { i18nTextTagList: {}, title: { tag: "plain_text", property: {
+      content: "会务报销/付款", i18nContent: { en_us: "Reimbursement", zh_cn: "会务报销/付款" },
+    } } } },
+  }),
+  json_attachment: { at_users: { ou_applicant: { content: "张三", mention_key: "@_user_1" } } },
+  card_schema: 1,
+};
+
+test("feishu cards: raw render tree, user card JSON 1.0/2.0 and the degraded event content", () => {
+  assert.equal(parseFeishuContent("interactive", JSON.stringify(rawApprovalCard)).note, [
+    "[飞书卡片] 会务报销/付款",
+    "申请人",
+    "@张三 会务组",
+    "审批事由",
+    "费用总额:  2,804.32 CNY",
+    "[查看详情](https://applink.feishu.cn/detail?instanceId=77)",
+  ].join("\n"));
+
+  const v1 = parseFeishuContent("interactive", JSON.stringify({
+    config: { wide_screen_mode: true },
+    header: { title: { tag: "plain_text", content: "周报提醒", i18n: { en_us: "Weekly" } } },
+    elements: [
+      { tag: "div", text: { tag: "lark_md", content: "<at id=ou_9></at> 请在 <font color='red'>周五</font> 前提交<br>谢谢" } },
+      { tag: "column_set", columns: [{ tag: "column", elements: [{ tag: "markdown", content: "**进度** 80%" }] }] },
+      { tag: "img", img_key: "img_v2", alt: { tag: "plain_text", content: "" } },
+      { tag: "note", elements: [{ tag: "plain_text", content: "来自 OKR" }] },
+      { tag: "action", actions: [
+        { tag: "button", text: { tag: "plain_text", content: "去填写" }, multi_url: { url: "https://x.test/fill", pc_url: "" } },
+        { tag: "button", text: { tag: "plain_text", content: "稍后" }, value: { k: "v" } },
+        { tag: "select_static", placeholder: { tag: "plain_text", content: "请选择" } },
+      ] },
+    ],
+  }));
+  assert.equal(v1.note, [
+    "[飞书卡片] 周报提醒",
+    "@用户 请在 周五 前提交\n谢谢",
+    "**进度** 80%",
+    "[卡片图片]",
+    "来自 OKR",
+    "[去填写](https://x.test/fill)",
+    "[按钮] 稍后",
+  ].join("\n"));
+
+  const v2 = parseFeishuContent("interactive", JSON.stringify({
+    schema: "2.0",
+    header: { title: { tag: "plain_text", content: "部署完成" }, subtitle: { tag: "plain_text", content: "prod" } },
+    body: { elements: [{ tag: "markdown", content: "版本 1.2.3" }, { tag: "hr" }] },
+    card_link: { url: "https://x.test/run/1" },
+  }));
+  assert.equal(v2.note, "[飞书卡片] 部署完成 prod\n版本 1.2.3\n[打开卡片](https://x.test/run/1)");
+
+  const i18n = parseFeishuContent("interactive", JSON.stringify({
+    i18n_elements: { en_us: [{ tag: "markdown", content: "hello" }], zh_cn: [{ tag: "markdown", content: "你好" }] },
+  }));
+  assert.equal(i18n.note, "[飞书卡片]\n你好", "only one language is read");
+
+  const degraded = parseFeishuContent("interactive", JSON.stringify({
+    title: "会务报销/付款",
+    card_link: { url: "https://applink.feishu.cn/card" },
+    elements: [[{ tag: "text", text: "金额 " }, { tag: "a", text: "详情", href: "https://x.test/d" }], [{ tag: "img", image_key: "img_c" }]],
+  }));
+  assert.equal(degraded.note, "[飞书卡片] 会务报销/付款\n金额 详情(https://x.test/d)\n[打开卡片](https://applink.feishu.cn/card)");
+  assert.deepEqual(degraded.resources, [], "card images are not downloadable message resources");
+  assert.equal(parseFeishuContent("interactive", "{}").note, "[飞书卡片] 内容为空");
+});
+
 const feishuEvent = (message, sender = "ou_1") => ({
   sender: { sender_id: { open_id: sender }, sender_type: "user" },
   message: { message_id: `om_${Math.random().toString(36).slice(2, 10)}`, chat_id: "oc_p2p", chat_type: "p2p", mentions: [], ...message },
@@ -153,9 +242,11 @@ const feishuEvent = (message, sender = "ou_1") => ({
 function fakeFeishuClient({ resources = {}, messages = {} }) {
   const downloads = [];
   const lookups = [];
+  const lookupParams = [];
   return {
     downloads,
     lookups,
+    lookupParams,
     im: { v1: {
       messageResource: { get: async (payload) => {
         downloads.push(payload);
@@ -166,6 +257,7 @@ function fakeFeishuClient({ resources = {}, messages = {} }) {
       } },
       message: { get: async (payload) => {
         lookups.push(payload.path.message_id);
+        lookupParams.push(payload.params);
         const items = messages[payload.path.message_id];
         return items ? { code: 0, data: { items } } : { code: 230002, msg: "not found" };
       } },
@@ -222,6 +314,22 @@ test("feishu group attachments without a mention are described, never downloaded
   assert.equal(context.context, true);
   assert.equal(context.text, "[飞书图片]");
   assert.equal(strict.client.downloads.length + observing.client.downloads.length, 0);
+});
+
+test("feishu forwarded cards are read in full via message.get; the event content is the fallback", async () => {
+  const source = new FeishuSource({ appId: "a", appSecret: "b", allowUsers: ["ou_1"], allowChats: [], observeGroups: false });
+  source.client = fakeFeishuClient({ messages: {
+    om_card: [{ message_id: "om_card", msg_type: "interactive", body: { content: JSON.stringify(rawApprovalCard) } }],
+  } });
+  const eventContent = JSON.stringify({ title: "会务报销/付款", card_link: { url: "https://applink.feishu.cn/card" }, elements: [] });
+
+  const card = await source.translate(feishuEvent({ message_id: "om_card", message_type: "interactive", content: eventContent }));
+  assert.deepEqual(source.client.lookupParams.at(-1), { card_msg_content_type: "raw_card_content" });
+  assert.match(card.text, /^\[飞书卡片\] 会务报销\/付款\n申请人\n@张三 会务组\n审批事由\n费用总额:  2,804\.32 CNY\n\[查看详情\]/);
+  assert.equal(card.title, "飞书私聊 [飞书卡片] 会务报销/付款 申请人 @张三 会务组 审批事由 费用总额: 2…");
+
+  const fallback = await source.translate(feishuEvent({ message_id: "om_gone", message_type: "interactive", content: eventContent }));
+  assert.equal(fallback.text, "[飞书卡片] 会务报销/付款\n[打开卡片](https://applink.feishu.cn/card)");
 });
 
 test("feishu replies to a file download the quoted file; merge-forwards list their messages", async (t) => {
