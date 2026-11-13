@@ -2,6 +2,7 @@ import type { PaseoApi, PaseoAgent, PaseoAgentHandle, PaseoWorkspaceHandle } fro
 import type { SuperagentState, Thread, Ticket, Trigger, Decision } from "../shared/model";
 import { followsOf } from "../shared/execution";
 import { agentUsesBackgroundWorkspace, detachRoleChildren } from "./workspace";
+import { bounded } from "./deadline";
 import {
   newId,
   truncate,
@@ -677,12 +678,14 @@ export async function ensureRouter(
   instructions: string,
   configHash: string,
   thinkingOptionId: string = "",
+  check: () => void = () => {},
 ): Promise<{ handle: PaseoAgentHandle; agentId: string; created: boolean; sessionId: string | null }> {
   const remembered = thread.router;
   let previous: PaseoAgentHandle | null = null;
   if (remembered?.agentId) {
     const handle = paseo.agents.ref(remembered.agentId);
     const live = await handle.refresh(); // 无法确认旧会话状态时重试,不生成失联副本。
+    check();
     if (live && !live.agent.archivedAt) {
       const owner = live.agent.labels?.[ROUTER_THREAD_LABEL];
       if (owner && owner !== thread.id) throw new Error(`Router ${handle.id} belongs to another thread`);
@@ -695,6 +698,7 @@ export async function ensureRouter(
         && remembered.evaluations < ROUTER_EVALUATION_LIMIT && context < limit
         && !(remembered.sessionId && currentSession && remembered.sessionId !== currentSession)
         && await agentUsesBackgroundWorkspace(paseo, live.agent)) {
+        check();
         if (live.agent.status === "running" || live.agent.status === "initializing") {
           throw new Error(`Router ${handle.id} is busy; evaluation will retry when idle`);
         }
@@ -702,8 +706,10 @@ export async function ensureRouter(
       }
     }
   }
-  if (previous) await detachRoleChildren(paseo, previous.id);
+  if (previous) await detachRoleChildren(paseo, previous.id, check);
+  check();
   const workspace = await ensureWorkspace();
+  check();
   let handle: PaseoAgentHandle;
   try {
     handle = await workspace.agents.create({
@@ -719,13 +725,20 @@ export async function ensureRouter(
   } catch (error) {
     throw new Error(`router agent creation failed (provider "${provider}"): ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
+  try { check(); }
+  catch (error) {
+    // Creation may finish after the caller's deadline. Never adopt that orphan.
+    void bounded(() => handle.archive(), "late Router archive").catch((failure) => console.error("[superagent] late Router archive failed", failure));
+    throw error;
+  }
   if (previous) {
-    try { await previous.archive(); }
+    try { await bounded(() => previous!.archive(), "previous Router archive"); check(); }
     catch (error) {
-      await handle.archive().catch(() => {});
+      void bounded(() => handle.archive(), "unused Router archive").catch((failure) => console.error("[superagent] unused Router archive failed", failure));
       throw error;
     }
   }
+  check();
   return { handle, agentId: handle.id, created: true, sessionId: routerSessionId(handle.current()) };
 }
 

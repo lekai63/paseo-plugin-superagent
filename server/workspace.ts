@@ -25,20 +25,25 @@ export async function agentUsesBackgroundWorkspace(paseo: PaseoApi, agent: Paseo
  * 换建前先解除全部子会话的父子关系,票据与引擎的观察/直通仍按原 agent ID 继续。
  * 先收齐分页再 detach,避免修改标签令后续页游标失效;失败则保留旧角色等待重试。
  */
-export async function detachRoleChildren(paseo: PaseoApi, parentId: string): Promise<void> {
+export async function detachRoleChildren(paseo: PaseoApi, parentId: string, check: () => void = () => {}): Promise<void> {
   const children = new Set<string>();
   let cursor: string | undefined;
   do {
+    check();
     const result = await paseo.agents.list({
       filter: { includeBackground: true, labels: { "paseo.parent-agent-id": parentId } },
       page: { limit: 200, ...(cursor ? { cursor } : {}) },
     });
+    check();
     for (const { agent } of result.entries) {
       if (!agent.archivedAt) children.add(agent.id);
     }
     cursor = result.pageInfo.nextCursor ?? undefined;
   } while (cursor);
-  for (const id of children) await paseo.agents.ref(id).detach();
+  for (const id of children) {
+    check();
+    await paseo.agents.ref(id).detach();
+  }
 }
 
 export interface SharedWorkspaceLookup {
@@ -53,6 +58,7 @@ export async function ensureSharedWorkspace(
   directory: string,
   title: string,
   background = false,
+  check: () => void = () => {},
 ): Promise<SharedWorkspaceLookup> {
   const dir = resolve(directory);
   if (rememberedId) {
@@ -61,12 +67,14 @@ export async function ensureSharedWorkspace(
       console.error("[superagent] shared workspace refresh failed", error);
       return null;
     });
+    check();
     if (descriptor && !descriptor.archivingAt && resolve(descriptor.workspaceDirectory) === dir
       && (descriptor.background === true) === background) {
       return { handle, remembered: true };
     }
   }
-  const found = await findWorkspaceByTitle(paseo, title, dir, background);
+  const found = await findWorkspaceByTitle(paseo, title, dir, background, check);
+  check();
   if (found) return { handle: paseo.workspaces.ref(found.id), remembered: false };
   try {
     const handle = await paseo.workspaces.create({
@@ -89,14 +97,17 @@ async function findWorkspaceByTitle(
   title: string,
   dir: string,
   background: boolean,
+  check: () => void,
 ): Promise<{ id: string } | null> {
   let cursor: string | undefined;
   try {
     do {
+      check();
       const result = await paseo.workspaces.list({
         filter: { includeBackground: background },
         page: { limit: 200, ...(cursor ? { cursor } : {}) },
       });
+      check();
       const match = result.entries.find(
         (entry) => !entry.archivingAt && entry.name === title && resolve(entry.workspaceDirectory) === dir
           && (entry.background === true) === background,

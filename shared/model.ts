@@ -102,6 +102,7 @@ export const ThreadRouterSchema = z.object({
   dirty: z.boolean().default(false),
   compactionSeq: z.number().default(0),
   evaluations: z.number().default(0),
+  lastUsedAt: z.string().optional(),
   triggerIds: z.array(z.string()).default([]),
 });
 export type ThreadRouter = z.infer<typeof ThreadRouterSchema>;
@@ -115,6 +116,12 @@ export const ThreadSchema = z.object({
   /** Router 维护的一句话摘要,供下次评估的上下文存根。 */
   summary: z.string().nullish(),
   latestResult: ThreadResultSchema.nullish(),
+  lastActivityAt: z.string().optional(),
+  evalRetry: z.object({
+    errors: z.number().int().nonnegative().default(0),
+    unparsed: z.number().int().nonnegative().default(0),
+    nextAt: z.string().nullable().default(null),
+  }).optional(),
   router: ThreadRouterSchema.nullish(),
   /** 仅 IM 入站按该日期和渠道会话分流;旧任务的汇报仍回原线程。 */
   imDay: z.string().optional(),
@@ -172,6 +179,9 @@ export const TicketSchema = z.object({
   status: z.enum(TICKET_STATUSES),
   workerAgentId: z.string().nullish(),
   pendingRequests: z.array(WorkerRequestSchema).default([]),
+  requestWaitSince: z.string().nullish(),
+  requestWaitNotifiedAt: z.string().nullish(),
+  retireRequested: z.boolean().optional(),
   workspaceId: z.string().nullish(),
   /**
    * 该 Ticket 是否独占 workspaceId 指向的工作区(worktree 隔离 = true;共享隔离的

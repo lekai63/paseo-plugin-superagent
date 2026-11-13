@@ -406,6 +406,10 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
       <SettingsSection title="执行">
         <SettingsCard>
           <TextField {...field} name="workerTimeoutMin" label="Worker 超时(分钟)" hint="单轮运行超过这个时长会被中断并判为失败" />
+          <TextField {...field} name="routerEvalTimeoutMin" label="Router 评估超时(分钟)" hint="准备和裁决共享的总时限；准备阶段最多 1 分钟" />
+          <TextField {...field} name="routerIdleTimeoutMin" label="Router 空闲回收(分钟)" hint="归档空闲 Router，保留对话，下次评估自动重建" />
+          <TextField {...field} name="threadIdleTimeoutMin" label="对话空闲过期(分钟)" hint="默认 1440 分钟；有运行任务、待处理消息或审批时暂缓关闭" />
+          <TextField {...field} name="workerIdleTimeoutMin" label="Worker 待命回收(分钟)" hint="默认 1440 分钟；完成工作后长期待命的 Worker 自动完结并回收" />
           <TextField {...field} name="maxTicketAttempts" label="失败重试次数" hint="Ticket 失败后自动重试的上限,0 表示不重试" />
           <TextField {...field} name="evalBatchMs" label="批处理窗口(毫秒)" hint="窗口内同一线程的多条消息合并成一次 Router 评估" />
           <TextField {...field} name="triggerMaxChars" label="单条消息上限(字符)" hint="超出部分会被截断" />

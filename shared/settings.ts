@@ -5,6 +5,10 @@ import { z } from "zod";
 export const NUMBER_LIMITS = {
   evalBatchMs: { min: 0, max: 60000 },
   workerTimeoutMin: { min: 5, max: 1440 },
+  routerEvalTimeoutMin: { min: 1, max: 60 },
+  routerIdleTimeoutMin: { min: 1, max: 1440 },
+  threadIdleTimeoutMin: { min: 5, max: 43200 },
+  workerIdleTimeoutMin: { min: 1, max: 43200 },
   maxTicketAttempts: { min: 0, max: 5 },
   triggerMaxChars: { min: 500, max: 64000 },
   imReplyMaxChars: { min: 100, max: 4000 },
@@ -87,7 +91,7 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 13,
+  version: 14,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
@@ -113,6 +117,10 @@ export const superagentSettings = defineSettings({
     evalBatchMs: boundedInt("evalBatchMs", 1500),
     /** Worker 单轮运行上限,超时看门狗中断并判失败。 */
     workerTimeoutMin: boundedInt("workerTimeoutMin", 120),
+    routerEvalTimeoutMin: boundedInt("routerEvalTimeoutMin", 10),
+    routerIdleTimeoutMin: boundedInt("routerIdleTimeoutMin", 30),
+    threadIdleTimeoutMin: boundedInt("threadIdleTimeoutMin", 1440),
+    workerIdleTimeoutMin: boundedInt("workerIdleTimeoutMin", 1440),
     /** Ticket 失败重试上限。 */
     maxTicketAttempts: boundedInt("maxTicketAttempts", 1),
     /** 单个触发文本上限,超出即被 fast-path 截断。 */
@@ -215,7 +223,8 @@ export const superagentSettings = defineSettings({
    * v10 → v11:新增 weixinEnabled/weixinAllowUsers(默认关闭,行为与旧版一致);
    * v11 → v12:新增 routerThinkingOptionId/workerThinkingOptionId 与档位 thinkingOptionId
    * (留空不传,回落 provider 默认,行为与旧版一致);
-   * v12 → v13:新增 imInboxDir(留空 = 默认收件目录,行为与旧版一致)。
+   * v12 → v13:新增 imInboxDir(留空 = 默认收件目录,行为与旧版一致);
+   * v13 → v14:新增 Router 评估/空闲、Thread 空闲与 Worker 待命超时。
    */
   migrate: (values) => values,
 });

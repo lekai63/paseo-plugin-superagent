@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { dailyImThreadKey, imConversationKey, imDay } from "../shared/im-threads";
 import { DecisionBudget } from "./decision-budget";
+import { Deadline, DeadlineError, bounded } from "./deadline";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
 import { followsOf, subscribesTo } from "../shared/execution";
@@ -83,12 +84,12 @@ import {
 
 const WATCHDOG_INTERVAL_MS = 15_000;
 const LAUNCH_STUCK_MS = 5 * 60_000;
-const ROUTER_EVAL_TIMEOUT_MS = 10 * 60_000;
+const ROUTER_PREPARE_TIMEOUT_MS = 60_000;
 /** 单个待执行动作的尝试上限(首次执行 + 看门狗重试),超过后放弃并回流失败。 */
 const MAX_ACTION_ATTEMPTS = 3;
 /** 同一线程连续放弃的动作数达到上限后,不再自动回流失败触发,防 Router 循环。 */
 const MAX_ABANDONED_ACTIONS = 3;
-/** 评估异常(provider 未就绪/目录不可用等瞬时故障)的自动重排上限:15s 看门狗节奏 ≈ 5 分钟。 */
+/** 基础设施异常的自动重排上限;指数退避从 15s 起,最多等待 5 分钟。 */
 const MAX_EVAL_ERRORS = 20;
 /** 单线程 filtered 留痕上限:滚动保留最近这么多条(相邻消息内联的来源),旧的先丢。 */
 const MAX_FILTERED_TRIGGERS = 30;
@@ -191,6 +192,11 @@ export class SuperagentEngine {
   private primed = false;
   private evalInFlight = false;
   private currentEvalThread: string | null = null;
+  private evalRuns = new Map<string, Deadline>();
+  private watchdogInFlight = false;
+  private retiringRouters = new Set<string>();
+  private retiringTickets = new Set<string>();
+  private sendingWorkers = new Set<string>();
   private evalQueued = new Set<string>();
   private batchTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private watchedTickets = new Map<string, symbol>();
@@ -227,6 +233,7 @@ export class SuperagentEngine {
   now = (): Date => new Date();
   private replySink: ReplySink | null = null;
   private settingsValues: SuperagentSettingsValues = SETTINGS_DEFAULTS;
+  private settingsReady: Promise<void>;
 
   /** IM 触发源的答复外发通道,由 index.server 在启动 source 时注入。 */
   setReplySink(sink: ReplySink | null): void {
@@ -249,11 +256,11 @@ export class SuperagentEngine {
       this.settingsValues = state.values;
       void this.refreshWorkingDirIssue();
     });
-    void settings.read().then((state) => {
+    this.settingsReady = settings.read().then((state) => {
       if (state.status !== "ready") return;
       this.settingsValues = state.values;
       void this.refreshWorkingDirIssue();
-    });
+    }).catch((error) => { console.error("[superagent] initial settings read failed", error); });
   }
 
   /** 重新检查 Worker 基础目录并缓存结果(snapshot 同步读取缓存)。 */
@@ -297,6 +304,7 @@ export class SuperagentEngine {
     for (const timer of this.batchTimers.values()) clearTimeout(timer);
     this.batchTimers.clear();
     this.watchedTickets.clear();
+    for (const run of this.evalRuns.values()) run.cancel();
     this.primed = false;
     await this.deliveryChain;
     await this.store.flush();
@@ -444,7 +452,7 @@ export class SuperagentEngine {
       }
       next.triggers.push(trigger);
       const target = next.threads.find((t) => t.id === threadId);
-      if (target) target.updatedAt = now;
+      if (target) { target.updatedAt = now; target.lastActivityAt = now; }
     });
 
     if (queuedBeforeStart) {
@@ -480,6 +488,7 @@ export class SuperagentEngine {
       if (target) {
         target.latestResult = { id: reportId, kind: "worker_report", text: report, ticketIds: [ticket.id], createdAt: now };
         target.updatedAt = now;
+        target.lastActivityAt = now;
       }
       next.triggers.push({
         id: reportId,
@@ -535,7 +544,7 @@ export class SuperagentEngine {
     await this.store.ready;
     const ticket = this.store.get().tickets.find((item) => item.workerAgentId === agentId);
     if (!ticket || TERMINAL_TICKET_STATUSES.includes(ticket.status)) return false;
-    const snapshot = await this.requirePaseo().agents.ref(agentId).refresh();
+    const snapshot = await bounded(() => this.requirePaseo().agents.ref(agentId).refresh(), "Worker permissions refresh");
     if (!snapshot) return Boolean(ticket.pendingRequests?.length);
     const requests = (snapshot.agent.archivedAt ? [] : snapshot.agent.pendingPermissions ?? [])
       .filter((request) => !orchestrationPermission("worker", request))
@@ -549,6 +558,13 @@ export class SuperagentEngine {
       const previous = target.pendingRequests ?? [];
       const added = requests.filter((request) => !previous.some((old) => old.id === request.id));
       target.pendingRequests = requests;
+      if (added.length) {
+        target.requestWaitSince = now;
+        target.requestWaitNotifiedAt = null;
+      } else if (!requests.length) {
+        target.requestWaitSince = null;
+        target.requestWaitNotifiedAt = null;
+      }
       if (previous.length && !requests.length) {
         // 等人输入的时间不计入下一段执行的超时预算。
         target.startedAt = now;
@@ -688,6 +704,7 @@ export class SuperagentEngine {
     ticketId: string,
     text: string,
     mode: "steer" | "interrupt",
+    check: () => void = () => {},
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const paseo = this.requirePaseo();
     const ticket = this.store.get().tickets.find((t) => t.id === ticketId);
@@ -697,20 +714,30 @@ export class SuperagentEngine {
     if (await this.syncWorkerPermissions(ticket.workerAgentId)) {
       return { ok: false, error: `ticket ${ticketId} is awaiting input; use respond with its requestId, not steer` };
     }
+    check();
+    if (this.retiringTickets.has(ticketId) || ticket.retireRequested || !["running", "waiting"].includes(ticket.status)) {
+      return { ok: false, error: `ticket ${ticketId} is no longer available` };
+    }
+    this.sendingWorkers.add(ticketId);
     try {
-      await paseo.agents.ref(ticket.workerAgentId).send(text, { activeTurnBehavior: mode });
+      const agentId = ticket.workerAgentId;
+      await bounded(() => paseo.agents.ref(agentId).send(text, { activeTurnBehavior: mode }), "Worker message");
     } catch (error) {
+      this.sendingWorkers.delete(ticketId);
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    await this.store.update((next) => {
-      const target = next.tickets.find((t) => t.id === ticketId);
-      if (target?.status === "waiting") {
-        target.status = "running";
-        target.startedAt = new Date().toISOString();
-        target.updatedAt = target.startedAt;
-        target.lastError = null;
-      }
-    });
+    try {
+      await this.store.update((next) => {
+        check();
+        const target = next.tickets.find((t) => t.id === ticketId);
+        if (target?.status === "waiting") {
+          target.status = "running";
+          target.startedAt = new Date().toISOString();
+          target.updatedAt = target.startedAt;
+          target.lastError = null;
+        }
+      });
+    } finally { this.sendingWorkers.delete(ticketId); }
     if (this.store.get().tickets.find((t) => t.id === ticketId)?.status === "running") {
       this.watchTicket(ticketId);
     }
@@ -722,6 +749,7 @@ export class SuperagentEngine {
     ticketId: string,
     text: string,
     mode: "steer" | "interrupt",
+    check: () => void = () => {},
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const ticket = this.store.get().tickets.find((t) => t.id === ticketId);
     if (!ticket) {
@@ -730,7 +758,7 @@ export class SuperagentEngine {
     if (!ticket.workerAgentId || !["running", "waiting"].includes(ticket.status)) {
       return { ok: false, error: `ticket ${ticketId} cannot receive messages while ${ticket.status}` };
     }
-    return this.sendToWorker(ticketId, text, mode);
+    return this.sendToWorker(ticketId, text, mode, check);
   }
 
   // ------------------------------------------------------------ eval loop
@@ -764,6 +792,18 @@ export class SuperagentEngine {
     if (this.evalInFlight || !this.paseo) return;
     const next = [...this.evalQueued][0];
     if (!next) return;
+    const retry = this.store.get().threads.find((t) => t.id === next)?.evalRetry;
+    if ((retry?.errors ?? 0) >= MAX_EVAL_ERRORS || (retry?.unparsed ?? 0) >= 3) {
+      this.evalQueued.delete(next);
+      if (this.evalQueued.size) void this.drainEvalQueue();
+      return;
+    }
+    if (retry?.nextAt && Date.parse(retry.nextAt) > Date.now()) {
+      this.evalQueued.delete(next);
+      this.scheduleEval(next, Date.parse(retry.nextAt) - Date.now());
+      if (this.evalQueued.size) void this.drainEvalQueue();
+      return;
+    }
     this.evalInFlight = true;
     this.currentEvalThread = next;
     this.evalQueued.delete(next);
@@ -773,16 +813,25 @@ export class SuperagentEngine {
       console.error("[superagent] eval failed", error);
       // 异常走独立计数:瞬时故障(provider 未就绪等)按看门狗节奏持续重查,
       // 不与 unparsed(模型输出问题)共用 3 次熔断。
-      this.evalErrors.set(next, (this.evalErrors.get(next) ?? 0) + 1);
+      const errors = (this.evalErrors.get(next) ?? retry?.errors ?? 0) + 1;
+      this.evalErrors.set(next, errors);
       const message = error instanceof Error ? error.message : String(error);
       await this.store.update((state) => {
         const thread = state.threads.find((t) => t.id === next);
         if (thread) {
+          thread.evalRetry = { errors, unparsed: thread.evalRetry?.unparsed ?? 0,
+            nextAt: new Date(Date.now() + Math.min(300_000, 15_000 * 2 ** Math.min(errors - 1, 5))).toISOString() };
+          for (const trigger of state.triggers) {
+            if (trigger.threadId === next && trigger.status === "pending") trigger.note = errors >= MAX_EVAL_ERRORS
+              ? "Router evaluation paused after repeated failures; use re-evaluate to retry" : "Router evaluation failed; retry scheduled";
+          }
           state.decisions.push(
             newDecision(next, [], "error", { rationale: truncate(message, 400) }),
           );
         }
       });
+      if (errors === MAX_EVAL_ERRORS) await this.notifyThread(next,
+        "Router 连续评估失败，已暂停自动重试。消息已保留，请检查模型或连接后点击「重新评估」。");
     } finally {
       this.evalInFlight = false;
       this.currentEvalThread = null;
@@ -791,9 +840,39 @@ export class SuperagentEngine {
   }
 
   private async runEval(threadId: string): Promise<void> {
-    await this.store.ready;
+    if (this.evalRuns.has(threadId) || this.retiringRouters.has(threadId)) throw new Error("Router lifecycle operation already in progress");
+    const startedAt = Date.now();
+    const prepare = new Deadline(ROUTER_PREPARE_TIMEOUT_MS, "Router preparation");
+    let run = prepare;
+    this.evalRuns.set(threadId, prepare);
+    try {
+      await prepare.wait(() => this.settingsReady);
+      run = new Deadline(Math.max(1, this.settingsValues.routerEvalTimeoutMin * 60_000 - (Date.now() - startedAt)), `Router evaluation ${threadId}`);
+      this.evalRuns.set(threadId, run);
+      await run.wait(() => this.evaluateThread(threadId, run, prepare));
+    } catch (error) {
+      run.cancel();
+      const router = this.store.get().threads.find((t) => t.id === threadId)?.router;
+      if (router?.dirty) await bounded(() => this.requirePaseo().agents.ref(router.agentId).reload(), "Router interrupt")
+        .catch((failure) => console.error("[superagent] decision interrupt failed", failure));
+      throw error;
+    } finally {
+      run.cancel();
+      prepare.cancel();
+      if (this.evalRuns.get(threadId) === run) this.evalRuns.delete(threadId);
+    }
+  }
+
+  private async evaluateThread(threadId: string, run: Deadline, prepare: Deadline): Promise<void> {
+    const preparing = async <T>(operation: () => Promise<T>): Promise<T> => {
+      run.check();
+      const result = await prepare.wait(operation);
+      run.check();
+      return result;
+    };
+    await preparing(() => this.store.ready);
     const paseo = this.requirePaseo();
-    await this.refreshThreadRequests(threadId);
+    await preparing(() => this.refreshThreadRequests(threadId));
     let state = this.store.get();
     const thread = state.threads.find((t) => t.id === threadId);
     if (!thread || thread.state === "closed") return;
@@ -801,7 +880,7 @@ export class SuperagentEngine {
     if (batch.length === 0) return;
 
     // 1. Router 就绪(provider/目录未配置时给出可读错误)。
-    const routerProvider = await this.resolveProvider("router", state.kv.routerProvider);
+    const routerProvider = await preparing(() => this.resolveProvider("router", state.kv.routerProvider));
     if (!this.settingsValues.workingDir) {
       throw new Error("working directory is not configured — set it in the Superagent screen");
     }
@@ -809,8 +888,8 @@ export class SuperagentEngine {
     const worker: RouterWorkerEnvironment = {
       workingDir: this.settingsValues.workingDir,
       isolation: this.settingsValues.workerIsolation,
-      issue: await this.refreshWorkingDirIssue(),
-      instructionFiles: await this.instructionFilesFor(this.settingsValues.workingDir),
+      issue: await preparing(() => this.refreshWorkingDirIssue()),
+      instructionFiles: await preparing(() => this.instructionFilesFor(this.settingsValues.workingDir)),
       defaultWorker: {
         provider: this.settingsValues.workerProvider.trim() || state.kv.workerProvider || null,
         description: this.settingsValues.workerDescription,
@@ -825,30 +904,34 @@ export class SuperagentEngine {
     // 旧版只有全局 Router,不能把它的混合历史认作当前线程的记忆。
     const legacyId = state.kv.routerAgentId && !state.threads.some((t) => t.router?.agentId === state.kv.routerAgentId)
       ? state.kv.routerAgentId : null;
-    if (legacyId) await detachRoleChildren(paseo, legacyId);
-    const router = await ensureRouter(
+    if (legacyId) await preparing(() => detachRoleChildren(paseo, legacyId, () => { run.check(); prepare.check(); }));
+    const router = await preparing(() => ensureRouter(
       paseo, thread, routerProvider,
       () => this.sharedWorkspaceFor(this.settingsValues.workingDir, BACKGROUND_WORKSPACE_TITLE, true),
       instructions, configHash, this.settingsValues.routerThinkingOptionId.trim(),
-    );
+      () => { run.check(); prepare.check(); },
+    ));
     const routerAgentId = router.agentId;
     const remembered = router.created ? null : thread.router;
     await this.store.update((next) => {
       const target = next.threads.find((t) => t.id === threadId);
       if (!target || target.state !== "active") return;
+      run.check();
       target.router = remembered ?? {
         agentId: routerAgentId, provider: routerProvider, configHash, sessionId: router.sessionId,
         initialized: false, dirty: false, evaluations: 0, compactionSeq: 0, triggerIds: [],
       };
       next.kv.routerAgentId = routerAgentId; // 最近一次 Router,仅供旧客户端和诊断入口。
       next.kv.routerProvider = routerProvider;
+      target.router.lastUsedAt = this.now().toISOString();
     });
-    if (legacyId) await paseo.agents.ref(legacyId).archive();
+    run.check();
+    if (legacyId) await preparing(() => paseo.agents.ref(legacyId).archive());
     if (this.store.get().threads.find((t) => t.id === threadId)?.state !== "active") {
-      if (router.created) await router.handle.archive();
+      if (router.created) await bounded(() => router.handle.archive(), "unused Router archive");
       return;
     }
-    const compactionSeq = await routerCompactionSeq(router.handle);
+    const compactionSeq = await preparing(() => routerCompactionSeq(router.handle));
     const restore = router.created || !remembered?.initialized || compactionSeq === null
       || compactionSeq > (remembered.compactionSeq ?? 0);
     const unseenContext = state.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered"
@@ -863,13 +946,17 @@ export class SuperagentEngine {
     });
     // 半轮失败/超时/进程崩溃都留下 dirty,下轮从持久状态重建,避免重复执行旧裁决。
     await this.store.update((next) => {
+      run.check();
       const current = next.threads.find((t) => t.id === threadId)?.router;
       if (current?.agentId === routerAgentId) current.dirty = true;
     });
-    this.decisionBudgets.set(routerAgentId, new DecisionBudget());
+    const budget = new DecisionBudget();
+    this.decisionBudgets.set(routerAgentId, budget);
     try {
-      const evalDeadline = Date.now() + ROUTER_EVAL_TIMEOUT_MS;
-      const result = await this.runDecision(router.handle, prompt, ROUTER_EVAL_TIMEOUT_MS);
+      run.check();
+      const evalDeadline = run.expiresAt;
+      const result = await this.runDecision(router.handle, prompt, Math.max(1, evalDeadline - Date.now()), false);
+      run.check();
       let replyText =
         result.lastMessage?.trim() || "";
 
@@ -883,7 +970,8 @@ export class SuperagentEngine {
       ) return;
       const remainingMs = evalDeadline - Date.now();
       if ("error" in parsed && remainingMs > 0) {
-        const corrected = await this.runDecision(router.handle, composeVerdictRepairPrompt(threadId, parsed.error), remainingMs);
+        const corrected = await this.runDecision(router.handle, composeVerdictRepairPrompt(threadId, parsed.error), remainingMs, false);
+        run.check();
         replyText = corrected.lastMessage?.trim() || "";
         parsed = parseVerdict(replyText);
         state = this.store.get();
@@ -895,8 +983,13 @@ export class SuperagentEngine {
       }
       // 纠正后仍失败才记一次 unparsed,触发保留 pending,连续失败计数防失控循环。
       const recordUnparsed = async (reason: string) => {
-        this.evalFailures.set(threadId, (this.evalFailures.get(threadId) ?? 0) + 1);
+        run.check();
+        const failures = (this.evalFailures.get(threadId) ?? thread.evalRetry?.unparsed ?? 0) + 1;
+        this.evalFailures.set(threadId, failures);
         await this.store.update((next) => {
+          run.check();
+          const target = next.threads.find((t) => t.id === threadId);
+          if (target) target.evalRetry = { errors: target.evalRetry?.errors ?? 0, unparsed: failures, nextAt: null };
           next.decisions.push(
             newDecision(threadId, batch.map((t) => t.id), "unparsed", {
               rationale: reason,
@@ -904,6 +997,8 @@ export class SuperagentEngine {
             }),
           );
         });
+        run.check();
+        if (failures === 3) await this.notifyThread(threadId, "Router 连续三轮无法生成有效裁决，已暂停自动重试。消息已保留，请检查配置后点击「重新评估」。");
       };
       if ("error" in parsed) {
         await recordUnparsed(parsed.error);
@@ -1029,6 +1124,7 @@ export class SuperagentEngine {
       decisions[0].raw = truncate(replyText, 1200);
 
       await this.store.update((next) => {
+        run.check();
         delete next.kv.routerPromptState;
         const memory = next.threads.find((t) => t.id === threadId)?.router;
         if (memory?.agentId === routerAgentId) {
@@ -1037,6 +1133,7 @@ export class SuperagentEngine {
           memory.sessionId = routerSessionId(router.handle.current()) ?? router.sessionId;
           memory.compactionSeq = compactionSeq ?? 0;
           memory.evaluations++;
+          memory.lastUsedAt = this.now().toISOString();
           memory.triggerIds = [...new Set([...(restore ? [] : remembered?.triggerIds ?? []), ...triggerIds, ...unseenContext.map((t) => t.id), ...chatter.map((t) => t.id)])]
             .filter((id) => next.triggers.some((t) => t.id === id));
         }
@@ -1058,6 +1155,7 @@ export class SuperagentEngine {
         }
         const target = next.threads.find((t) => t.id === threadId);
         if (target) {
+          target.evalRetry = { errors: 0, unparsed: 0, nextAt: null };
           target.updatedAt = decidedAt;
           if (summary) target.summary = truncate(summary, 200);
           if (replyDecision && replies.length > 0) {
@@ -1069,10 +1167,12 @@ export class SuperagentEngine {
         // stop 不在此处关闭线程:关闭发生在动作执行到 stop 时,否则先于 stop 的
         // steer/cancel 会因票据已被批量取消而无法执行。
       });
+      run.check();
 
       // 副作用按序执行;失败的动作留在待执行记录里由看门狗按上限重试,不再重放整批。
       const launchQueue = [...createdTickets];
       for (let index = 0; index < actionRecords.length; index++) {
+        run.check();
         const action = actions[index];
         const record = actionRecords[index];
         if (action.action === "stop") {
@@ -1092,6 +1192,7 @@ export class SuperagentEngine {
       }
 
       // 5. 答复回投:IM 触发回原聊天;agent 委派回原会话。
+      run.check();
       if (delivery) {
         await this.sendImDelivery(delivery.id);
       } else if (fullReply && !origin) {
@@ -1099,17 +1200,17 @@ export class SuperagentEngine {
         const replyTarget = batch.find((t) => t.replyToAgentId)?.replyToAgentId ?? null;
         if (replyTarget) {
           try {
-            await paseo.agents.ref(replyTarget).send(reply, {
+            await bounded(() => paseo.agents.ref(replyTarget).send(reply, {
               sourceAgentId: routerAgentId,
               activeTurnBehavior: "steer",
-            });
+            }), "Router reply relay");
           } catch (error) {
             console.error("[superagent] reply relay to agent failed", error);
           }
         }
       }
     } finally {
-      this.decisionBudgets.delete(routerAgentId);
+      if (this.decisionBudgets.get(routerAgentId) === budget) this.decisionBudgets.delete(routerAgentId);
     }
   }
 
@@ -1126,7 +1227,10 @@ export class SuperagentEngine {
         let sentId: string | null = null;
         try {
           if (!this.replySink) throw new Error("IM reply channel is not available");
-          sentId = (await this.replySink.send(delivery.origin, delivery.parts[delivery.nextPart])) || null;
+          const sink = this.replySink;
+          const origin = delivery.origin;
+          const part = delivery.parts[delivery.nextPart];
+          sentId = (await bounded(() => sink.send(origin, part), "IM reply")) || null;
         } catch {
           await this.store.update((next) => {
             const target = next.imDeliveries.find((item) => item.id === id);
@@ -1206,7 +1310,22 @@ export class SuperagentEngine {
       const target = next.pendingActions.find((a) => a.id === recordId);
       if (target && target.attempts === attempt - 1) target.attempts = attempt;
     });
-    const outcome = await this.performPendingAction(record);
+    const deadline = new Deadline(30_000, "Router action");
+    let outcome: { ok: true } | { ok: false; error: string };
+    try {
+      outcome = await deadline.wait(() => this.performPendingAction(record, () => deadline.check()));
+    } catch (error) {
+      deadline.cancel();
+      if (!(error instanceof DeadlineError)) throw error;
+      // A timed-out send may already have reached the daemon. Hold for review rather than replaying it.
+      await this.store.update((next) => {
+        next.pendingActions = next.pendingActions.filter((a) => a.id !== recordId);
+        const decision = next.decisions.find((d) => d.id === record.decisionId);
+        if (decision) decision.rationale = `${decision.rationale ?? ""}\nAction timed out; delivery uncertain; automatic replay paused`.trim();
+      });
+      await this.notifyThread(record.threadId, `Router 的 ${record.kind} 操作超时，执行结果待确认，已停止自动重发。请检查任务状态后处理。`);
+      return;
+    } finally { deadline.cancel(); }
     if (outcome.ok) {
       await this.store.update((next) => {
         next.pendingActions = next.pendingActions.filter((a) => a.id !== recordId);
@@ -1279,6 +1398,7 @@ export class SuperagentEngine {
   /** 动作的幂等执行:执行中断后重跑得到同样的最终状态。 */
   private async performPendingAction(
     record: PendingAction,
+    check: () => void = () => {},
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const paseo = this.requirePaseo();
     if (record.kind === "respond") {
@@ -1289,6 +1409,7 @@ export class SuperagentEngine {
       }
       if (!record.requestId || !record.response) return { ok: false, error: "Missing requestId/response" };
       await this.syncWorkerPermissions(record.workerAgentId);
+      check();
       const request = this.store.get().tickets.find((item) => item.id === ticket.id)?.pendingRequests
         ?.find((item) => item.id === record.requestId);
       // 人工已答复或崩溃前已经成功发送:幂等完成,不重发或误发给另一个请求。
@@ -1327,7 +1448,7 @@ export class SuperagentEngine {
     }
     if (record.kind === "steer") {
       // 跨线程 steer:目标票据可能属于其他线程(裁决记录仍挂在本线程)。
-      return this.applySteer(record.ticketId ?? "", record.text ?? "", record.mode ?? "steer");
+      return this.applySteer(record.ticketId ?? "", record.text ?? "", record.mode ?? "steer", check);
     }
     if (record.kind === "cancel") {
       // 跨线程 cancel:目标票据不在(已清理)视为幂等成功。
@@ -1341,7 +1462,7 @@ export class SuperagentEngine {
       const ticket = this.store.get().tickets.find((t) => t.id === record.ticketId);
       if (!ticket) return { ok: true };
       if (["failed", "canceled", "completed"].includes(ticket.status)) {
-        await this.retryTicket(ticket.id);
+        await this.retryTicket(ticket.id, check);
         return { ok: true };
       }
       // 已被重置过(上次执行中断):pending 票据由看门狗接手启动。
@@ -1687,14 +1808,121 @@ export class SuperagentEngine {
   }
 
   private async watchdogTick(): Promise<void> {
-    if (!this.primed || !this.paseo) return;
-    const note = await this.reconcile();
-    this.lastWatchdogAt = new Date().toISOString();
-    this.lastWatchdogNote = note;
-    // LLM 巡检按自己的间隔走,不阻塞程序对账。
-    void this.maybePatrol().catch((error) => {
-      console.error("[superagent] watchdog patrol failed", error);
+    if (!this.primed || !this.paseo || this.watchdogInFlight) return;
+    this.watchdogInFlight = true;
+    try {
+      const note = await this.reconcile();
+      this.lastWatchdogAt = new Date().toISOString();
+      this.lastWatchdogNote = note;
+      // LLM 巡检按自己的间隔走,不阻塞程序对账。
+      void this.maybePatrol().catch((error) => {
+        console.error("[superagent] watchdog patrol failed", error);
+      });
+    } finally { this.watchdogInFlight = false; }
+  }
+
+  /** Persist IM notices before delivery, using the thread's original return destination. */
+  private async notifyThread(threadId: string, text: string): Promise<void> {
+    const state = this.store.get();
+    const source = state.triggers.filter((t) => t.threadId === threadId && t.status !== "filtered" && (t.origin || t.replyToAgentId))
+      .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))[0];
+    const decision = newDecision(threadId, [], "error", { rationale: text });
+    const delivery = source?.origin ? {
+      id: `im-${decision.id}`, threadId, origin: source.origin,
+      parts: splitImReply(text, this.settingsValues.imReplyMaxChars), nextPart: 0,
+      status: "pending" as const, sentMessageIds: [], createdAt: decision.createdAt, updatedAt: decision.createdAt,
+    } : null;
+    await this.store.update((next) => {
+      next.decisions.push(decision);
+      if (delivery) next.imDeliveries.push(delivery);
     });
+    if (delivery) void this.sendImDelivery(delivery.id);
+    else if (source?.replyToAgentId) await bounded(() => this.requirePaseo().agents.ref(source.replyToAgentId!).send(text), "engine notice")
+      .catch((error) => console.error("[superagent] notice failed", error));
+  }
+
+  private threadHasPendingWork(threadId: string): boolean {
+    const state = this.store.get();
+    return this.evalRuns.has(threadId) || this.currentEvalThread === threadId || this.evalQueued.has(threadId) || this.batchTimers.has(threadId)
+      || state.triggers.some((t) => t.threadId === threadId && t.status === "pending")
+      || state.pendingActions.some((a) => a.threadId === threadId)
+      || state.imDeliveries.some((d) => d.threadId === threadId && d.status !== "sent");
+  }
+
+  private canExpireThread(threadId: string, cutoff: number, daily: boolean): boolean {
+    const state = this.store.get();
+    const thread = state.threads.find((t) => t.id === threadId);
+    if (!thread || thread.state !== "active" || this.threadHasPendingWork(threadId)) return false;
+    if (!daily && Date.parse(thread.lastActivityAt ?? thread.updatedAt) > cutoff) return false;
+    return !state.tickets.some((ticket) => {
+      if (ticket.threadId !== threadId && !followsOf(ticket).includes(threadId)) return false;
+      return ["pending", "launching", "running"].includes(ticket.status) || Boolean(ticket.pendingRequests?.length)
+        || ticket.retireRequested || (!daily && ticket.status === "waiting")
+        || (ticket.threadId === threadId && followsOf(ticket).some((id) => state.threads.some((other) => other.id === id && other.state === "active")));
+    });
+  }
+
+  private touchThreads(state: SuperagentState, threadIds: string[], at: string): void {
+    for (const id of threadIds) {
+      const thread = state.threads.find((t) => t.id === id);
+      if (thread && Date.parse(at) > Date.parse(thread.lastActivityAt ?? thread.updatedAt)) thread.lastActivityAt = at;
+    }
+  }
+
+  /** Waiting workers have a separate lease; changing a subscription does not keep a thread alive forever. */
+  private async expireIdleWorker(ticketId: string): Promise<void> {
+    if (this.retiringTickets.has(ticketId)) return;
+    const state = this.store.get();
+    const ticket = state.tickets.find((t) => t.id === ticketId);
+    if (!ticket?.workerAgentId) return;
+    const cutoff = this.now().getTime() - this.settingsValues.workerIdleTimeoutMin * 60_000;
+    const eligible = () => !this.sendingWorkers.has(ticketId) && (ticket.retireRequested || (ticket.status === "waiting" && !ticket.pendingRequests?.length
+      && Date.parse(ticket.updatedAt) <= cutoff
+      && ![ticket.threadId, ...followsOf(ticket)].some((id) => this.threadHasPendingWork(id))));
+    if (!eligible()) return;
+    this.retiringTickets.add(ticketId);
+    const agentId = ticket.workerAgentId;
+    try {
+      const live = await bounded(() => this.requirePaseo().agents.ref(agentId).refresh(), "idle Worker refresh");
+      if (live?.agent.updatedAt && !ticket.retireRequested && Date.parse(live.agent.updatedAt) > Date.parse(ticket.updatedAt)) {
+        const at = live.agent.updatedAt;
+        await this.store.update((next) => {
+          ticket.updatedAt = at;
+          this.touchThreads(next, [ticket.threadId, ...followsOf(ticket)], at);
+        });
+      }
+      if (!eligible() || ticket.workerAgentId !== agentId) return;
+      if (live && !live.agent.archivedAt && (live.agent.status === "running" || live.agent.status === "initializing" || live.agent.pendingPermissions?.length)) return;
+      // The retirement intent survives reloads. No future intake may revive this Worker.
+      await this.store.update(() => {
+        ticket.status = "completed";
+        ticket.subscribed = false;
+        ticket.follows = [];
+        ticket.retireRequested = true;
+      });
+      await bounded(() => this.requirePaseo().agents.ref(agentId).archive(), "idle Worker archive");
+      if (ticket.ownsWorkspace && ticket.workspaceId) {
+        const workspaceId = ticket.workspaceId;
+        await bounded(() => this.requirePaseo().workspaces.ref(workspaceId).archive(), "idle Worker workspace archive");
+      }
+      await this.store.update(() => {
+        if (ticket.workerAgentId !== agentId) return;
+        ticket.workerAgentId = null;
+        if (ticket.ownsWorkspace) ticket.workspaceId = null;
+        ticket.retireRequested = false;
+      });
+    } catch (error) {
+      console.error("[superagent] idle Worker retirement failed", error);
+    } finally { this.retiringTickets.delete(ticketId); }
+  }
+
+  private async remindRequestWait(ticketId: string): Promise<void> {
+    const ticket = this.store.get().tickets.find((t) => t.id === ticketId);
+    if (!ticket?.pendingRequests?.length || ticket.requestWaitNotifiedAt) return;
+    const since = ticket.requestWaitSince ?? ticket.updatedAt;
+    if (this.now().getTime() - Date.parse(since) < 24 * 60 * 60_000) return;
+    await this.store.update(() => { ticket.requestWaitNotifiedAt = this.now().toISOString(); });
+    await this.notifyThread(ticket.threadId, `任务「${ticket.title}」已等待审批或回答超过 24 小时。请处理 Worker 的待答问题，或取消任务；等待期间对话保留。`);
   }
 
   // ------------------------------------------------------- LLM watchdog
@@ -1880,8 +2108,8 @@ export class SuperagentEngine {
     };
     for (const thread of state.threads.filter((t) => t.state === "active")) {
       const pending = state.triggers.filter((t) => t.threadId === thread.id && t.status === "pending");
-      const unparsed = this.evalFailures.get(thread.id) ?? 0;
-      const errors = this.evalErrors.get(thread.id) ?? 0;
+      const unparsed = this.evalFailures.get(thread.id) ?? thread.evalRetry?.unparsed ?? 0;
+      const errors = this.evalErrors.get(thread.id) ?? thread.evalRetry?.errors ?? 0;
       if (unparsed >= 3) lines.push(`${label(thread.id)}: Router output unparsed ${unparsed} times in a row; automatic re-evaluation is paused (reeval resets it)`);
       if (errors >= 3) {
         const last = state.decisions.filter((d) => d.threadId === thread.id && d.outcome === "error").at(-1);
@@ -2023,9 +2251,12 @@ export class SuperagentEngine {
         try {
           const handle = paseo.agents.ref(ticket.workerAgentId);
           // 权限/问题优先于 idle 与硬超时。支持错过 hook、插件重载和非阻塞问题。
-          if (await this.syncWorkerPermissions(ticket.workerAgentId)) continue;
+          if (await this.syncWorkerPermissions(ticket.workerAgentId)) {
+            await this.remindRequestWait(ticket.id);
+            continue;
+          }
           if (ticket.status !== "running") continue;
-          const refetched = await handle.refresh();
+          const refetched = await bounded(() => handle.refresh(), "Worker refresh");
           if (refetched?.agent.pendingPermissions?.length) {
             await this.syncWorkerPermissions(ticket.workerAgentId);
             continue;
@@ -2050,7 +2281,7 @@ export class SuperagentEngine {
           } else if (status === "running" && timedOut) {
             acted += 1;
             try {
-              await handle.reload();
+              await bounded(() => handle.reload(), "Worker interrupt");
             } catch (error) {
               console.error("[superagent] worker timeout reload failed", error);
             }
@@ -2081,9 +2312,10 @@ export class SuperagentEngine {
     for (const threadId of pendingByThread) {
       const thread = state.threads.find((t) => t.id === threadId);
       if (!thread || thread.state === "closed") continue;
-      // unparsed 3 次熔断(模型输出问题,人工重试);瞬时异常给足重查窗口(≈5 分钟)。
-      if ((this.evalFailures.get(threadId) ?? 0) >= 3) continue;
-      if ((this.evalErrors.get(threadId) ?? 0) >= MAX_EVAL_ERRORS) continue;
+      // 解析失败三次暂停;基础设施异常按持久化的次数上限和退避时间重查。
+      if ((this.evalFailures.get(threadId) ?? thread.evalRetry?.unparsed ?? 0) >= 3) continue;
+      if ((this.evalErrors.get(threadId) ?? thread.evalRetry?.errors ?? 0) >= MAX_EVAL_ERRORS) continue;
+      if (thread.evalRetry?.nextAt && Date.parse(thread.evalRetry.nextAt) > Date.now()) continue;
       const active =
         this.batchTimers.has(threadId) ||
         this.evalQueued.has(threadId) ||
@@ -2100,7 +2332,8 @@ export class SuperagentEngine {
         await this.retireThreadRouter(thread.id);
         continue;
       }
-      const live = await paseo.agents.ref(thread.router.agentId).refresh().catch((error) => {
+      const routerId = thread.router.agentId;
+      const live = await bounded(() => paseo.agents.ref(routerId).refresh(), "Router refresh").catch((error) => {
         console.error("[superagent] thread Router refresh failed", error);
         return undefined;
       });
@@ -2108,41 +2341,57 @@ export class SuperagentEngine {
       if (!live || live.agent.archivedAt) {
         await this.store.update((next) => {
           const target = next.threads.find((t) => t.id === thread.id);
-          if (target) target.router = null;
+          if (target?.router?.agentId === routerId) target.router = null;
+        });
+      } else if (live.agent.updatedAt && Date.parse(live.agent.updatedAt) > Date.parse(thread.router?.lastUsedAt ?? thread.updatedAt)) {
+        const at = live.agent.updatedAt;
+        await this.store.update((next) => {
+          const target = next.threads.find((t) => t.id === thread.id);
+          if (target?.router?.agentId === routerId) target.router.lastUsedAt = at;
+          this.touchThreads(next, [thread.id], at);
         });
       }
     }
     const latest = this.store.get().kv.routerAgentId;
     if (latest && !this.store.get().threads.some((t) => t.router?.agentId === latest)) {
       // 兼容旧版全局 id;不在这里归档尚未迁移的会话。
-      const live = await paseo.agents.ref(latest).refresh().catch(() => null);
-      if (!live || live.agent.archivedAt) await this.store.update((next) => { next.kv.routerAgentId = null; });
+      const live = await bounded(() => paseo.agents.ref(latest).refresh(), "legacy Router refresh").catch(() => undefined);
+      if (live !== undefined && (!live || live.agent.archivedAt)) await this.store.update((next) => { if (next.kv.routerAgentId === latest) next.kv.routerAgentId = null; });
     }
 
-    // 日切不打断旧任务;等汇报消费、动作完成且无跨线程订阅后才关闭旧 IM 线程。
+    // An idle Router can be retired while its Workers continue; the next evaluation restores history.
+    const routerCutoff = this.now().getTime() - this.settingsValues.routerIdleTimeoutMin * 60_000;
     for (const thread of this.store.get().threads) {
-      if (thread.state !== "active" || !thread.imDay || thread.imDay >= imDay(this.now())) continue;
-      if (this.currentEvalThread === thread.id || this.store.get().triggers.some((t) => t.threadId === thread.id && t.status === "pending")
-        || this.store.get().pendingActions.some((a) => a.threadId === thread.id)) continue;
-      const activeWork = this.store.get().tickets.some((t) => t.threadId === thread.id && (
-        ["pending", "launching", "running"].includes(t.status) || t.pendingRequests?.length
-        || followsOf(t).some((id) => this.store.get().threads.some((other) => other.id === id && other.state === "active"))
-      ));
-      if (activeWork) continue;
-      // 不只看票据状态:错过 hook 的 Worker 或维护者直接打开的 Router 仍可能在跑。
+      if (thread.state !== "active" || !thread.router || this.threadHasPendingWork(thread.id)) continue;
+      if (Date.parse(thread.router.lastUsedAt ?? thread.updatedAt) > routerCutoff) continue;
+      try { await this.retireThreadRouter(thread.id, routerCutoff); }
+      catch (error) { console.error("[superagent] idle Router retirement failed", error); }
+    }
+    for (const ticket of this.store.get().tickets) await this.expireIdleWorker(ticket.id);
+
+    // Daily IM rollover and the general idle lease share the same safety checks.
+    const cutoff = this.now().getTime() - this.settingsValues.threadIdleTimeoutMin * 60_000;
+    for (const thread of this.store.get().threads) {
+      const daily = Boolean(thread.imDay && thread.imDay < imDay(this.now()));
+      if (!this.canExpireThread(thread.id, cutoff, daily)) continue;
       const ids = [thread.router?.agentId, ...this.store.get().tickets.filter((t) => t.threadId === thread.id).map((t) => t.workerAgentId)]
         .filter((id): id is string => Boolean(id));
       let busy = false;
       for (const id of ids) {
         try {
-          const live = await paseo.agents.ref(id).refresh();
+          const live = await bounded(() => paseo.agents.ref(id).refresh(), "thread expiry refresh");
+          if (live?.agent.updatedAt && !live.agent.archivedAt) {
+            const at = live.agent.updatedAt;
+            await this.store.update((next) => { this.touchThreads(next, [thread.id], at); });
+          }
           if (live && !live.agent.archivedAt && (live.agent.status === "running" || live.agent.status === "initializing" || live.agent.pendingPermissions?.length)) {
             busy = true;
             break;
           }
         } catch { busy = true; break; }
       }
-      if (!busy) { await this.closeThread(thread.id); acted++; }
+      // Intake, reports and cross-thread subscriptions may change while the RPCs above are pending.
+      if (!busy && this.canExpireThread(thread.id, cutoff, daily)) { await this.closeThread(thread.id); acted++; }
     }
     return acted > 0 ? `reconciled ${acted} item(s)` : null;
   }
@@ -2155,6 +2404,10 @@ export class SuperagentEngine {
     this.evalFailures.delete(threadId);
     this.evalErrors.delete(threadId);
     this.actionFailures.delete(threadId);
+    await this.store.update((next) => {
+      const thread = next.threads.find((t) => t.id === threadId);
+      if (thread) thread.evalRetry = { errors: 0, unparsed: 0, nextAt: null };
+    });
     this.scheduleEval(threadId, 0);
   }
 
@@ -2181,10 +2434,11 @@ export class SuperagentEngine {
     await retireWorker(paseo, ticket, true);
   }
 
-  async retryTicket(ticketId: string): Promise<void> {
+  async retryTicket(ticketId: string, check: () => void = () => {}): Promise<void> {
     const paseo = this.requirePaseo();
     const state = this.store.get();
     const ticket = state.tickets.find((t) => t.id === ticketId);
+    if (ticket?.retireRequested || this.retiringTickets.has(ticketId)) throw new Error("Worker is retiring; retry after cleanup completes");
     if (!ticket) throw new Error("ticket not found");
     if (!["failed", "canceled", "completed"].includes(ticket.status)) {
       throw new Error(`ticket is ${ticket.status}; only failed/canceled/completed tickets retry`);
@@ -2203,6 +2457,7 @@ export class SuperagentEngine {
     // 旧 Worker 与其独占工作区随重试作废:先落盘重置再回收,旧实例不会被新票据引用。
     this.watchedTickets.delete(ticketId);
     if (ticket.workerAgentId) await retireWorker(paseo, ticket, true);
+    check();
     await this.startTicket(ticketId);
   }
 
@@ -2216,16 +2471,38 @@ export class SuperagentEngine {
     for (const ticket of retiring) await retireWorker(paseo, ticket, true);
   }
 
-  private async retireThreadRouter(threadId: string): Promise<void> {
+  private async retireThreadRouter(threadId: string, idleCutoff?: number): Promise<void> {
+    if (this.retiringRouters.has(threadId)) return;
     const id = this.store.get().threads.find((t) => t.id === threadId)?.router?.agentId;
     if (!id) return;
-    await detachRoleChildren(this.requirePaseo(), id);
-    await this.requirePaseo().agents.ref(id).archive();
-    await this.store.update((next) => {
-      const target = next.threads.find((t) => t.id === threadId);
-      if (target?.router?.agentId === id) target.router = null;
-      if (next.kv.routerAgentId === id) next.kv.routerAgentId = null;
-    });
+    const eligible = () => {
+      const thread = this.store.get().threads.find((t) => t.id === threadId);
+      return thread?.router?.agentId === id && (idleCutoff === undefined || (!this.threadHasPendingWork(threadId)
+        && Date.parse(thread.router.lastUsedAt ?? thread.updatedAt) <= idleCutoff));
+    };
+    if (!eligible()) return;
+    this.retiringRouters.add(threadId);
+    try {
+      if (idleCutoff !== undefined) {
+        const live = await bounded(() => this.requirePaseo().agents.ref(id).refresh(), "idle Router refresh");
+        if (!eligible() || (live && !live.agent.archivedAt && (live.agent.status === "running" || live.agent.status === "initializing" || live.agent.pendingPermissions?.length))) return;
+      }
+      const detachDeadline = new Deadline(30_000, "Router detach children");
+      await detachDeadline.wait(() => detachRoleChildren(this.requirePaseo(), id, () => detachDeadline.check()));
+      if (!eligible()) return;
+      // If archival times out, the next evaluation must replace this possibly retiring session.
+      await this.store.update((next) => {
+        const router = next.threads.find((t) => t.id === threadId)?.router;
+        if (router?.agentId === id) router.dirty = true;
+      });
+      if (!eligible()) return;
+      await bounded(() => this.requirePaseo().agents.ref(id).archive(), "Router archive");
+      await this.store.update((next) => {
+        const target = next.threads.find((t) => t.id === threadId);
+        if (target?.router?.agentId === id) target.router = null;
+        if (next.kv.routerAgentId === id) next.kv.routerAgentId = null;
+      });
+    } finally { this.retiringRouters.delete(threadId); }
   }
 
   /** MCP 只读工具在执行前扣预算;预算由 runEval/runPatrol 创建。 */
@@ -2233,16 +2510,17 @@ export class SuperagentEngine {
     return this.decisionBudgets.get(agentId)?.check(name, args) ?? null;
   }
 
-  private async runDecision(handle: PaseoAgentHandle, prompt: string, timeoutMs: number) {
+  private async runDecision(handle: PaseoAgentHandle, prompt: string, timeoutMs: number, interruptOnError = true) {
     const budget = this.decisionBudgets.get(handle.id);
     try {
-      const result = await Promise.race([handle.run(prompt, { timeoutMs }), ...(budget ? [budget.failed] : [])]);
+      const result = await bounded(() => Promise.race([handle.run(prompt, { timeoutMs }), ...(budget ? [budget.failed] : [])]), "decision run", timeoutMs);
       if (result.status && result.status !== "idle") throw new Error(`decision run ${result.status}: ${result.error ?? "no final verdict"}`);
       if (budget?.error) throw budget.error;
       return result;
     } catch (error) {
       // SDK 的超时只结束等待;reload 才会中断仍在运行的模型轮次。
-      await handle.reload().catch((reloadError) => console.error("[superagent] decision interrupt failed", reloadError));
+      if (interruptOnError) await bounded(() => handle.reload(), "decision interrupt")
+        .catch((reloadError) => console.error("[superagent] decision interrupt failed", reloadError));
       throw error;
     }
   }
@@ -2775,23 +3053,28 @@ export class SuperagentEngine {
     const directory = resolve(dir);
     const key = `${background ? "background\u0000" : ""}${directory}`;
     const registry = background ? "backgroundWorkspaces" : "sharedWorkspaces";
-    const ensure = this.workspaceChain.then(async () => {
-      const cached = this.sharedWorkspaceCache.get(key);
-      if (cached) {
-        const descriptor = await cached.refresh().catch(() => null);
-        if (descriptor && !descriptor.archivingAt && resolve(descriptor.workspaceDirectory) === directory
-          && (descriptor.background === true) === background) return cached;
-        this.sharedWorkspaceCache.delete(key);
-      }
-      const remembered = this.store.get().kv[registry]?.[directory];
-      const { handle } = await ensureSharedWorkspace(this.requirePaseo(), remembered, directory, title, background);
-      this.sharedWorkspaceCache.set(key, handle);
-      if (remembered !== handle.id) {
-        await this.store.update((next) => {
-          next.kv[registry] = { ...next.kv[registry], [directory]: handle.id };
-        });
-      }
-      return handle;
+    const ensure = this.workspaceChain.then(() => {
+      const deadline = new Deadline(30_000, "shared workspace lookup");
+      return deadline.wait(async () => {
+        const cached = this.sharedWorkspaceCache.get(key);
+        if (cached) {
+          const descriptor = await cached.refresh().catch(() => null);
+          deadline.check();
+          if (descriptor && !descriptor.archivingAt && resolve(descriptor.workspaceDirectory) === directory
+            && (descriptor.background === true) === background) return cached;
+          this.sharedWorkspaceCache.delete(key);
+        }
+        const remembered = this.store.get().kv[registry]?.[directory];
+        const { handle } = await ensureSharedWorkspace(this.requirePaseo(), remembered, directory, title, background, () => deadline.check());
+        deadline.check();
+        this.sharedWorkspaceCache.set(key, handle);
+        if (remembered !== handle.id) {
+          await this.store.update((next) => {
+            next.kv[registry] = { ...next.kv[registry], [directory]: handle.id };
+          });
+        }
+        return handle;
+      });
     });
     this.workspaceChain = ensure.catch((error) => {
       console.error("[superagent] shared workspace ensure failed", error);

@@ -1100,7 +1100,7 @@ test("Router gets one correction attempt then records the final error and keeps 
   await f.engine.runEval("thread");
   assert.equal(attempts, 2);
   assert.equal(f.calls.creates, 0);
-  assert.equal(f.state.decisions.length, 1);
+  assert.equal(f.state.decisions.filter((d) => d.outcome === "unparsed").length, 1);
   assert.equal(f.state.decisions[0].outcome, "unparsed");
   assert.equal(f.state.decisions[0].raw, final);
   assert.match(f.state.decisions[0].rationale, /JSON syntax:/);
@@ -2126,6 +2126,7 @@ test("transient eval errors keep requeueing well past the unparsed circuit break
   // 看门狗重排门控:异常未达上限继续重排;unparsed 3 次与异常达上限都停。
   f.values.workingDir = "/mock/repo";
   f.engine.evalErrors.set("thread", 3);
+  f.state.threads[0].evalRetry.nextAt = oldTime;
   f.calls.evals.length = 0;
   await f.engine.reconcile();
   assert.deepEqual(f.calls.evals, ["thread"], "transient errors below the cap keep requeueing");
@@ -2732,4 +2733,282 @@ test("thread search includes the date and IM channel of retained closed conversa
   const found = await f.engine.searchRecords("2026-11-12 feishu");
   assert.match(found, /thr_previous thread closed.*day=2026-11-12/);
   assert.match(await f.engine.readRecord("thr_previous"), /IM day: 2026-11-12/);
+});
+
+// Router deadlines and idle leases.
+test("a stuck preparation releases the global evaluation queue", async t => {
+  const f = fixture(t, "completed");
+  f.state.tickets = [];
+  pendingTrigger(f.state);
+  f.state.threads.push(otherThread("thread-b"));
+  f.state.triggers.push({ ...f.state.triggers[0], id: "b", threadId: "thread-b", threadKey: "manual:thread-b" });
+  let preparing = false;
+  f.engine.refreshThreadRequests = async id => {
+    if (id === "thread") { preparing = true; await new Promise(() => {}); }
+  };
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  f.engine.evalQueued.add("thread");
+  f.engine.evalQueued.add("thread-b");
+  const draining = f.engine.drainEvalQueue();
+  await until(() => preparing);
+  t.mock.timers.tick(60_001);
+  await draining;
+  await until(() => !f.engine.evalInFlight);
+  assert.equal(f.state.triggers[0].status, "pending");
+  assert.equal(f.state.triggers[1].status, "evaluated");
+  assert.equal(f.state.threads[0].evalRetry.errors, 1);
+  assert.equal(f.calls.prompts.length, 1);
+});
+
+test("a hard evaluation deadline discards a late dispatch even when run ignores timeoutMs", async t => {
+  const f = fixture(t, "completed");
+  f.values.routerEvalTimeoutMin = 1;
+  const late = deferred();
+  let running = false;
+  f.ref("new-router").run = () => { running = true; return late.promise; };
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  const rejected = assert.rejects(evaluateRouter(f), /timed out/);
+  await until(() => running);
+  t.mock.timers.tick(60_001);
+  await rejected;
+  late.resolve({ lastMessage: JSON.stringify({ actions: [{ action: "dispatch", title: "late", mandate: "must never run" }] }) });
+  await setImmediate();
+  assert.equal(f.state.tickets.length, 1);
+  assert.equal(f.state.triggers[0].status, "pending");
+  assert.equal(f.state.decisions.length, 0);
+  assert.deepEqual(f.calls.reloads, ["new-router"]);
+  assert.equal(f.state.threads[0].router.dirty, true);
+  await f.engine.runEval("thread");
+  assert.equal(f.state.threads[0].router.agentId, "new-router-2");
+  assert.equal(f.state.triggers[0].status, "evaluated");
+});
+
+test("Router creation completing after preparation expiry archives its orphan", async t => {
+  const f = fixture(t, "completed");
+  const late = deferred();
+  f.controls.createRouterAgent = () => late.promise;
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  const rejected = assert.rejects(evaluateRouter(f), /Router preparation timed out/);
+  await until(() => f.calls.routerCreates.length === 1);
+  t.mock.timers.tick(60_001);
+  await rejected;
+  late.resolve(f.ref("late-router"));
+  await until(() => f.calls.archives.includes("late-router"));
+  assert.equal(f.state.threads[0].router, undefined);
+  assert.equal(f.calls.prompts.length, 0);
+  assert.equal(f.state.triggers[0].status, "pending");
+});
+
+test("a hung interrupt has its own deadline and cannot retain the evaluation lock", async t => {
+  const f = fixture(t, "completed");
+  pendingTrigger(f.state);
+  f.ref("new-router").run = async () => ({ status: "timeout" });
+  let cleaning = false;
+  f.ref("new-router").reload = () => { cleaning = true; return new Promise(() => {}); };
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  f.engine.evalQueued.add("thread");
+  const draining = f.engine.drainEvalQueue();
+  await until(() => cleaning);
+  t.mock.timers.tick(30_001);
+  await draining;
+  assert.equal(f.engine.evalInFlight, false);
+  assert.equal(f.engine.evalRuns.size, 0);
+  assert.equal(f.state.triggers[0].status, "pending");
+});
+
+test("idle Router retirement preserves the thread, result and running Worker; recall rebuilds it", async t => {
+  const f = fixture(t, "running");
+  await evaluateRouter(f, "remember this request");
+  const thread = f.state.threads[0];
+  const result = thread.latestResult;
+  const routerId = thread.router.agentId;
+  f.controls.parents.set("worker", routerId);
+  // Simulate an old same-workspace parent relation: it must be detached before archival.
+  f.controls.agentWorkspaces.set("worker", "role-workspace");
+  thread.router.lastUsedAt = oldTime;
+  f.ticket.startedAt = new Date().toISOString();
+  await f.engine.reconcile();
+  assert.equal(thread.router, null);
+  assert.equal(thread.state, "active");
+  assert.deepEqual(thread.latestResult, result);
+  assert.ok(f.calls.archives.includes(routerId));
+  assert.ok(!f.calls.archives.includes("worker"));
+  assert.ok(f.calls.detaches.includes("worker"));
+  const prompt = await evaluateRouter(f, "follow up");
+  assert.equal(thread.router.agentId, "new-router-2");
+  assert.match(prompt, /remember this request/);
+});
+
+test("idle retirement yields to a new message arriving while children are detached", async t => {
+  const f = fixture(t, "completed");
+  await evaluateRouter(f);
+  const thread = f.state.threads[0];
+  thread.router.lastUsedAt = oldTime;
+  const routerId = thread.router.agentId;
+  const detached = deferred();
+  f.controls.parents.set("worker", routerId);
+  f.ref("worker").detach = () => detached.promise;
+  const retiring = f.engine.retireThreadRouter("thread", Date.now() - 30 * 60_000);
+  await until(() => f.engine.retiringRouters.has("thread"));
+  await f.engine.dispatch({ threadId: "thread", task: "new message" });
+  detached.resolve();
+  await retiring;
+  assert.equal(thread.router.agentId, routerId);
+  assert.ok(!f.calls.archives.includes(routerId));
+});
+
+test("idle Router retirement protects live manual turns and pending messages", async t => {
+  for (const reason of ["running", "initializing", "permission", "pending"]) {
+    const f = fixture(t, "completed");
+    await evaluateRouter(f);
+    const routerId = f.state.threads[0].router.agentId;
+    f.state.threads[0].router.lastUsedAt = oldTime;
+    if (reason === "pending") pendingTrigger(f.state);
+    else if (reason === "permission") f.controls.pendingPermissions.set(routerId, [toolRequest]);
+    else f.controls.sessionStatuses.set(routerId, reason);
+    await f.engine.retireThreadRouter("thread", Date.now() - 30 * 60_000);
+    assert.equal(f.state.threads[0].router.agentId, routerId);
+    assert.ok(!f.calls.archives.includes(routerId));
+  }
+});
+
+test("a waiting Worker's idle lease expires across reloads and preserves shared workspaces and reports", async t => {
+  const f = fixture(t, "waiting");
+  f.ticket.ownsWorkspace = false;
+  f.ticket.report = "retained result";
+  f.controls.sessionStatuses.set("worker", "idle");
+  f.ref("worker").archive = async () => { throw new Error("temporarily offline"); };
+  await f.engine.expireIdleWorker("ticket");
+  assert.equal(f.ticket.status, "completed");
+  assert.equal(f.ticket.retireRequested, true);
+  assert.equal(f.ticket.workerAgentId, "worker");
+  f.ref("worker").archive = async () => { f.calls.archives.push("worker"); };
+  f.engine.retiringTickets.clear();
+  await f.engine.expireIdleWorker("ticket");
+  assert.equal(f.ticket.workerAgentId, null);
+  assert.equal(f.ticket.retireRequested, false);
+  assert.equal(f.ticket.report, "retained result");
+  assert.equal(f.ticket.subscribed, false);
+  assert.deepEqual(f.calls.workspaceArchives, []);
+  assert.deepEqual(f.calls.archives, ["worker"]);
+});
+
+test("waiting Worker retirement protects cross-thread messages, live runs and recent manual activity", async t => {
+  for (const reason of ["follows", "running", "permission", "recent"]) {
+    const f = fixture(t, "waiting");
+    f.controls.sessionStatuses.set("worker", "idle");
+    if (reason === "follows") {
+      f.state.threads.push(otherThread("thread-b"));
+      f.ticket.follows = ["thread-b"];
+      f.state.triggers.push({ id: "other", threadId: "thread-b", status: "pending", receivedAt: oldTime });
+    } else if (reason === "running") f.controls.sessionStatuses.set("worker", "running");
+    else if (reason === "permission") f.controls.pendingPermissions.set("worker", [toolRequest]);
+    else f.ref("worker").refresh = async () => ({ agent: { status: "idle", updatedAt: new Date().toISOString() } });
+    await f.engine.expireIdleWorker("ticket");
+    assert.equal(f.ticket.status, "waiting");
+    assert.equal(f.calls.archives.length, 0);
+  }
+});
+
+test("ordinary idle threads close automatically and new intake reactivates retained history", async t => {
+  const f = fixture(t, "completed");
+  f.ticket.workerAgentId = null;
+  f.state.threads[0].summary = "keep this summary";
+  await f.engine.reconcile();
+  assert.equal(f.state.threads[0].state, "closed");
+  await f.engine.dispatch({ threadId: "thread", task: "resume" });
+  assert.equal(f.state.threads[0].state, "active");
+  assert.equal(f.state.threads[0].summary, "keep this summary");
+  assert.ok(f.state.threads[0].lastActivityAt);
+});
+
+test("thread expiry rechecks activity after refresh and respects following workers and pending delivery", async t => {
+  for (const reason of ["new-input", "follower", "delivery", "request", "action"]) {
+    const f = fixture(t, "completed");
+    if (reason === "new-input") f.ref("worker").refresh = async () => {
+      await f.engine.dispatch({ threadId: "thread", task: "arrived during sweep" });
+      return { agent: { status: "idle" } };
+    };
+    if (reason === "follower") {
+      f.state.threads.push(otherThread("thread-b"));
+      f.state.tickets.push({ ...f.ticket, id: "other-ticket", threadId: "thread-b", status: "running", workerAgentId: null, follows: ["thread"] });
+    }
+    if (reason === "delivery") f.state.imDeliveries.push({ id: "unsent", threadId: "thread", status: "failed" });
+    if (reason === "request") f.ticket.pendingRequests = [toolRequest];
+    if (reason === "action") f.state.pendingActions.push({ id: "action", threadId: "thread", kind: "steer", attempts: 0 });
+    await f.engine.reconcile();
+    assert.equal(f.state.threads[0].state, "active", reason);
+  }
+});
+
+test("permission waits get one durable reminder and remain available for a formal answer", async t => {
+  const f = fixture(t, "running");
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  f.ticket.requestWaitSince = oldTime;
+  await f.engine.remindRequestWait("ticket");
+  await f.engine.remindRequestWait("ticket");
+  assert.equal(f.state.decisions.filter(d => /24 小时/.test(d.rationale)).length, 1);
+  assert.deepEqual(f.ticket.pendingRequests, [questionRequest]);
+  assert.equal(f.state.threads[0].state, "active");
+  const restored = SuperagentStateSchema.parse(f.state);
+  assert.ok(restored.tickets[0].requestWaitNotifiedAt);
+});
+
+test("evaluation retry backoff and circuit breaker survive restoration and reset on manual retry", async t => {
+  const f = fixture(t, "completed");
+  pendingTrigger(f.state);
+  f.values.workingDir = "";
+  f.engine.evalQueued.add("thread");
+  await f.engine.drainEvalQueue();
+  assert.equal(f.state.threads[0].evalRetry.errors, 1);
+  assert.ok(Date.parse(f.state.threads[0].evalRetry.nextAt) > Date.now());
+  f.engine.evalErrors.clear();
+  f.calls.evals.length = 0;
+  await f.engine.reconcile();
+  assert.deepEqual(f.calls.evals, []);
+  f.state.threads[0].evalRetry = { errors: 20, unparsed: 0, nextAt: null };
+  await f.engine.reconcile();
+  assert.deepEqual(f.calls.evals, []);
+  assert.equal(SuperagentStateSchema.parse(f.state).threads[0].evalRetry.errors, 20);
+  await f.engine.forceEval("thread");
+  assert.deepEqual(f.state.threads[0].evalRetry, { errors: 0, unparsed: 0, nextAt: null });
+  assert.deepEqual(f.calls.evals, ["thread"]);
+});
+
+test("an uncertain timed-out action is held for review and a late permission lookup cannot send it", async t => {
+  const f = fixture(t, "waiting");
+  const late = deferred();
+  f.engine.syncWorkerPermissions = () => late.promise;
+  f.state.decisions.push({ id: "decision", threadId: "thread", outcome: "steer", createdAt: oldTime });
+  f.state.pendingActions.push({ id: "action", threadId: "thread", decisionId: "decision", kind: "steer", ticketId: "ticket", text: "never send late", mode: "steer", attempts: 0, createdAt: oldTime });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  const action = f.engine.runPendingAction("action");
+  await until(() => f.state.pendingActions[0]?.attempts === 1);
+  t.mock.timers.tick(30_001);
+  await action;
+  late.resolve(false);
+  await setImmediate();
+  assert.equal(f.state.pendingActions.length, 0);
+  assert.equal(f.calls.sends.length, 0);
+  assert.match(f.state.decisions[0].rationale, /delivery uncertain/);
+  await f.engine.runPendingAction("action");
+  assert.equal(f.calls.sends.length, 0);
+});
+
+test("a hung shared workspace lookup releases the creation chain and fences its late result", async t => {
+  const f = fixture(t, "completed");
+  const late = deferred();
+  let calls = 0;
+  f.paseo.workspaces.ref = id => ({ id, refresh: () => ++calls === 1 ? late.promise : Promise.resolve({ background: true, workspaceDirectory: "/mock/repo" }) });
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  const failed = assert.rejects(f.engine.sharedWorkspaceFor("/mock/repo", BACKGROUND_WORKSPACE_TITLE, true), /timed out/);
+  await until(() => calls === 1);
+  t.mock.timers.tick(30_001);
+  await failed;
+  const recovered = await f.engine.sharedWorkspaceFor("/mock/repo", BACKGROUND_WORKSPACE_TITLE, true);
+  assert.equal(recovered.id, "role-workspace");
+  late.resolve({ background: true, workspaceDirectory: "/mock/repo" });
+  await setImmediate();
+  assert.equal(f.calls.creates, 0);
 });

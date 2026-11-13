@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { bounded } from "./deadline";
 import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { Ticket } from "../shared/model";
 import { beijingDate, slugify, WATCHDOG_AGENT_LABEL_VALUE } from "../shared/model";
@@ -281,7 +282,8 @@ export async function retireWorker(
 ): Promise<void> {
   if (ticket.workerAgentId) {
     try {
-      await paseo.agents.ref(ticket.workerAgentId).archive();
+      const agentId = ticket.workerAgentId;
+      await bounded(() => paseo.agents.ref(agentId).archive(), "Worker archive");
     } catch (error) {
       console.error("[superagent] worker archive failed", error);
     }
@@ -289,7 +291,8 @@ export async function retireWorker(
   // 共享工作区(默认 workspace / 档位工作区)由多个 Ticket 共用,永不归档。
   if (includeWorkspace && ticket.workspaceId && ticket.ownsWorkspace) {
     try {
-      await paseo.workspaces.ref(ticket.workspaceId).archive();
+      const workspaceId = ticket.workspaceId;
+      await bounded(() => paseo.workspaces.ref(workspaceId).archive(), "Worker workspace archive");
     } catch (error) {
       console.error("[superagent] workspace archive failed", error);
     }

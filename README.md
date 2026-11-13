@@ -68,6 +68,10 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 
 | 设置 | 说明 |
 |---|---|
+| Router 评估超时 | `routerEvalTimeoutMin`,默认 10 分钟,可设 1–60 分钟。准备与裁决共享总预算,准备阶段最多 1 分钟;中断、清理、动作与发送也有独立的等待期限。迟到裁决不执行;准备超时后才创建成功的 Router 自动归档。基础设施错误按 15 秒起、最多 5 分钟的退避间隔重试,连续 20 次后暂停并通知;解析失败连续三轮后暂停并通知。次数与退避时间落盘,「重新评估」重置。动作超时且结果不确定时暂停自动重发,交人确认 |
+| Router 空闲回收 | `routerIdleTimeoutMin`,默认 30 分钟,可设 1–1440 分钟。归档空闲 Router 并清空引用,保留 Thread,下次评估自动重建并恢复历史上下文;运行中的 Worker 继续工作。评估、待处理消息/动作/投递、人工运行中的 Router 或权限请求会暂缓回收 |
+| 对话空闲过期 | `threadIdleTimeoutMin`,默认 1440 分钟(24 小时),可设 5–43200 分钟。没有待处理工作时自动关闭 Thread 并回收遗留会话;有效入站、Worker 汇报与实际会话活动续期,巡检不续期。运行任务、待处理审批、跨线程活动或未送达回复会暂缓关闭。关闭后的新消息可重新激活仍被保留的线程;历史沿用现有保留上限。IM 跨日收口规则继续生效 |
+| Worker 待命回收 | `workerIdleTimeoutMin`,默认 1440 分钟(24 小时),可设 1–43200 分钟。长期空闲的 waiting 票据完结并退订全部线程,保留汇报,归档 Worker 与其独占工作区;共享工作区保留。回收意图落盘,失败后看门狗继续清理。有新消息、待执行动作、实际运行或审批时暂缓。审批/问题等待超过 24 小时提醒一次,保留请求供人工处理 |
 | 工作目录 | 绝对路径,默认的基础目录(**必填**)。共享目录隔离时,默认 Worker 使用按此目录创建的普通持久工作区「默认 workspace」(同一目录只建一个,id 记在插件状态里跨重启复用;被归档会按标题+目录找回或重建),Router 与看门狗另用同目录的后台工作区;独立 worktree 隔离时它是每个 Ticket 切 worktree 的基准仓库。`worktree` 隔离时必须位于 git 仓库内,否则对话页与设置页都会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式 |
 | Router provider/model | 设置页从 daemon 的 provider 快照中下拉选取(model id 原样带入,含 ACP 系的反斜杠 id;清单读取失败或所选 provider 未上报模型时退回手填)。留空自动选用宿主可用默认(claude → codex → opencode → 任意);填错时 Router 评估会报出可用 id |
 | thinking 档位(可选) | Router、默认 Worker 与每个具名档位都可独立选 thinking 档位(字段 `routerThinkingOptionId`/`workerThinkingOptionId`/档位 `thinkingOptionId`),候选来自所选 provider/model 的 `thinkingOptions`(如 pi 的 low/medium/high/max)。选「Provider 默认」时不传 `thinkingOptionId`,回落 provider 自己的默认(pi 为 `~/.pi/agent/settings.json` 的 `defaultThinkingLevel`);快照未上报清单时可手工填档位 id。Router 的档位用于新建或重建的 Router 会话(存量会话不受影响,可用 `paseo agent update <id> --thinking <档位>` 热切);Worker 的档位随首条任务传入,只用于新建或重试的 Worker;具名档位留空不继承默认 Worker 的档位。启动前会对照快照校验,非法档位报出可用 ID,不静默回退 |
