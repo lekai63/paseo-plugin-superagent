@@ -40,6 +40,7 @@ export type ToolOutcome = { ok: true; note: string } | { ok: false; error: strin
 /** 引擎的最小结构依赖,便于测试替身;编排工具缺省时相应工具调用返回可读错误。 */
 export interface DispatchMcpEngine {
   dispatch(input: DispatchInput): Promise<DispatchOutcome>;
+  beforeRecall?(agentId: string, name: string, args: unknown): string | null;
   /** Router 回读:按 ID 找回完整记录;不存在(或已清理)返回 null。 */
   readRecord?(id: string): Promise<string | null>;
   /** Router 跨线程总览:全部活跃线程及其未完结票据的存根。 */
@@ -56,7 +57,7 @@ export interface SuperagentMcpEndpoint {
   /** 普通 agent 会话的注入 URL(含密钥路径与 callerAgentId query)。 */
   urlFor(agentId: string): string;
   /** Router 会话的注入 URL(角色工具:superagent_list / superagent_read / superagent_search)。 */
-  routerUrl(): string;
+  routerUrl(agentId?: string): string;
   /** Worker 会话的注入 URL(角色工具按票据定位)。 */
   workerUrl(ticketId: string): string;
   stop(): Promise<void>;
@@ -133,7 +134,8 @@ function toolError(message: string) {
 }
 
 /** Router 的只读回读工具:ID → 完整记录(Chain of Recall)。 */
-function registerRouterTools(mcp: McpServer, engine: DispatchMcpEngine): void {
+function registerRouterTools(mcp: McpServer, engine: DispatchMcpEngine, agentId: string | null): void {
+  const guard = (name: string, args: unknown) => agentId ? engine.beforeRecall?.(agentId, name, args) : null;
   mcp.registerTool(
     READ_TOOL_NAME,
     {
@@ -148,6 +150,8 @@ function registerRouterTools(mcp: McpServer, engine: DispatchMcpEngine): void {
       }),
     },
     async ({ id }) => {
+      const blocked = guard(READ_TOOL_NAME, { id });
+      if (blocked) return toolError(blocked);
       if (!engine.readRecord) return toolError(`${READ_TOOL_NAME} is not available`);
       try {
         const text = await engine.readRecord(id);
@@ -178,6 +182,8 @@ function registerRouterTools(mcp: McpServer, engine: DispatchMcpEngine): void {
       inputSchema: z.object({}),
     },
     async () => {
+      const blocked = guard(LIST_TOOL_NAME, {});
+      if (blocked) return toolError(blocked);
       if (!engine.listThreads) return toolError(`${LIST_TOOL_NAME} is not available`);
       try {
         return { content: [{ type: "text" as const, text: await engine.listThreads() }] };
@@ -201,6 +207,8 @@ function registerRouterTools(mcp: McpServer, engine: DispatchMcpEngine): void {
       }),
     },
     async ({ query }) => {
+      const blocked = guard(SEARCH_TOOL_NAME, { query });
+      if (blocked) return toolError(blocked);
       if (!engine.searchRecords) return toolError(`${SEARCH_TOOL_NAME} is not available`);
       try {
         return {
@@ -280,7 +288,7 @@ function registerToolsFor(
   caller: { agentId: string | null; role: "router" | "worker" | null; ticketId: string | null },
 ): void {
   if (caller.role === "router") {
-    registerRouterTools(mcp, engine);
+    registerRouterTools(mcp, engine, caller.agentId);
     return;
   }
   if (caller.role === "worker" && caller.ticketId) {
@@ -383,8 +391,8 @@ export async function startDispatchMcpServer(
     urlFor(agentId: string) {
       return `http://${host}:${port}${path}?callerAgentId=${encodeURIComponent(agentId)}`;
     },
-    routerUrl() {
-      return `http://${host}:${port}${path}?role=router`;
+    routerUrl(agentId?: string) {
+      return `http://${host}:${port}${path}?role=router${agentId ? `&callerAgentId=${encodeURIComponent(agentId)}` : ""}`;
     },
     workerUrl(ticketId: string) {
       return `http://${host}:${port}${path}?role=worker&ticket=${encodeURIComponent(ticketId)}`;

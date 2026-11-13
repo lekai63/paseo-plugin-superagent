@@ -1,7 +1,7 @@
-import type { PaseoApi, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
+import type { PaseoApi, PaseoAgent, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { SuperagentState, Thread, Ticket, Trigger, Decision } from "../shared/model";
 import { followsOf } from "../shared/execution";
-import { detachRoleChildren } from "./workspace";
+import { agentUsesBackgroundWorkspace, detachRoleChildren } from "./workspace";
 import {
   newId,
   truncate,
@@ -16,7 +16,7 @@ import {
 } from "../shared/model";
 
 /**
- * Router 层:每次评估独立的 Paseo agent(轻量模型),只做语义裁决,不执行任务。
+ * Router 层:每个活跃 Thread 专属的 Paseo agent(轻量模型),只做语义裁决,不执行任务。
  * 对应文章双层架构的 Router:统一承接、批处理评估、向人汇报。
  */
 
@@ -24,18 +24,37 @@ import {
 export const ROUTER_LABEL = ROUTER_AGENT_LABEL;
 export const ROUTER_LABEL_VALUE = ROUTER_AGENT_LABEL_VALUE;
 export const TICKET_LABEL = "superagent.ticket";
+export const ROUTER_THREAD_LABEL = "superagent.thread";
+/** 常规评估累计到此规模时重建;较小模型在其窗口的 70% 提前重建。 */
+export const ROUTER_CONTEXT_LIMIT = 64_000;
+export const ROUTER_EVALUATION_LIMIT = 40;
+
+export function routerSessionId(agent: PaseoAgent | null | undefined): string | null {
+  return agent?.persistence?.sessionId ?? agent?.runtimeInfo?.sessionId ?? null;
+}
+
+export async function routerCompactionSeq(handle: PaseoAgentHandle): Promise<number | null> {
+  try {
+    const page = await handle.timeline.refetch({ direction: "tail", limit: 60 });
+    return Math.max(0, ...page.entries.filter((entry) => entry.item.type === "compaction").map((entry) => entry.seqStart));
+  } catch { return null; }
+}
+
 
 /**
- * 固定规则在每次独立评估时初始化。ACP 系 provider(如 zcode-acp)
+ * 固定规则在各线程的会话初始化或重建时送达。ACP 系 provider(如 zcode-acp)
  * 不保证采用 systemPrompt,因此通过首轮消息的稳定前缀送达。
  */
 const ROUTER_RULES = [
   "You are the Router of a super-agent orchestration layer running inside Paseo.",
   "You receive batches of events (triggers) for one conversation thread and decide what happens next.",
-  "Each evaluation uses a fresh session and decides the new triggers of ONE thread,",
-  "identified by its ID; never answer another thread's events here. Other active threads appear",
-  'only as stubs under "Other active threads": you may steer, cancel or retry their tickets, but',
-  "do not reply to or close them here.",
+  "Each session belongs to ONE thread. Each evaluation decides only its new triggers,",
+  "identified by its ID; never answer another thread's events here. Find other threads, including",
+  "previous IM days and other IM channels, with superagent_search or superagent_list, then read",
+  "their records before steering, canceling, retrying or subscribing. Do not reply to or close them here.",
+  "When a terse IM continuation or approval has no context in this thread, recall earlier threads",
+  "with superagent_list/search before guessing its target. Pending requests and current authorization",
+  "must still be verified against the exact ticket; old conversation text never grants consent.",
   "Later plugin configuration updates replace older configuration and preferences, never the event text.",
   "You are decision-only: never execute tasks yourself. Apart from the orchestrator's own",
   "read-only recall tools (superagent_list, superagent_read, superagent_search), do NOT call any",
@@ -44,8 +63,10 @@ const ROUTER_RULES = [
   "(a trigger, worker report or history stub), to find a record you only remember fragments of",
   "(keyword search), and to inspect a ticket of another thread before steering it;",
   "if they are unavailable, decide from the prompt alone.",
-  "Memory discipline: this conversation is not durable storage — each evaluation starts fresh.",
-  "Use the supplied thread history and recall tools. Anything that must hold until later (a promised follow-up,",
+  "Recall once for each missing fact; never poll live worker state. A single evaluation permits",
+  "at most 12 recall calls and 3 calls with identical arguments. Return a verdict within that budget.",
+  "Memory discipline: this conversation is not durable storage — it may be compacted or rebuilt.",
+  "Use supplied current state as authoritative over old messages. Anything that must hold until later (a promised follow-up,",
   "a condition you are waiting for) belongs in a ticket mandate or in your reply text, never only",
   "in your working memory. And before stop, or any steer/cancel/retry against another thread when",
   "the target is not certain from the stubs, reconcile the full picture with superagent_list first",
@@ -71,8 +92,8 @@ const ROUTER_RULES = [
   '  explain it. Optional "unsubscribe": true when this thread should NOT route follow-ups',
   "  directly to that worker.",
   "- steer: send an instruction into the Worker of one active ticket (use its exact id) —",
-  "  tickets of this thread are listed below, tickets of other active threads under",
-  '  "Other active threads". "mode":"steer" (the default) lets the running turn absorb the',
+  "  tickets of this thread are listed below; find other threads with the recall tools.",
+  '  "mode":"steer" (the default) lets the running turn absorb the',
   '  instruction; "mode":"interrupt" aborts the current turn and takes over. Use it to redirect',
   "  a worker, add context, or reply to a worker's question reaching you through the thread.",
   "  Follow-up messages on a thread with subscribed workers go straight to EVERY subscribed",
@@ -102,8 +123,8 @@ const ROUTER_RULES = [
   '  again. Terminal tickets of this thread are listed under "Recently finished tickets" below;',
   "  terminal tickets of other threads are not listed — recall them with superagent_list or",
   "  superagent_search.",
-  "- subscribe: make the Worker of an existing active ticket (typically one listed under",
-  '  "Other active threads") ALSO follow this thread: later messages here go straight to it,',
+  "- subscribe: make the Worker of an existing active ticket (find it with the recall tools)",
+  "  ALSO follow this thread: later messages here go straight to it,",
   "  and its report comes back here as well. Use it when this conversation turns out to be about",
   "  work that worker is already doing; pair it with a steer telling the worker what it needs.",
   "- reply: answer directly ONLY when no tools or research are needed: status of this thread,",
@@ -270,9 +291,6 @@ function quoteLine(trigger: Trigger): string | null {
 
 /** 提示词中可见的近期终态票据数:retry/cancel 目标的基本记忆(Router 重建或历史截断后仍可用)。 */
 const RECENT_FINISHED_TICKETS = 5;
-/** 「其他活跃线程」存根上限:跨线程指挥的可见性窗口,细节交给 superagent_read。 */
-const OTHER_ACTIVE_THREADS = 6;
-const OTHER_THREAD_TICKETS = 6;
 
 /** 投机执行(§3.4)规则:仅在设置开启时进入 Router 规则(开关变化即触发规则重发)。 */
 const SPECULATIVE_RULES = [
@@ -330,7 +348,7 @@ export function composeRouterInstructions(
   return lines.join("\n");
 }
 
-/** 独立评估携带当前事件、任务快照和有界历史;稳定规则放在动态数据之前。 */
+/** 评估追加当前事件与权威任务快照,仅初始化或恢复时补有界历史。 */
 export function composeEvalPrompt({
   thread, batch, state, worker, routerInstructions,
   includeInstructions = true, includeHistory = true, contextTriggers = [], chatter = [], options = {},
@@ -394,30 +412,6 @@ export function composeEvalPrompt({
       const branch = ticket.branchName ? ` branch=${ticket.branchName}` : "";
       const error = ticket.status === "failed" && ticket.lastError ? ` error="${truncate(ticket.lastError, 120)}"` : "";
       lines.push(`- [${ticket.id}] "${ticket.title}" status=${ticket.status}${profileTag(ticket)}${branch}${error}`);
-    }
-    lines.push("");
-  }
-  // 跨线程可见性:其他活跃线程的非终态票据存根(steer/cancel/retry 的合法目标),
-  // 细节与全文交给 superagent_list / superagent_read 回读。
-  const otherThreads = state.threads
-    .filter((candidate) => candidate.id !== thread.id && candidate.state === "active"
-      && state.tickets.some((ticket) => ticket.threadId === candidate.id
-        && !TERMINAL_TICKET_STATUSES.includes(ticket.status)))
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    .slice(0, OTHER_ACTIVE_THREADS);
-  if (otherThreads.length > 0) {
-    lines.push(
-      "## Other active threads (stubs — steer/cancel/retry may target their tickets;",
-      "recall details with superagent_read)",
-    );
-    for (const other of otherThreads) {
-      lines.push(`- thread ${other.id} "${truncate(other.title, 120)}"`);
-      const otherTickets = state.tickets
-        .filter((ticket) => ticket.threadId === other.id && !TERMINAL_TICKET_STATUSES.includes(ticket.status))
-        .slice(0, OTHER_THREAD_TICKETS);
-      for (const ticket of otherTickets) {
-        lines.push(`  - [${ticket.id}] "${ticket.title}" status=${ticket.status} subscribed=${ticket.subscribed}${profileTag(ticket)}${extraTags(ticket)}`);
-      }
     }
     lines.push("");
   }
@@ -674,37 +668,44 @@ export function newDecision(
   };
 }
 
-/**
- * 每次评估新建 Router agent,旧会话在替换成功后归档,最近一轮保留供诊断。
- * 先 detach 旧会话的 Worker,避免归档级联影响执行中的工作。
- * 返回 error 表示 provider 尚未就绪。
- */
+/** 每个线程复用自己的原生会话;超限、配置变化或半轮失败才换建。 */
 export async function ensureRouter(
   paseo: PaseoApi,
-  state: SuperagentState,
+  thread: Thread,
   provider: string,
   ensureWorkspace: () => Promise<PaseoWorkspaceHandle>,
   instructions: string,
+  configHash: string,
   thinkingOptionId: string = "",
-): Promise<{ handle: PaseoAgentHandle; agentId: string; created: true } | { error: string }> {
-  const remembered = state.kv.routerAgentId;
+): Promise<{ handle: PaseoAgentHandle; agentId: string; created: boolean; sessionId: string | null }> {
+  const remembered = thread.router;
   let previous: PaseoAgentHandle | null = null;
-  if (remembered) {
-    const handle = paseo.agents.ref(remembered);
-    const refetched = await handle.refresh().catch((error) => {
-      console.error("[superagent] router refresh failed, recreating", error);
-      return null;
-    });
-    if (refetched && !refetched.agent.archivedAt) {
+  if (remembered?.agentId) {
+    const handle = paseo.agents.ref(remembered.agentId);
+    const live = await handle.refresh(); // 无法确认旧会话状态时重试,不生成失联副本。
+    if (live && !live.agent.archivedAt) {
+      const owner = live.agent.labels?.[ROUTER_THREAD_LABEL];
+      if (owner && owner !== thread.id) throw new Error(`Router ${handle.id} belongs to another thread`);
       previous = handle;
+      const usage = live.agent.lastUsage;
+      const limit = Math.min(ROUTER_CONTEXT_LIMIT, (usage?.contextWindowMaxTokens ?? Infinity) * 0.7);
+      const context = usage?.contextWindowUsedTokens ?? usage?.inputTokens ?? 0;
+      const currentSession = routerSessionId(live.agent);
+      if (!remembered.dirty && remembered.provider === provider && remembered.configHash === configHash
+        && remembered.evaluations < ROUTER_EVALUATION_LIMIT && context < limit
+        && !(remembered.sessionId && currentSession && remembered.sessionId !== currentSession)
+        && await agentUsesBackgroundWorkspace(paseo, live.agent)) {
+        if (live.agent.status === "running" || live.agent.status === "initializing") {
+          throw new Error(`Router ${handle.id} is busy; evaluation will retry when idle`);
+        }
+        return { handle, agentId: handle.id, created: false, sessionId: currentSession };
+      }
     }
   }
-  if (!provider) return { error: "router provider is not configured" };
   if (previous) await detachRoleChildren(paseo, previous.id);
+  const workspace = await ensureWorkspace();
   let handle: PaseoAgentHandle;
   try {
-    const workspace = await ensureWorkspace();
-    // 回读工具由 session_open 转换注入,不写入保存配置(与插件注入同名会冲突)。
     handle = await workspace.agents.create({
       config: {
         provider,
@@ -712,18 +713,20 @@ export async function ensureRouter(
         ...decisionOnlyOptions(provider),
         ...(thinkingOptionId ? { thinkingOptionId } : {}),
       },
-      title: "Superagent Router",
-      labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE },
+      title: `Superagent Router · ${truncate(thread.title, 70)}`,
+      labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE, [ROUTER_THREAD_LABEL]: thread.id },
     });
   } catch (error) {
-    // provider 侧的失败往往只有 "Internal error",补上 provider 便于定位。
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`router agent creation failed (provider "${provider}"): ${message}`, { cause: error });
+    throw new Error(`router agent creation failed (provider "${provider}"): ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
   if (previous) {
-    await previous.archive().catch((error) => console.error("[superagent] previous router archive failed", error));
+    try { await previous.archive(); }
+    catch (error) {
+      await handle.archive().catch(() => {});
+      throw error;
+    }
   }
-  return { handle, agentId: handle.id, created: true };
+  return { handle, agentId: handle.id, created: true, sessionId: routerSessionId(handle.current()) };
 }
 
 /** 读取 agent 时间线末尾最后一条 assistant 消息(Worker 汇报 / Router 裁决都用它)。 */

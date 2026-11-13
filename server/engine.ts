@@ -1,5 +1,8 @@
-import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
+import type { PaseoApi, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
 import { resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { dailyImThreadKey, imConversationKey, imDay } from "../shared/im-threads";
+import { DecisionBudget } from "./decision-budget";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
 import { followsOf, subscribesTo } from "../shared/execution";
@@ -39,14 +42,15 @@ import {
   ensureRouter,
   newDecision,
   parseVerdict,
-  readLastAssistantMessage,
   routerUsesSystemPrompt,
+  routerSessionId,
+  routerCompactionSeq,
   type RouterWorkerEnvironment,
 } from "./router";
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
 import type { ToolOutcome } from "./mcp-server";
 import { matchWorkerProfile, resolveProviderSelection, validateProviderMode, validateProviderThinkingOption } from "./providers";
-import { BACKGROUND_WORKSPACE_TITLE, ensureSharedWorkspace } from "./workspace";
+import { BACKGROUND_WORKSPACE_TITLE, ensureSharedWorkspace, detachRoleChildren } from "./workspace";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 import { deliveryPreview, splitImReply } from "./im-replies";
 import {
@@ -64,7 +68,7 @@ import {
  * Superagent 引擎:整个编排层的驱动核心。
  *
  * 数据流(对齐文章的事件驱动模型):
- *   dispatch() → fast-path 截断/放行 → Thread 归属(引用回复优先归入被引用消息的线程)
+ *   dispatch() → fast-path 截断/放行 → Thread 归属(IM 按渠道/账号/聊天/北京时间日,同日引用保留归属)
  *     ├─ 线程有活跃订阅(含跟随该线程的其他线程票据)且有会话 → 全部直通(零 LLM)
  *     └─ 否则(或旁听到的 context-only 消息)积攒 → 批窗口合并 → 串行 Router 评估 → 裁决执行
  *   裁决的副作用动作(steer/cancel/retry/stop)立案成 pendingActions 记录,执行成功
@@ -169,7 +173,7 @@ export interface DispatchInput {
   kind?: "manual" | "agent";
   /** IM 触发:来源聊天信息与稳定线程键(feishu:chat:<id> / qq:group:<id> 等)。 */
   origin?: TriggerOrigin;
-  /** IM 触发的线程关联键:同键消息归属同一 Thread,跨消息延续订阅与记忆。 */
+  /** 非 IM 的稳定关联键;IM 来源键只作兼容,实际按 origin 会话和日期划分。 */
   threadKey?: string;
   /** IM 消息引用/回复的平台消息 id(父消息在前):命中本地记录时归入其线程并内联原文。 */
   replyTo?: string[];
@@ -218,6 +222,9 @@ export class SuperagentEngine {
   private lastWatchdogNote: string | null = null;
   /** LLM 看门狗巡检进行中(单飞:一次巡检没结束不起下一次)。 */
   private patrolInFlight = false;
+  private decisionBudgets = new Map<string, DecisionBudget>();
+  /** 可注入时钟用于 IM 跨日边界,不受宿主时区影响。 */
+  now = (): Date => new Date();
   private replySink: ReplySink | null = null;
   private settingsValues: SuperagentSettingsValues = SETTINGS_DEFAULTS;
 
@@ -326,17 +333,24 @@ export class SuperagentEngine {
     }
 
     const state = this.store.get();
+    const received = this.now();
+    const day = input.origin ? imDay(received) : undefined;
+    const conversation = input.origin ? imConversationKey(input.origin) : undefined;
+    const key = conversation && day ? dailyImThreadKey(conversation, day) : input.threadKey;
     const linked = input.origin && input.replyTo?.length ? this.resolveQuoted(state, input.origin, input.replyTo) : null;
     let thread: Thread | undefined;
-    if (input.threadId) {
+    if (input.origin) {
+      // 日界线和渠道隔离优先于引用与外部指定的 threadId;旧消息仍作为引用上下文。
+      const quoted = linked?.threadId ? state.threads.find((t) => t.id === linked.threadId) : undefined;
+      const specified = input.threadId ? state.threads.find((t) => t.id === input.threadId) : undefined;
+      thread = quoted && quoted.imDay === day ? quoted
+        : specified && specified.imDay === day && specified.imConversationKey === conversation ? specified
+          : state.threads.find((t) => t.key === key);
+    } else if (input.threadId) {
       thread = state.threads.find((t) => t.id === input.threadId);
       if (!thread) throw new Error(`thread ${input.threadId} not found`);
-    } else if (linked?.threadId && state.threads.some((t) => t.id === linked.threadId)) {
-      // 引用回复(§3.2 Thread = 同一话题):回复哪条已知消息/答复,就归入那条消息的线程。
-      thread = state.threads.find((t) => t.id === linked.threadId);
-    } else if (input.threadKey) {
-      // IM 触发:同一聊天固定 Thread,订阅直通与 Router 记忆跨消息延续。
-      thread = state.threads.find((t) => t.key === input.threadKey);
+    } else if (key) {
+      thread = state.threads.find((t) => t.key === key);
     }
     if (thread && thread.state === "closed" && admission.status === "pending") {
       // 关闭线程上的新事件重新激活线程(被过滤的消息不重开)。
@@ -350,14 +364,15 @@ export class SuperagentEngine {
     }
 
     const triggerId = newId("trg");
-    const now = new Date().toISOString();
+    const now = received.toISOString();
     const sender = input.sender?.trim() || "user";
     const title = (input.title?.trim() || text.split("\n")[0] || "task").slice(0, 120);
 
     if (!thread) {
       thread = {
         id: newId("thr"),
-        key: input.threadKey ?? `manual:${newId("k")}`,
+        key: key ?? `manual:${newId("k")}`,
+        ...(day ? { imDay: day, imConversationKey: conversation } : {}),
         title,
         state: "active",
         summary: null,
@@ -608,7 +623,7 @@ export class SuperagentEngine {
     ids: string[],
   ): { threadId: string | null; quote: NonNullable<Trigger["quote"]> } {
     const sameChat = (other: TriggerOrigin | null | undefined) =>
-      other?.channel === origin.channel && other.chatId === origin.chatId;
+      other?.channel === origin.channel && other.chatId === origin.chatId && other.accountId === origin.accountId;
     let threadId: string | null = null;
     let quote: NonNullable<Trigger["quote"]> = { messageId: ids[0], triggerId: null, sender: null, text: null };
     ids.forEach((id, index) => {
@@ -804,270 +819,297 @@ export class SuperagentEngine {
     };
     const ruleOptions = { speculative: this.settingsValues.speculativeEnabled };
     const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions, ruleOptions);
-    // Router 与看门狗落在专用后台工作区,与普通 Worker 工作区分离。
-    // 回读/检索工具(superagent_list/read/search)由 session_open 转换注入,不经 agent config。
+    const configHash = createHash("sha256").update(JSON.stringify([
+      instructions, routerProvider, this.settingsValues.routerThinkingOptionId.trim(),
+    ])).digest("hex");
+    // 旧版只有全局 Router,不能把它的混合历史认作当前线程的记忆。
+    const legacyId = state.kv.routerAgentId && !state.threads.some((t) => t.router?.agentId === state.kv.routerAgentId)
+      ? state.kv.routerAgentId : null;
+    if (legacyId) await detachRoleChildren(paseo, legacyId);
     const router = await ensureRouter(
-      paseo,
-      state,
-      routerProvider,
+      paseo, thread, routerProvider,
       () => this.sharedWorkspaceFor(this.settingsValues.workingDir, BACKGROUND_WORKSPACE_TITLE, true),
-      instructions,
-      this.settingsValues.routerThinkingOptionId.trim(),
+      instructions, configHash, this.settingsValues.routerThinkingOptionId.trim(),
     );
-    if ("error" in router) throw new Error(router.error);
     const routerAgentId = router.agentId;
-    if (state.kv.routerAgentId !== routerAgentId || state.kv.routerProvider !== routerProvider) {
-      await this.store.update((next) => {
-        next.kv.routerAgentId = routerAgentId;
-        next.kv.routerProvider = routerProvider;
-      });
-    }
-
-    // 2. 每次新会话都由持久状态恢复窗口;不依赖旧会话的已读游标。
-    const contextTriggers = state.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered")
-      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt)).slice(-8);
-    const chatter = this.chatterFor(state, threadId, batch);
-    const prompt = composeEvalPrompt({
-      thread,
-      batch,
-      state,
-      routerInstructions: this.settingsValues.routerInstructions,
-      worker,
-      includeInstructions: !routerUsesSystemPrompt(routerProvider),
-      includeHistory: true,
-      contextTriggers,
-      chatter,
-      options: ruleOptions,
+    const remembered = router.created ? null : thread.router;
+    await this.store.update((next) => {
+      const target = next.threads.find((t) => t.id === threadId);
+      if (!target || target.state !== "active") return;
+      target.router = remembered ?? {
+        agentId: routerAgentId, provider: routerProvider, configHash, sessionId: router.sessionId,
+        initialized: false, dirty: false, evaluations: 0, compactionSeq: 0, triggerIds: [],
+      };
+      next.kv.routerAgentId = routerAgentId; // 最近一次 Router,仅供旧客户端和诊断入口。
+      next.kv.routerProvider = routerProvider;
     });
-    const evalDeadline = Date.now() + ROUTER_EVAL_TIMEOUT_MS;
-    const result = await router.handle.run(prompt, { timeoutMs: ROUTER_EVAL_TIMEOUT_MS });
-    let replyText =
-      result.lastMessage?.trim() || (await readLastAssistantMessage(paseo, routerAgentId)) || "";
+    if (legacyId) await paseo.agents.ref(legacyId).archive();
+    if (this.store.get().threads.find((t) => t.id === threadId)?.state !== "active") {
+      if (router.created) await router.handle.archive();
+      return;
+    }
+    const compactionSeq = await routerCompactionSeq(router.handle);
+    const restore = router.created || !remembered?.initialized || compactionSeq === null
+      || compactionSeq > (remembered.compactionSeq ?? 0);
+    const unseenContext = state.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered"
+      && (restore || !remembered?.triggerIds.includes(trigger.id)))
+      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+    const contextTriggers = unseenContext.slice(-8);
+    const chatter = this.chatterFor(state, threadId, batch).filter((t) => restore || !remembered?.triggerIds.includes(t.id));
+    const prompt = composeEvalPrompt({
+      thread, batch, state, worker, routerInstructions: this.settingsValues.routerInstructions,
+      includeInstructions: restore && !routerUsesSystemPrompt(routerProvider),
+      includeHistory: restore, contextTriggers, chatter, options: ruleOptions,
+    });
+    // 半轮失败/超时/进程崩溃都留下 dirty,下轮从持久状态重建,避免重复执行旧裁决。
+    await this.store.update((next) => {
+      const current = next.threads.find((t) => t.id === threadId)?.router;
+      if (current?.agentId === routerAgentId) current.dirty = true;
+    });
+    this.decisionBudgets.set(routerAgentId, new DecisionBudget());
+    try {
+      const evalDeadline = Date.now() + ROUTER_EVAL_TIMEOUT_MS;
+      const result = await this.runDecision(router.handle, prompt, ROUTER_EVAL_TIMEOUT_MS);
+      let replyText =
+        result.lastMessage?.trim() || "";
 
-    // 3. 解析失败时把具体错误发回同一 Router,预算内仅纠正一次;期间不执行任何动作。
-    let parsed = parseVerdict(replyText);
-    state = this.store.get();
-    // 评估期间线程可能被关闭;丢弃迟到裁决,不能重新派发已取消的工作。
-    if (
-      state.threads.find((t) => t.id === threadId)?.state !== "active" ||
-      batch.some((trigger) => state.triggers.find((t) => t.id === trigger.id)?.status !== "pending")
-    ) return;
-    const remainingMs = evalDeadline - Date.now();
-    if ("error" in parsed && remainingMs > 0) {
-      const corrected = await router.handle.run(composeVerdictRepairPrompt(threadId, parsed.error), { timeoutMs: remainingMs });
-      replyText = corrected.lastMessage?.trim() || (await readLastAssistantMessage(paseo, routerAgentId)) || "";
-      parsed = parseVerdict(replyText);
+      // 3. 解析失败时把具体错误发回同一 Router,预算内仅纠正一次;期间不执行任何动作。
+      let parsed = parseVerdict(replyText);
       state = this.store.get();
-      // 人工关闭或消费触发同样优先于迟到的纠正结果。
+      // 评估期间线程可能被关闭;丢弃迟到裁决,不能重新派发已取消的工作。
       if (
         state.threads.find((t) => t.id === threadId)?.state !== "active" ||
         batch.some((trigger) => state.triggers.find((t) => t.id === trigger.id)?.status !== "pending")
       ) return;
-    }
-    // 纠正后仍失败才记一次 unparsed,触发保留 pending,连续失败计数防失控循环。
-    const recordUnparsed = async (reason: string) => {
-      this.evalFailures.set(threadId, (this.evalFailures.get(threadId) ?? 0) + 1);
-      await this.store.update((next) => {
-        next.decisions.push(
-          newDecision(threadId, batch.map((t) => t.id), "unparsed", {
-            rationale: reason,
-            raw: truncate(replyText, 1200),
-          }),
-        );
-      });
-    };
-    if ("error" in parsed) {
-      await recordUnparsed(parsed.error);
-      return;
-    }
-    // dispatch 兜底:mandate 仅剩省略号时按解析失败处理(parseVerdict 已拒绝此类候选,
-    // 此处防解析路径放宽后空工单漏网),整批触发同样保留 pending 供重试。
-    const mandateBlock = parsed.verdict.actions
-      .filter((action): action is Extract<RouterAction, { action: "dispatch" }> => action.action === "dispatch")
-      .map((action) => dispatchMandateIssue(action.mandate))
-      .find((issue): issue is string => issue !== null);
-    if (mandateBlock) {
-      await recordUnparsed(mandateBlock);
-      return;
-    }
-    for (const action of parsed.verdict.actions) {
-      if (action.action !== "respond") continue;
-      const target = state.tickets.find((ticket) => ticket.id === action.ticketId);
-      if (!target?.pendingRequests?.some((request) => request.id === action.requestId)) {
-        await recordUnparsed(`respond must name a current pending request: ticketId=${action.ticketId} requestId=${action.requestId}`);
+      const remainingMs = evalDeadline - Date.now();
+      if ("error" in parsed && remainingMs > 0) {
+        const corrected = await this.runDecision(router.handle, composeVerdictRepairPrompt(threadId, parsed.error), remainingMs);
+        replyText = corrected.lastMessage?.trim() || "";
+        parsed = parseVerdict(replyText);
+        state = this.store.get();
+        // 人工关闭或消费触发同样优先于迟到的纠正结果。
+        if (
+          state.threads.find((t) => t.id === threadId)?.state !== "active" ||
+          batch.some((trigger) => state.triggers.find((t) => t.id === trigger.id)?.status !== "pending")
+        ) return;
+      }
+      // 纠正后仍失败才记一次 unparsed,触发保留 pending,连续失败计数防失控循环。
+      const recordUnparsed = async (reason: string) => {
+        this.evalFailures.set(threadId, (this.evalFailures.get(threadId) ?? 0) + 1);
+        await this.store.update((next) => {
+          next.decisions.push(
+            newDecision(threadId, batch.map((t) => t.id), "unparsed", {
+              rationale: reason,
+              raw: truncate(replyText, 1200),
+            }),
+          );
+        });
+      };
+      if ("error" in parsed) {
+        await recordUnparsed(parsed.error);
         return;
       }
-    }
-    this.evalFailures.delete(threadId);
-    this.evalErrors.delete(threadId);
-    const verdict = parsed.verdict;
-
-    // 4. 执行裁决:每个动作一条 Decision,带副作用的动作另立案待执行记录,一次落盘
-    //    (先落盘后副作用);stop 之后的动作作废,不再立案。
-    const triggerIds = batch.map((t) => t.id);
-    const actions = verdict.actions;
-    const decisions: Decision[] = [];
-    const createdTickets: Ticket[] = [];
-    /** 与已立案动作对齐的待执行记录;dispatch/reply/ignore 没有记录(null)。 */
-    const actionRecords: (PendingAction | null)[] = [];
-    const replies: string[] = [];
-    /** subscribe 动作:落盘时把票据挂到本线程(本线程票据恢复 subscribed,其他线程票据加入 follows)。 */
-    const subscribeTickets: string[] = [];
-    let liveSpeculative = state.tickets.filter((t) => t.speculative && !TERMINAL_TICKET_STATUSES.includes(t.status)).length;
-    let summary: string | null = null;
-    for (const action of actions) {
-      const decision = newDecision(threadId, triggerIds, action.action);
-      if (action.action === "dispatch") {
-        // 投机执行仅在设置开启时生效;并发上限内才立案,超出的直接丢弃(记入裁决)。
-        const speculative = Boolean(action.speculative) && this.settingsValues.speculativeEnabled;
-        if (speculative && liveSpeculative >= MAX_SPECULATIVE_TICKETS) {
-          decision.outcome = "ignore";
-          decision.rationale = `speculative dispatch "${truncate(action.title, 80)}" dropped: ${liveSpeculative} speculative tickets already running (limit ${MAX_SPECULATIVE_TICKETS})`;
-          decisions.push(decision);
-          actionRecords.push(null);
-          continue;
-        }
-        if (speculative) liveSpeculative += 1;
-        // 档位只能取自设置名单;未知名字退回默认 Worker 并记入裁决,派发本身不失败。
-        const choice = matchWorkerProfile(action.profile, this.settingsValues.workerProfiles, DEFAULT_WORKER_PROFILE);
-        if (choice.note) decision.rationale = choice.note;
-        const ticket: Ticket = {
-          id: newId("tkt"),
-          threadId,
-          title: action.title,
-          mandate: action.mandate,
-          status: "pending",
-          workerAgentId: null,
-          pendingRequests: [],
-          workspaceId: null,
-          ownsWorkspace: null,
-          branchName: null,
-          profile: choice.profile,
-          provider: null,
-          startedAt: null,
-          attempts: 0,
-          // 投机执行不订阅线程:闲聊与后续消息不打扰它,结果经汇报回流。
-          subscribed: speculative ? false : !action.unsubscribe,
-          follows: [],
-          speculative,
-          report: null,
-          lastError: null,
-          createdAt: decision.createdAt,
-          updatedAt: decision.createdAt,
-        };
-        decision.ticketId = ticket.id;
-        if (speculative) decision.rationale = [decision.rationale, "speculative background attempt"].filter(Boolean).join("; ");
-        createdTickets.push(ticket);
-        if (!summary && !speculative) summary = action.title;
-      } else if (action.action === "reply") {
-        decision.reply = action.reply;
-        replies.push(action.reply);
-        if (!summary) summary = action.reply;
-      } else if (action.action === "steer") {
-        decision.rationale = truncate(action.text, 300);
-      } else if (action.action === "respond") {
-        decision.rationale = `request ${action.requestId}: ${truncate(JSON.stringify(action.response), 1000)}`;
-      } else if (action.action === "subscribe") {
-        const target = state.tickets.find((t) => t.id === action.ticketId);
-        if (!target || TERMINAL_TICKET_STATUSES.includes(target.status)) {
-          decision.rationale = `ticket ${action.ticketId} ${target ? `is ${target.status}` : "not found"}; nothing subscribed`;
-        } else {
-          subscribeTickets.push(target.id);
-          decision.rationale = target.threadId === threadId
-            ? "re-subscribed to its own thread"
-            : `now also follows this thread (home thread ${target.threadId})`;
-        }
-      } else if ("rationale" in action) {
-        decision.rationale = action.rationale ?? null;
+      // dispatch 兜底:mandate 仅剩省略号时按解析失败处理(parseVerdict 已拒绝此类候选,
+      // 此处防解析路径放宽后空工单漏网),整批触发同样保留 pending 供重试。
+      const mandateBlock = parsed.verdict.actions
+        .filter((action): action is Extract<RouterAction, { action: "dispatch" }> => action.action === "dispatch")
+        .map((action) => dispatchMandateIssue(action.mandate))
+        .find((issue): issue is string => issue !== null);
+      if (mandateBlock) {
+        await recordUnparsed(mandateBlock);
+        return;
       }
-      if ("ticketId" in action && action.ticketId) decision.ticketId = action.ticketId;
-      decisions.push(decision);
-      actionRecords.push(planPendingAction(threadId, decision.id, action,
-        "ticketId" in action ? state.tickets.find((ticket) => ticket.id === action.ticketId)?.workerAgentId : null));
-      if (action.action === "stop") break;
-    }
-    const decidedAt = decisions[0]?.createdAt ?? new Date().toISOString();
-    const replyDecision = decisions.filter((decision) => decision.outcome === "reply").at(-1);
-    const fullReply = replies.join("\n\n");
-    const origin = batch.find((trigger) => trigger.origin)?.origin;
-    const delivery = fullReply && origin && replyDecision ? {
-      id: `im-${replyDecision.id}`, threadId, origin,
-      parts: splitImReply(fullReply, this.settingsValues.imReplyMaxChars), nextPart: 0,
-      status: "pending" as const, sentMessageIds: [], createdAt: decidedAt, updatedAt: decidedAt,
-    } : null;
-
-    // 成功裁决也留一份截断的原始回复,挂在批内首条决策上:格式/占位类问题事后可审计。
-    decisions[0].raw = truncate(replyText, 1200);
-
-    await this.store.update((next) => {
-      delete next.kv.routerPromptState; // 清除旧版会话游标,不再记录已读历史。
-      if (delivery) next.imDeliveries.push(delivery);
-      next.decisions.push(...decisions);
-      next.tickets.push(...createdTickets);
-      for (const ticketId of subscribeTickets) {
-        const target = next.tickets.find((t) => t.id === ticketId);
-        if (!target) continue;
-        if (target.threadId === threadId) target.subscribed = true;
-        else target.follows = [...new Set([...followsOf(target), threadId])];
-        // 已完成待命的票据被重新订阅后回到待命(waiting),后续消息能唤醒它。
-        if (target.status === "completed" && target.workerAgentId) target.status = "waiting";
-        target.updatedAt = decidedAt;
-      }
-      next.pendingActions.push(...actionRecords.filter((record): record is PendingAction => record !== null));
-      for (const trigger of next.triggers) {
-        if (triggerIds.includes(trigger.id)) trigger.status = "evaluated";
-      }
-      const target = next.threads.find((t) => t.id === threadId);
-      if (target) {
-        target.updatedAt = decidedAt;
-        if (summary) target.summary = truncate(summary, 200);
-        if (replyDecision && replies.length > 0) {
-          target.latestResult = { id: replyDecision.id, kind: "router_reply", text: replies.join("\n\n"),
-            ticketIds: [...new Set(batch.filter((trigger) => trigger.kind === "report" && trigger.sender.startsWith("worker:"))
-              .map((trigger) => trigger.sender.slice("worker:".length)))], createdAt: decidedAt };
+      for (const action of parsed.verdict.actions) {
+        if (action.action !== "respond") continue;
+        const target = state.tickets.find((ticket) => ticket.id === action.ticketId);
+        if (!target?.pendingRequests?.some((request) => request.id === action.requestId)) {
+          await recordUnparsed(`respond must name a current pending request: ticketId=${action.ticketId} requestId=${action.requestId}`);
+          return;
         }
       }
-      // stop 不在此处关闭线程:关闭发生在动作执行到 stop 时,否则先于 stop 的
-      // steer/cancel 会因票据已被批量取消而无法执行。
-    });
+      this.evalFailures.delete(threadId);
+      this.evalErrors.delete(threadId);
+      const verdict = parsed.verdict;
 
-    // 副作用按序执行;失败的动作留在待执行记录里由看门狗按上限重试,不再重放整批。
-    const launchQueue = [...createdTickets];
-    for (let index = 0; index < actionRecords.length; index++) {
-      const action = actions[index];
-      const record = actionRecords[index];
-      if (action.action === "stop") {
-        if (record) await this.runPendingAction(record.id);
-        break;
+      // 4. 执行裁决:每个动作一条 Decision,带副作用的动作另立案待执行记录,一次落盘
+      //    (先落盘后副作用);stop 之后的动作作废,不再立案。
+      const triggerIds = batch.map((t) => t.id);
+      const actions = verdict.actions;
+      const decisions: Decision[] = [];
+      const createdTickets: Ticket[] = [];
+      /** 与已立案动作对齐的待执行记录;dispatch/reply/ignore 没有记录(null)。 */
+      const actionRecords: (PendingAction | null)[] = [];
+      const replies: string[] = [];
+      /** subscribe 动作:落盘时把票据挂到本线程(本线程票据恢复 subscribed,其他线程票据加入 follows)。 */
+      const subscribeTickets: string[] = [];
+      let liveSpeculative = state.tickets.filter((t) => t.speculative && !TERMINAL_TICKET_STATUSES.includes(t.status)).length;
+      let summary: string | null = null;
+      for (const action of actions) {
+        const decision = newDecision(threadId, triggerIds, action.action);
+        if (action.action === "dispatch") {
+          // 投机执行仅在设置开启时生效;并发上限内才立案,超出的直接丢弃(记入裁决)。
+          const speculative = Boolean(action.speculative) && this.settingsValues.speculativeEnabled;
+          if (speculative && liveSpeculative >= MAX_SPECULATIVE_TICKETS) {
+            decision.outcome = "ignore";
+            decision.rationale = `speculative dispatch "${truncate(action.title, 80)}" dropped: ${liveSpeculative} speculative tickets already running (limit ${MAX_SPECULATIVE_TICKETS})`;
+            decisions.push(decision);
+            actionRecords.push(null);
+            continue;
+          }
+          if (speculative) liveSpeculative += 1;
+          // 档位只能取自设置名单;未知名字退回默认 Worker 并记入裁决,派发本身不失败。
+          const choice = matchWorkerProfile(action.profile, this.settingsValues.workerProfiles, DEFAULT_WORKER_PROFILE);
+          if (choice.note) decision.rationale = choice.note;
+          const ticket: Ticket = {
+            id: newId("tkt"),
+            threadId,
+            title: action.title,
+            mandate: action.mandate,
+            status: "pending",
+            workerAgentId: null,
+            pendingRequests: [],
+            workspaceId: null,
+            ownsWorkspace: null,
+            branchName: null,
+            profile: choice.profile,
+            provider: null,
+            startedAt: null,
+            attempts: 0,
+            // 投机执行不订阅线程:闲聊与后续消息不打扰它,结果经汇报回流。
+            subscribed: speculative ? false : !action.unsubscribe,
+            follows: [],
+            speculative,
+            report: null,
+            lastError: null,
+            createdAt: decision.createdAt,
+            updatedAt: decision.createdAt,
+          };
+          decision.ticketId = ticket.id;
+          if (speculative) decision.rationale = [decision.rationale, "speculative background attempt"].filter(Boolean).join("; ");
+          createdTickets.push(ticket);
+          if (!summary && !speculative) summary = action.title;
+        } else if (action.action === "reply") {
+          decision.reply = action.reply;
+          replies.push(action.reply);
+          if (!summary) summary = action.reply;
+        } else if (action.action === "steer") {
+          decision.rationale = truncate(action.text, 300);
+        } else if (action.action === "respond") {
+          decision.rationale = `request ${action.requestId}: ${truncate(JSON.stringify(action.response), 1000)}`;
+        } else if (action.action === "subscribe") {
+          const target = state.tickets.find((t) => t.id === action.ticketId);
+          if (!target || TERMINAL_TICKET_STATUSES.includes(target.status)) {
+            decision.rationale = `ticket ${action.ticketId} ${target ? `is ${target.status}` : "not found"}; nothing subscribed`;
+          } else {
+            subscribeTickets.push(target.id);
+            decision.rationale = target.threadId === threadId
+              ? "re-subscribed to its own thread"
+              : `now also follows this thread (home thread ${target.threadId})`;
+          }
+        } else if ("rationale" in action) {
+          decision.rationale = action.rationale ?? null;
+        }
+        if ("ticketId" in action && action.ticketId) decision.ticketId = action.ticketId;
+        decisions.push(decision);
+        actionRecords.push(planPendingAction(threadId, decision.id, action,
+          "ticketId" in action ? state.tickets.find((ticket) => ticket.id === action.ticketId)?.workerAgentId : null));
+        if (action.action === "stop") break;
       }
-      // 以裁决结果为准:被丢弃的投机派发(记为 ignore)没有票据可启动。
-      if (decisions[index]?.outcome === "dispatch") {
-        const ticket = launchQueue.shift();
-        if (!ticket) continue;
-        void this.startTicket(ticket.id).catch((error) => {
-          console.error("[superagent] ticket launch failed", error);
-        });
-      } else if (record) {
-        await this.runPendingAction(record.id);
-      }
-    }
+      const decidedAt = decisions[0]?.createdAt ?? new Date().toISOString();
+      const replyDecision = decisions.filter((decision) => decision.outcome === "reply").at(-1);
+      const fullReply = replies.join("\n\n");
+      const origin = batch.find((trigger) => trigger.origin)?.origin;
+      const delivery = fullReply && origin && replyDecision ? {
+        id: `im-${replyDecision.id}`, threadId, origin,
+        parts: splitImReply(fullReply, this.settingsValues.imReplyMaxChars), nextPart: 0,
+        status: "pending" as const, sentMessageIds: [], createdAt: decidedAt, updatedAt: decidedAt,
+      } : null;
 
-    // 5. 答复回投:IM 触发回原聊天;agent 委派回原会话。
-    if (delivery) {
-      await this.sendImDelivery(delivery.id);
-    } else if (fullReply && !origin) {
-      const reply = truncate(fullReply, 2000);
-      const replyTarget = batch.find((t) => t.replyToAgentId)?.replyToAgentId ?? null;
-      if (replyTarget) {
-        try {
-          await paseo.agents.ref(replyTarget).send(reply, {
-            sourceAgentId: routerAgentId,
-            activeTurnBehavior: "steer",
+      // 成功裁决也留一份截断的原始回复,挂在批内首条决策上:格式/占位类问题事后可审计。
+      decisions[0].raw = truncate(replyText, 1200);
+
+      await this.store.update((next) => {
+        delete next.kv.routerPromptState;
+        const memory = next.threads.find((t) => t.id === threadId)?.router;
+        if (memory?.agentId === routerAgentId) {
+          memory.initialized = true;
+          memory.dirty = false;
+          memory.sessionId = routerSessionId(router.handle.current()) ?? router.sessionId;
+          memory.compactionSeq = compactionSeq ?? 0;
+          memory.evaluations++;
+          memory.triggerIds = [...new Set([...(restore ? [] : remembered?.triggerIds ?? []), ...triggerIds, ...unseenContext.map((t) => t.id), ...chatter.map((t) => t.id)])]
+            .filter((id) => next.triggers.some((t) => t.id === id));
+        }
+        if (delivery) next.imDeliveries.push(delivery);
+        next.decisions.push(...decisions);
+        next.tickets.push(...createdTickets);
+        for (const ticketId of subscribeTickets) {
+          const target = next.tickets.find((t) => t.id === ticketId);
+          if (!target) continue;
+          if (target.threadId === threadId) target.subscribed = true;
+          else target.follows = [...new Set([...followsOf(target), threadId])];
+          // 已完成待命的票据被重新订阅后回到待命(waiting),后续消息能唤醒它。
+          if (target.status === "completed" && target.workerAgentId) target.status = "waiting";
+          target.updatedAt = decidedAt;
+        }
+        next.pendingActions.push(...actionRecords.filter((record): record is PendingAction => record !== null));
+        for (const trigger of next.triggers) {
+          if (triggerIds.includes(trigger.id)) trigger.status = "evaluated";
+        }
+        const target = next.threads.find((t) => t.id === threadId);
+        if (target) {
+          target.updatedAt = decidedAt;
+          if (summary) target.summary = truncate(summary, 200);
+          if (replyDecision && replies.length > 0) {
+            target.latestResult = { id: replyDecision.id, kind: "router_reply", text: replies.join("\n\n"),
+              ticketIds: [...new Set(batch.filter((trigger) => trigger.kind === "report" && trigger.sender.startsWith("worker:"))
+                .map((trigger) => trigger.sender.slice("worker:".length)))], createdAt: decidedAt };
+          }
+        }
+        // stop 不在此处关闭线程:关闭发生在动作执行到 stop 时,否则先于 stop 的
+        // steer/cancel 会因票据已被批量取消而无法执行。
+      });
+
+      // 副作用按序执行;失败的动作留在待执行记录里由看门狗按上限重试,不再重放整批。
+      const launchQueue = [...createdTickets];
+      for (let index = 0; index < actionRecords.length; index++) {
+        const action = actions[index];
+        const record = actionRecords[index];
+        if (action.action === "stop") {
+          if (record) await this.runPendingAction(record.id);
+          break;
+        }
+        // 以裁决结果为准:被丢弃的投机派发(记为 ignore)没有票据可启动。
+        if (decisions[index]?.outcome === "dispatch") {
+          const ticket = launchQueue.shift();
+          if (!ticket) continue;
+          void this.startTicket(ticket.id).catch((error) => {
+            console.error("[superagent] ticket launch failed", error);
           });
-        } catch (error) {
-          console.error("[superagent] reply relay to agent failed", error);
+        } else if (record) {
+          await this.runPendingAction(record.id);
         }
       }
+
+      // 5. 答复回投:IM 触发回原聊天;agent 委派回原会话。
+      if (delivery) {
+        await this.sendImDelivery(delivery.id);
+      } else if (fullReply && !origin) {
+        const reply = truncate(fullReply, 2000);
+        const replyTarget = batch.find((t) => t.replyToAgentId)?.replyToAgentId ?? null;
+        if (replyTarget) {
+          try {
+            await paseo.agents.ref(replyTarget).send(reply, {
+              sourceAgentId: routerAgentId,
+              activeTurnBehavior: "steer",
+            });
+          } catch (error) {
+            console.error("[superagent] reply relay to agent failed", error);
+          }
+        }
+      }
+    } finally {
+      this.decisionBudgets.delete(routerAgentId);
     }
   }
 
@@ -1313,6 +1355,7 @@ export class SuperagentEngine {
     if (!thread) return { ok: true };
     const retiring = state.tickets.filter((t) => t.threadId === record.threadId && t.workerAgentId);
     await this.markThreadClosed(record.threadId);
+    await this.retireThreadRouter(record.threadId);
     for (const ticket of retiring) await retireWorker(paseo, ticket, true);
     return { ok: true };
   }
@@ -1393,7 +1436,7 @@ export class SuperagentEngine {
         paseo,
         workerProvider,
         current,
-        state.kv.routerAgentId ?? null,
+        state.threads.find((t) => t.id === current.threadId)?.router?.agentId ?? null,
         env,
       );
       let accepted = false;
@@ -1716,21 +1759,22 @@ export class SuperagentEngine {
     // 先登记新会话,即使 run 超时/抛错,下轮也能归档它,不会遗留失联 agent。
     await this.updateWatchdogState({ agentId: watchdog.agentId, provider });
     const includeRules = !routerUsesSystemPrompt(provider);
-    const result = await watchdog.handle.run(composePatrolPrompt(digest, includeRules ? instructions : null), {
-      timeoutMs: WATCHDOG_RUN_TIMEOUT_MS,
-    });
-    const replyText = result.lastMessage?.trim() || (await readLastAssistantMessage(paseo, watchdog.agentId)) || "";
-    const parsed = parseWatchdogVerdict(replyText);
-    if ("error" in parsed) {
-      await this.updateWatchdogState({ agentId: watchdog.agentId, provider, lastRunAt: now.toISOString(),
-        lastError: `unparsed: ${truncate(parsed.error, 300)}` });
-      return;
-    }
-    const executed = await this.executeWatchdogActions(parsed.verdict.actions);
-    await this.updateWatchdogState({
-      agentId: watchdog.agentId, provider, lastRunAt: now.toISOString(),
-      lastSummary: truncate(parsed.verdict.summary, 300), lastError: null, lastActions: executed, seen,
-    });
+    this.decisionBudgets.set(watchdog.agentId, new DecisionBudget());
+    try {
+      const result = await this.runDecision(watchdog.handle, composePatrolPrompt(digest, includeRules ? instructions : null), WATCHDOG_RUN_TIMEOUT_MS);
+      const replyText = result.lastMessage?.trim() || "";
+      const parsed = parseWatchdogVerdict(replyText);
+      if ("error" in parsed) {
+        await this.updateWatchdogState({ agentId: watchdog.agentId, provider, lastRunAt: now.toISOString(),
+          lastError: `unparsed: ${truncate(parsed.error, 300)}` });
+        return;
+      }
+      const executed = await this.executeWatchdogActions(parsed.verdict.actions);
+      await this.updateWatchdogState({
+        agentId: watchdog.agentId, provider, lastRunAt: now.toISOString(),
+        lastSummary: truncate(parsed.verdict.summary, 300), lastError: null, lastActions: executed, seen,
+      });
+    } finally { this.decisionBudgets.delete(watchdog.agentId); }
   }
 
   /** 巡检摘要:未完结票据的会话状态与进展增量,加引擎健康状况。 */
@@ -1943,7 +1987,7 @@ export class SuperagentEngine {
    */
   orchestrationRole(agentId: string): "router" | "watchdog" | "worker" | null {
     const state = this.store.get();
-    if (state.kv.routerAgentId === agentId) return "router";
+    if (state.kv.routerAgentId === agentId || state.threads.some((t) => t.router?.agentId === agentId)) return "router";
     if (state.kv.watchdog?.agentId === agentId) return "watchdog";
     if (state.tickets.some((ticket) => ticket.workerAgentId === agentId)) return "worker";
     return null;
@@ -2050,23 +2094,56 @@ export class SuperagentEngine {
       }
     }
 
-    // Router 丢失检测:清掉失效 id,下次评估自动重建。
-    const routerId = state.kv.routerAgentId;
-    if (routerId) {
-      try {
-        const refetched = await paseo.agents.ref(routerId).refresh();
-        if (!refetched || refetched.agent.archivedAt) {
-          await this.store.update((next) => {
-            next.kv.routerAgentId = null;
-          });
-        }
-      } catch {
+    for (const thread of this.store.get().threads) {
+      if (!thread.router) continue;
+      if (thread.state === "closed") {
+        await this.retireThreadRouter(thread.id);
+        continue;
+      }
+      const live = await paseo.agents.ref(thread.router.agentId).refresh().catch((error) => {
+        console.error("[superagent] thread Router refresh failed", error);
+        return undefined;
+      });
+      if (live === undefined) continue;
+      if (!live || live.agent.archivedAt) {
         await this.store.update((next) => {
-          next.kv.routerAgentId = null;
+          const target = next.threads.find((t) => t.id === thread.id);
+          if (target) target.router = null;
         });
       }
     }
+    const latest = this.store.get().kv.routerAgentId;
+    if (latest && !this.store.get().threads.some((t) => t.router?.agentId === latest)) {
+      // 兼容旧版全局 id;不在这里归档尚未迁移的会话。
+      const live = await paseo.agents.ref(latest).refresh().catch(() => null);
+      if (!live || live.agent.archivedAt) await this.store.update((next) => { next.kv.routerAgentId = null; });
+    }
 
+    // 日切不打断旧任务;等汇报消费、动作完成且无跨线程订阅后才关闭旧 IM 线程。
+    for (const thread of this.store.get().threads) {
+      if (thread.state !== "active" || !thread.imDay || thread.imDay >= imDay(this.now())) continue;
+      if (this.currentEvalThread === thread.id || this.store.get().triggers.some((t) => t.threadId === thread.id && t.status === "pending")
+        || this.store.get().pendingActions.some((a) => a.threadId === thread.id)) continue;
+      const activeWork = this.store.get().tickets.some((t) => t.threadId === thread.id && (
+        ["pending", "launching", "running"].includes(t.status) || t.pendingRequests?.length
+        || followsOf(t).some((id) => this.store.get().threads.some((other) => other.id === id && other.state === "active"))
+      ));
+      if (activeWork) continue;
+      // 不只看票据状态:错过 hook 的 Worker 或维护者直接打开的 Router 仍可能在跑。
+      const ids = [thread.router?.agentId, ...this.store.get().tickets.filter((t) => t.threadId === thread.id).map((t) => t.workerAgentId)]
+        .filter((id): id is string => Boolean(id));
+      let busy = false;
+      for (const id of ids) {
+        try {
+          const live = await paseo.agents.ref(id).refresh();
+          if (live && !live.agent.archivedAt && (live.agent.status === "running" || live.agent.status === "initializing" || live.agent.pendingPermissions?.length)) {
+            busy = true;
+            break;
+          }
+        } catch { busy = true; break; }
+      }
+      if (!busy) { await this.closeThread(thread.id); acted++; }
+    }
     return acted > 0 ? `reconciled ${acted} item(s)` : null;
   }
 
@@ -2135,7 +2212,39 @@ export class SuperagentEngine {
     // 关闭线程即整段收口:所有仍持有 Worker 的票据(含终态遗留)一并回收。
     const retiring = state.tickets.filter((t) => t.threadId === threadId && t.workerAgentId);
     await this.markThreadClosed(threadId);
+    await this.retireThreadRouter(threadId);
     for (const ticket of retiring) await retireWorker(paseo, ticket, true);
+  }
+
+  private async retireThreadRouter(threadId: string): Promise<void> {
+    const id = this.store.get().threads.find((t) => t.id === threadId)?.router?.agentId;
+    if (!id) return;
+    await detachRoleChildren(this.requirePaseo(), id);
+    await this.requirePaseo().agents.ref(id).archive();
+    await this.store.update((next) => {
+      const target = next.threads.find((t) => t.id === threadId);
+      if (target?.router?.agentId === id) target.router = null;
+      if (next.kv.routerAgentId === id) next.kv.routerAgentId = null;
+    });
+  }
+
+  /** MCP 只读工具在执行前扣预算;预算由 runEval/runPatrol 创建。 */
+  beforeRecall(agentId: string, name: string, args: unknown): string | null {
+    return this.decisionBudgets.get(agentId)?.check(name, args) ?? null;
+  }
+
+  private async runDecision(handle: PaseoAgentHandle, prompt: string, timeoutMs: number) {
+    const budget = this.decisionBudgets.get(handle.id);
+    try {
+      const result = await Promise.race([handle.run(prompt, { timeoutMs }), ...(budget ? [budget.failed] : [])]);
+      if (result.status && result.status !== "idle") throw new Error(`decision run ${result.status}: ${result.error ?? "no final verdict"}`);
+      if (budget?.error) throw budget.error;
+      return result;
+    } catch (error) {
+      // SDK 的超时只结束等待;reload 才会中断仍在运行的模型轮次。
+      await handle.reload().catch((reloadError) => console.error("[superagent] decision interrupt failed", reloadError));
+      throw error;
+    }
   }
 
   /** 关闭线程的落盘部分:线程关闭、活跃票据取消、pending 触发消费。 */
@@ -2253,6 +2362,8 @@ export class SuperagentEngine {
         `# thread ${thread.id}`,
         `title: ${thread.title}`,
         `state: ${thread.state}  createdAt: ${thread.createdAt}  updatedAt: ${thread.updatedAt}`,
+        thread.imDay ? `IM day: ${thread.imDay} (Asia/Shanghai); conversation: ${thread.imConversationKey}` : null,
+        thread.router ? `routerAgent: ${thread.router.agentId}` : null,
         thread.summary ? `summary: ${thread.summary}` : null,
         thread.latestResult
           ? `latestResult (${thread.latestResult.kind}, ${thread.latestResult.createdAt}):\n${truncate(thread.latestResult.text, 8000)}`
@@ -2373,28 +2484,28 @@ export class SuperagentEngine {
       if (!matches(joined(trigger.text, trigger.note))) continue;
       hits.push({
         at: trigger.receivedAt,
-        line: `- [${trigger.id} trigger ${trigger.kind} ${trigger.status}] ${trigger.sender}: ${excerptOf(trigger.text, trigger.note)}`,
+        line: `- [${trigger.id} trigger ${trigger.kind} ${trigger.status}] thread=${trigger.threadId ?? "unknown"} ${trigger.sender}: ${excerptOf(trigger.text, trigger.note)}`,
       });
     }
     for (const ticket of state.tickets) {
       if (!matches(joined(ticket.title, ticket.mandate, ticket.report, ticket.lastError))) continue;
       hits.push({
         at: ticket.updatedAt,
-        line: `- [${ticket.id} ticket ${ticket.status}] "${ticket.title}": ${excerptOf(ticket.report, ticket.mandate, ticket.lastError, ticket.title)}`,
+        line: `- [${ticket.id} ticket ${ticket.status}] thread=${ticket.threadId} "${ticket.title}": ${excerptOf(ticket.report, ticket.mandate, ticket.lastError, ticket.title)}`,
       });
     }
     for (const thread of state.threads) {
-      if (!matches(joined(thread.title, thread.summary))) continue;
+      if (!matches(joined(thread.title, thread.summary, thread.imDay, thread.imConversationKey))) continue;
       hits.push({
         at: thread.updatedAt,
-        line: `- [${thread.id} thread ${thread.state}] "${thread.title}": ${excerptOf(thread.summary, thread.title)}`,
+        line: `- [${thread.id} thread ${thread.state}]${thread.imDay ? ` day=${thread.imDay}` : ""} "${thread.title}": ${excerptOf(thread.summary, thread.title)}`,
       });
     }
     for (const decision of state.decisions) {
       if (!matches(joined(decision.reply, decision.rationale))) continue;
       hits.push({
         at: decision.createdAt,
-        line: `- [${decision.id} decision ${decision.outcome}] ${excerptOf(decision.reply, decision.rationale)}`,
+        line: `- [${decision.id} decision ${decision.outcome}] thread=${decision.threadId} ${excerptOf(decision.reply, decision.rationale)}`,
       });
     }
     hits.sort((a, b) => b.at.localeCompare(a.at));
@@ -2425,7 +2536,7 @@ export class SuperagentEngine {
     const lines = ["# Active threads (newest first, up to 10)"];
     for (const thread of active) {
       const pending = state.triggers.filter((t) => t.threadId === thread.id && t.status === "pending").length;
-      lines.push(`- thread ${thread.id} "${thread.title}"${pending > 0 ? ` pendingTriggers=${pending}` : ""}`);
+      lines.push(`- thread ${thread.id} "${thread.title}"${thread.imDay ? ` day=${thread.imDay}` : ""}${pending > 0 ? ` pendingTriggers=${pending}` : ""}`);
       if (thread.summary) lines.push(`  summary: ${truncate(thread.summary, 200)}`);
       const unfinished = state.tickets
         .filter((t) => t.threadId === thread.id && !TERMINAL_TICKET_STATUSES.includes(t.status));

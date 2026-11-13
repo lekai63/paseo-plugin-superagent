@@ -106,7 +106,7 @@ export function createSessionOpenTransform(
     // 只注入声明支持 MCP servers 的 provider 家族(默认名单 ∪ 用户配置,否则会话启动失败);
     // pi 家族改走 env + pi 扩展(扩展负责 direct exposure 注册与只裁决裁剪)。
     if (role) {
-      const url = role === "worker" ? endpoint.workerUrl(request.labels[TICKET_LABEL]) : endpoint.routerUrl();
+      const url = role === "worker" ? endpoint.workerUrl(request.labels[TICKET_LABEL]) : endpoint.routerUrl(request.agentId);
       if (isPiProvider(request.provider)) {
         hintPiExtension();
         return piEnvRequest(request, url, role);

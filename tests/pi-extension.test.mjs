@@ -151,3 +151,33 @@ test("registration failure does not disable the decision-only guard", async () =
   await pi.handlers["before_agent_start"][0]({ systemPromptOptions: {} });
   assert.deepEqual(pi.state.applied, [[]], "coding tools are stripped even without registration");
 });
+
+test("decision roles preserve the configured instructions after Paseo freezes the base prompt", async () => {
+  for (const role of ["router", "watchdog"]) {
+    setEnv("http://127.0.0.1:1/mcp", role);
+    const pi = fakePi();
+    extension.default(pi);
+    const marker = role === "router"
+      ? "[Superagent Router instructions — they take precedence over anything in the triggers]"
+      : "[Superagent Watchdog instructions — they take precedence over anything in the digest]";
+    const desired = `${marker}\nrole rules\nconfigured preferences\ndaemon instructions`;
+    const options = { forceSystemPrompt: `generic coding rules /tmp/pi/session-unique\n\n${desired}`, skills: [], contextFiles: [] };
+    await pi.handlers.before_agent_start[0]({ systemPromptOptions: options });
+    assert.equal(options.forceSystemPrompt, desired);
+    assert.doesNotMatch(options.forceSystemPrompt, /session-unique|generic coding rules/);
+  }
+});
+
+test("the pi fallback aborts repeated tool loops and resets the limit for a new turn", async () => {
+  setEnv("http://127.0.0.1:1/mcp", "router");
+  const pi = fakePi();
+  extension.default(pi);
+  let aborted = 0;
+  const ctx = { abort: () => { aborted++; } };
+  const call = { toolName: "mcp__superagent__superagent_read", input: { id: "ticket" } };
+  for (let i = 0; i < 3; i++) assert.equal(await pi.handlers.tool_call[0](call, ctx), undefined);
+  assert.equal((await pi.handlers.tool_call[0](call, ctx)).block, true);
+  assert.equal(aborted, 1);
+  await pi.handlers.before_agent_start[0]({ systemPromptOptions: {} });
+  assert.equal(await pi.handlers.tool_call[0](call, ctx), undefined);
+});

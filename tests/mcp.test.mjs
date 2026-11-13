@@ -497,7 +497,7 @@ test("pi orchestration and dispatch sessions receive env for the pi extension", 
     labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE },
     provider: "pi/anthropic/claude-x",
   }));
-  assert.equal(router.env[PI_MCP_URL_ENV], endpoint.routerUrl());
+  assert.equal(router.env[PI_MCP_URL_ENV], endpoint.routerUrl("agent-1"));
   assert.equal(router.env[PI_ROLE_ENV], "router");
   assert.deepEqual(router.mcpServers, {}, "pi gets no mcpServers");
 
@@ -505,7 +505,7 @@ test("pi orchestration and dispatch sessions receive env for the pi extension", 
     labels: { [ROUTER_LABEL]: WATCHDOG_AGENT_LABEL_VALUE },
     provider: "pi",
   }));
-  assert.equal(watchdog.env[PI_MCP_URL_ENV], endpoint.routerUrl());
+  assert.equal(watchdog.env[PI_MCP_URL_ENV], endpoint.routerUrl("agent-1"));
   assert.equal(watchdog.env[PI_ROLE_ENV], "watchdog");
 
   const worker = transform(sessionRequest({ labels: { [TICKET_LABEL]: "tkt-9" }, provider: "pi" }));
@@ -520,4 +520,22 @@ test("pi orchestration and dispatch sessions receive env for the pi extension", 
   assert.equal(dispatch.env[PI_ROLE_ENV], undefined, "dispatch sessions carry no role restriction");
   assert.equal(dispatch.env.HOME, "/home/x");
   assert.deepEqual(dispatch.mcpServers, {});
+});
+
+test("Router recall checks the caller's evaluation budget before reading any record", async (t) => {
+  const guarded = [];
+  let reads = 0;
+  const endpoint = await startDispatchMcpServer({
+    dispatch: async () => assert.fail("not dispatch"),
+    beforeRecall: (agent, name, args) => { guarded.push({ agent, name, args }); return "budget exhausted"; },
+    readRecord: async () => { reads++; return "should not be read"; },
+  });
+  t.after(() => endpoint.stop());
+  const response = await modernPost(endpoint.routerUrl("router-a"), { jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: READ_TOOL_NAME, arguments: { id: "trg_test" } } });
+  const result = (await rpc(response))[0].result;
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /budget exhausted/);
+  assert.equal(reads, 0);
+  assert.deepEqual(guarded, [{ agent: "router-a", name: READ_TOOL_NAME, args: { id: "trg_test" } }]);
 });

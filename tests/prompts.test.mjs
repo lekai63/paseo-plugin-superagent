@@ -311,9 +311,7 @@ test("other active threads appear as steer stubs and truncated texts carry recal
     status: "pending", context: false, receivedAt: "",
   };
   const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null } });
-  assert.match(prompt, /## Other active threads \(stubs — steer\/cancel\/retry may target their tickets;/);
-  assert.match(prompt, /- thread t2 "plan B"/);
-  assert.match(prompt, /  - \[tkt_b\] "Other work" status=running subscribed=true/);
+  assert.doesNotMatch(prompt, /## Other active threads|plan B|tkt_b/);
   assert.match(prompt, /\[truncated — full text: superagent_read trg_long\]/);
 });
 
@@ -343,10 +341,10 @@ test("router rules allow only the recall tools and define handback re-routing", 
   const trigger = { id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "x", status: "pending", context: false, receivedAt: "" };
   const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null } });
   assert.match(prompt, /Apart from the orchestrator's own\nread-only recall tools \(superagent_list, superagent_read, superagent_search\), do NOT call any\ntools/);
-  assert.match(prompt, /Other active threads appear\s+only as stubs/);
+  assert.match(prompt, /Find other threads, including\s+previous IM days and other IM channels/);
   assert.match(prompt, /When a trigger starts with "\[handback\]"/);
   assert.match(prompt, /Do not steer the same message back to the worker that handed it back/);
-  assert.match(prompt, /steer, cancel or retry their tickets/);
+  assert.match(prompt, /before steering, canceling, retrying or subscribing/);
 });
 
 test("router rules carry the memory discipline and reconciliation guardrail", () => {

@@ -176,6 +176,7 @@ export class QqSource implements ImSource {
           return {
             origin: {
               channel: "qq",
+              accountId: selfId || undefined,
               chatId: `g:${groupId}`,
               messageId: event.message_id !== undefined ? String(event.message_id) : null,
               senderId: userId,
@@ -192,6 +193,7 @@ export class QqSource implements ImSource {
         onDrop?.({
           origin: {
             channel: "qq",
+            accountId: selfId || undefined,
             chatId: `g:${groupId}`,
             messageId: event.message_id !== undefined ? String(event.message_id) : null,
             senderId: userId,
@@ -209,6 +211,7 @@ export class QqSource implements ImSource {
       if (!text) return null;
       const origin: TriggerOrigin = {
         channel: "qq",
+        accountId: selfId || undefined,
         chatId: `g:${groupId}`,
         messageId: event.message_id !== undefined ? String(event.message_id) : null,
         senderId: userId,
@@ -227,6 +230,7 @@ export class QqSource implements ImSource {
       if (!text) return null;
       const origin: TriggerOrigin = {
         channel: "qq",
+        accountId: selfId || undefined,
         chatId: `u:${userId}`,
         messageId: event.message_id !== undefined ? String(event.message_id) : null,
         senderId: userId,

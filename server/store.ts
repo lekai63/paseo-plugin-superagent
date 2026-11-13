@@ -126,7 +126,7 @@ function trim(state: SuperagentState): void {
       .slice(0, MAX_DECISIONS);
   }
   const closed = state.threads
-    .filter((t) => t.state === "closed" && !state.imDeliveries.some((item) => item.threadId === t.id && item.status !== "sent"))
+    .filter((t) => t.state === "closed" && !t.router && !state.imDeliveries.some((item) => item.threadId === t.id && item.status !== "sent"))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   if (closed.length > MAX_CLOSED_THREADS) {
     const drop = new Set(closed.slice(MAX_CLOSED_THREADS).map((t) => t.id));

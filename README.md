@@ -4,7 +4,7 @@
 
 Paseo 的 Router/Worker 双层编排插件。按《Super-agent 设计探索》的架构思路,在 Paseo 原语之上实现事件驱动的 super-agent 编排层,**不依赖 DeepSeek Harness**:
 
-- **独立会话 Router agent**(轻量模型)统一评估触发事件,只裁决、不执行;除内置工具外仅可调用编排自身的只读回读工具(`superagent_list` / `superagent_read` / `superagent_search`),截断的触发/汇报/历史存根都可按 ID 找回全文(Chain of Recall),只记得零碎关键词时用 `superagent_search` 在全部记录里检索命中(空格分词 AND,最多 20 条 ID + 短摘录);
+- **每个活跃 Thread 一个 Router agent**(轻量模型)统一评估触发事件,只裁决、不执行;除内置工具外仅可调用编排自身的只读回读工具(`superagent_list` / `superagent_read` / `superagent_search`),截断的触发/汇报/历史存根都可按 ID 找回全文(Chain of Recall),只记得零碎关键词时用 `superagent_search` 在全部记录里检索命中(空格分词 AND,最多 20 条 ID + 短摘录);
 - **Worker agent**(强模型)按 Ticket 执行:worktree 隔离时每个 Ticket 一个独立 worktree 工作区;共享目录隔离时默认 Worker 使用普通的「默认 workspace」,Router 与看门狗另用后台工作区(按工作目录创建、跨重启复用),parent 挂在 Router 名下,在 app 的 Subagents track 可见、可随时人工介入;
 - **Worker 档位**:除默认 Worker 外可配置具名档位(不同模型/用途),每个档位还可指定自己的工作目录,让该档位的 Worker 在别的仓库或目录里工作;
 - **订阅直通(fan-out,多对多)**:线程有活跃订阅 Worker 时,后续事件绕过 Router 程序直通**全部**订阅 Worker(零 LLM);一个可用会话都没有才交 Router 评估。Router 的 `subscribe` 动作可让别的线程里已在干活的 Worker **也跟随**当前线程(一个 Worker 订阅多个线程),跟随来的消息带 `[thread …]` 前缀,汇报回流到它订阅的每个线程;Worker 可用 `superagent_unsubscribe`(可指定 `threadId` 只退一个线程)退订、`superagent_handback` 把误投消息转回 Router;
@@ -12,7 +12,7 @@ Paseo 的 Router/Worker 双层编排插件。按《Super-agent 设计探索》�
 - **权限与提问回流**:Worker 的权限请求、计划确认和结构化提问立即落盘并通知 Router。Router 根据已有授权/上下文用 `respond` 正式审批或回答;需要人的决定时,把具体操作/问题和选项回投原聊天或委派会话。请求未解决期间,线程后续消息先交 Router 判断,不向 Worker 广播,也不通过普通 steer 隐式清除请求。请求按 ID 去重,重载后由程序对账补收;等待输入期间暂停运行超时处理,响应后重新观察完成状态;
 - **引用归线程 + 相邻消息内联**:IM 消息引用(回复)了已知的触发或 Router 答复(按通道回执记下的消息 id)时,归入被引用消息所在的线程,并把被引用内容内联给 Router/Worker;评估时附带本批之前 Router 没看过的最近 5 条未 @ 群聊(准入层 filtered 留痕,滚动保留 30 条);
 - **投机执行**(可选,默认关):Router 依据「Router 规则」里写的主动策略对没人明确提出的事项后台派 `speculative` Worker 静默尝试(不订阅线程、同时最多 2 个),汇报首行 `DISCARD:` 由引擎静默丢弃并回收 Worker,`DELIVER:` 才交 Router 简短转述;
-- **跨线程指挥**:每次评估除本线程票据外,还列出其他活跃线程的未完结票据存根,steer/cancel/retry 可跨线程执行(全局协调);
+- **跨线程指挥**:通过 `superagent_search` / `superagent_list` 找线程,用 `superagent_read` 读详情后执行 steer/cancel/retry,不自动把其他线程状态塞入当前会话;
 - **批处理**:同一批窗口内的触发合并进一次 Router LLM 调用;窗口一经武装不再被后续消息重置(有界合并,持续消息流不会无限推迟评估);
 - **看门狗(两层)**:程序看门狗每 15 秒对账——错过完成、卡死启动、运行超时、评估重排、待执行动作补执行,进程重启后自恢复;**LLM 看门狗**(可选,默认关)是独立的 `Superagent Watchdog` 会话,按间隔收到全部未完结票据的进展摘要(会话状态、自上次巡检新增的时间线条目、静默时长、最近消息、权限等待)与引擎健康状况,判断有无实质进展/是否偏离任务,用 JSON 动作 `nudge`/`interrupt`/`cancel`/`retry`/`reeval`/`escalate` 介入(取消与上报经 Router 告诉人);维护者可在状态栏一键打开该会话直接问诊;
 - **Router 只裁决(硬约束)**:Router/看门狗的权限请求由插件按策略应答——自身回读工具放行,其余工具、计划与模式切换一律拒绝;codex 系 Router/看门狗以只读沙箱创建,pi 系由 pi 扩展裁剪工具并拦截调用(见「pi 作为 Router / Worker」)。Worker 的退订/转回工具自动放行;
@@ -48,8 +48,8 @@ LLM 看门狗(独立会话,定时)── 巡检摘要 ──► nudge/interrupt/
 
 | 模块 | 实现 |
 |---|---|
-| 双层架构 | Router = 常驻 agent(只裁决由权限钩子硬约束:非自身工具一律拒绝,codex 系只读沙箱,pi 系由 pi 扩展裁剪工具)(`superagent.role=router` 标签,provider 可配轻量模型,只裁决、不执行,唯一可用的工具是编排自身的只读回读);固定规则与 actions 示例只初始化一次。已确认支持 systemPrompt 的内置 claude/codex/opencode/omp/pi 在创建时设置;ACP(如 zcode-acp)及其他 provider 通过首轮消息初始化。Worker = 每 Ticket 独立 agent + worktree 隔离 + `superagent.ticket` 标签,可按 Worker 档位让不同 Ticket 跑在不同模型上;层级在 app 的 Subagents track 可见。跨线程指挥:评估提示词列出其他活跃线程的未完结票据,steer/cancel/retry 可指向它们,裁决仍记录在本线程 |
-| 事件驱动 | Trigger 三源(手动/agent 工具/worker 汇报)+ 四 IM 通道;fast-path 程序过滤(白名单之外,未 @ 群消息记 filtered 留痕,观察模式下作上下文候选,且一律走 Router 语义判断、不直通 Worker);Thread 归属(引用回复归入被引用消息的线程);批窗口合并评估(窗口有界,不随后续消息重置,按线程合并);订阅 fan-out 直通,多对多(Router `subscribe` 让 Worker 跟随其他线程,汇报回流到每个订阅线程)。Inline:被引用消息内联、最近 5 条未 @ 相邻群聊内联。投机执行(可选):`speculative` 派发,DELIVER/DISCARD 交付或静默丢弃,并发上限 2。正常续轮只带新触发(每条最多 4000 字,截断处标注回读指针)、任务状态快照、尚未读过的直通上下文(最近 8 条、每条最多 1000 字)。Chain of Recall:提示词里的触发/票据/线程/裁决均带 ID,历史存根也保留 ID,Router 用 `superagent_read` 按 ID 找回完整未截断记录(线程回读内联最近 10 条消息与 5 条裁决的 ID、跟随它的其他线程票据;票据回读内联跟随的线程与 Worker 会话最近 3 条消息,沿引用逐跳展开)、用 `superagent_list` 总览活跃线程(最近 10 个)、用 `superagent_search` 按关键词检索全部记录;Worker 汇报回流时截断的文本附带票据回读指针,汇报首行被要求写成含关键实体(路径/ID/命令)的自足结论句(存根与检索都取开头)。内置记忆纪律:跨轮承诺必须落 ticket 或 reply,stop/跨线程裁决目标不明时先 `superagent_list` 对账。不重复用户首行标题或 Ticket 汇报正文;线程首次恢复时才补最多 8 条历史存根 |
+| 双层架构 | Router = 每活跃 Thread 一个持久 agent(只裁决由权限钩子硬约束:非自身工具一律拒绝,codex 系只读沙箱,pi 系由 pi 扩展裁剪工具)(`superagent.role=router` 标签,provider 可配轻量模型,只裁决、不执行,唯一可用的工具是编排自身的只读回读);固定规则与 actions 示例只初始化一次。已确认支持 systemPrompt 的内置 claude/codex/opencode/omp/pi 在创建时设置;ACP(如 zcode-acp)及其他 provider 通过首轮消息初始化。Worker = 每 Ticket 独立 agent + worktree 隔离 + `superagent.ticket` 标签,可按 Worker 档位让不同 Ticket 跑在不同模型上;层级在 app 的 Subagents track 可见。跨线程指挥:通过 superagent_search / superagent_list 找线程、superagent_read 读详情,steer/cancel/retry 可指向其票据,裁决仍记录在本线程 |
+| 事件驱动 | Trigger 三源(手动/agent 工具/worker 汇报)+ 四 IM 通道;fast-path 程序过滤(白名单之外,未 @ 群消息记 filtered 留痕,观察模式下作上下文候选,且一律走 Router 语义判断、不直通 Worker);IM Thread 按渠道、机器人账号、聊天会话和北京时间日期划分;同日引用继续当前 Thread,跨日引用只带上下文、不重开旧 Thread;批窗口合并评估(窗口有界,不随后续消息重置,按线程合并);订阅 fan-out 直通,多对多(Router `subscribe` 让 Worker 跟随其他线程,汇报回流到每个订阅线程)。Inline:被引用消息内联、最近 5 条未 @ 相邻群聊内联。投机执行(可选):`speculative` 派发,DELIVER/DISCARD 交付或静默丢弃,并发上限 2。正常续轮只带新触发(每条最多 4000 字,截断处标注回读指针)、任务状态快照、尚未读过的直通上下文(最近 8 条、每条最多 1000 字)。Chain of Recall:提示词里的触发/票据/线程/裁决均带 ID,历史存根也保留 ID,Router 用 `superagent_read` 按 ID 找回完整未截断记录(线程回读内联最近 10 条消息与 5 条裁决的 ID、跟随它的其他线程票据;票据回读内联跟随的线程与 Worker 会话最近 3 条消息,沿引用逐跳展开)、用 `superagent_list` 总览活跃线程(最近 10 个)、用 `superagent_search` 按关键词检索全部记录;Worker 汇报回流时截断的文本附带票据回读指针,汇报首行被要求写成含关键实体(路径/ID/命令)的自足结论句(存根与检索都取开头)。内置记忆纪律:跨轮承诺必须落 ticket 或 reply,stop/跨线程裁决目标不明时先 `superagent_list` 对账。不重复用户首行标题或 Ticket 汇报正文;线程首次恢复时才补最多 8 条历史存根 |
 | 面向人的交互 | Paseo app 即信道:推送、attention、权限流;任意 agent 会话内 `/superagent` 或 `superagent_dispatch` 工具委派,Router 答复经 sourceAgentId 回到原会话;Worker 会话可随时人工接管。多渠道输出风格:IM 来源线程的评估提示词带渠道风格小节(答复保持简短、长内容派 Worker 后转述摘要与产物位置),超长答复仍按段落自动分段回投 直通误投自愈:Worker 调 `superagent_handback` 把不属于自己的消息转回 Router 重新路由(继承原 IM/agent 回投目标),`superagent_unsubscribe` 退订后续直通 |
 | 存算/环境分离 | 即 Paseo daemon 本身:daemon 在你的机器,客户端(relay E2EE)在任何地方;执行环境留在原地。状态落盘(state.json)+ 重启自恢复是单机形态的「计算与状态分离」;云端无状态计算与端侧 daemon 受宿主形态限制不做(见下文) |
 | Watchdog | 程序层 15s 对账:launch 卡死重试、运行超时 reload+判败、idle 收割汇报、评估重排、Router 丢失重建;LLM 层(可选)独立 `Superagent Watchdog` 会话按间隔判断进展与偏离,经 JSON 动作介入,维护者可直接在该会话问诊 |
@@ -71,7 +71,7 @@ paseo reload   # 若 pluginsEnabled 尚未开启,先在 config.json 打开
 | 工作目录 | 绝对路径,默认的基础目录(**必填**)。共享目录隔离时,默认 Worker 使用按此目录创建的普通持久工作区「默认 workspace」(同一目录只建一个,id 记在插件状态里跨重启复用;被归档会按标题+目录找回或重建),Router 与看门狗另用同目录的后台工作区;独立 worktree 隔离时它是每个 Ticket 切 worktree 的基准仓库。`worktree` 隔离时必须位于 git 仓库内,否则对话页与设置页都会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式 |
 | Router provider/model | 设置页从 daemon 的 provider 快照中下拉选取(model id 原样带入,含 ACP 系的反斜杠 id;清单读取失败或所选 provider 未上报模型时退回手填)。留空自动选用宿主可用默认(claude → codex → opencode → 任意);填错时 Router 评估会报出可用 id |
 | thinking 档位(可选) | Router、默认 Worker 与每个具名档位都可独立选 thinking 档位(字段 `routerThinkingOptionId`/`workerThinkingOptionId`/档位 `thinkingOptionId`),候选来自所选 provider/model 的 `thinkingOptions`(如 pi 的 low/medium/high/max)。选「Provider 默认」时不传 `thinkingOptionId`,回落 provider 自己的默认(pi 为 `~/.pi/agent/settings.json` 的 `defaultThinkingLevel`);快照未上报清单时可手工填档位 id。Router 的档位用于新建或重建的 Router 会话(存量会话不受影响,可用 `paseo agent update <id> --thinking <档位>` 热切);Worker 的档位随首条任务传入,只用于新建或重试的 Worker;具名档位留空不继承默认 Worker 的档位。启动前会对照快照校验,非法档位报出可用 ID,不静默回退 |
-| Router 自定义规则 | 设置页「Router 规则」直接填写,支持多行,最多 12000 字符,配置字段为 `routerInstructions`。用于答复语言、分派偏好和汇报格式,留空使用默认规则。每次评估创建新会话并使用当前规则,不依赖 provider 读取 `AGENTS.md`/`ROUTER.md`;不改变 Worker 的项目规则。自定义规则补充内置编排约束,Router 仍只做裁决并按 JSON actions 输出。裁决解析失败时,同一会话会收到具体语法或校验错误并在原评估超时预算内纠正一次;纠正仍失败则保留消息待重试,连续三轮失败暂停自动重试 |
+| Router 自定义规则 | 设置页「Router 规则」直接填写,支持多行,最多 12000 字符,配置字段为 `routerInstructions`。用于答复语言、分派偏好和汇报格式,留空使用默认规则。每个 Thread 复用其 Router 会话;规则、模型或 thinking 配置变化时受控重建并恢复上下文,不依赖 provider 读取 `AGENTS.md`/`ROUTER.md`;不改变 Worker 的项目规则。自定义规则补充内置编排约束,Router 仍只做裁决并按 JSON actions 输出。裁决解析失败时,同一会话会收到具体语法或校验错误并在原评估超时预算内纠正一次;纠正仍失败则保留消息待重试,连续三轮失败暂停自动重试 |
 | IM 附件收件目录 | `imInboxDir`,daemon 主机上的绝对路径;留空为 `$PASEO_HOME/plugin-data/superagent/inbox`。聊天里收到的文件存到 `<目录>/<通道>/<北京时间日期>/<消息 id>/` 下,改后对下一条消息立即生效,不重连通道。各 Worker 档位的工作目录有自己的归档规则时,宜设成它们之外的中立目录,由 Worker 按规则移入任务目录 |
 | IM 单条消息上限 | 默认 600,可设 100–4000 字符,沿用配置字段 `imReplyMaxChars`。超长答复按段落/换行优先拆分为多条,添加 `[1/N]` 序号(计入上限)后顺序发送,正文完整保留;普通 emoji 按字素边界拆分。发送前保存全部分段,每段确认成功后记录进度;失败暂停,在对话页右侧栏「状态 → 未送达的 IM 回复」从失败段补发(这一栏只列发送中与发送失败的回复,全部发出后即消失)。重启恢复未完成的发送,已确认的段不重发。远端已接收但回执丢失或落盘前崩溃时,该段仍可能重复,通道未提供统一的恰好一次投递保证 |
 | Worker provider/model | 同上,建议配最强模型。配置了 Worker 档位时它是**默认 Worker**,可另填一句用途说明 |
@@ -94,7 +94,7 @@ cp pi-extension/superagent.js ~/.pi/agent/extensions/
 
 扩展按 env 自门控,没有 `SUPERAGENT_PI_MCP_URL` 时完全休眠,不影响你自己的交互式 pi。对 Router/看门狗会话它做三件事:以 `exposure: "direct"` 注册回读 MCP(三个工具直接声明给模型);在 `before_agent_start` 把 `selectedTools` 原地裁到只剩回读工具(提示词与可执行工具集同步移除 bash/edit 等,并清空 skills 与 AGENTS.md 上下文);`tool_call` 兜底拦截一切非白名单调用(含 codemode 嵌套调用,模型会收到拒绝原因)。Worker 与普通 agent 会话只注册各自工具,不裁剪。
 
-未安装扩展时一切照常降级:pi Router 按「回读工具不可用则仅凭提示词裁决」运行,只是没有 Chain of Recall 与硬约束;daemon 日志在首个 pi 编排会话时提示安装。约束级别说明:扩展运行在 pi 进程内,是用户态约束,比 codex 的只读沙箱弱一层,对编排层 Router 足够。Router 规则照常经 systemPrompt 送达(paseo 的 pi provider 以 `before_agent_start` 追加),每次独立评估都使用当前规则。
+未安装扩展时一切照常降级:pi Router 按「回读工具不可用则仅凭提示词裁决」运行,只是没有 Chain of Recall 与硬约束;daemon 日志在首个 pi 编排会话时提示安装。约束级别说明:扩展运行在 pi 进程内,是用户态约束,比 codex 的只读沙箱弱一层,对编排层 Router 足够。Router 规则照常经 systemPrompt 送达(paseo 的 pi provider 以 `before_agent_start` 追加),同一 Thread 的评估复用原生会话;配置变化时重建。
 
 ## IM 触发源(飞书 / QQ / 钉钉 / 企业微信 / 微信)
 
@@ -114,7 +114,7 @@ cp pi-extension/superagent.js ~/.pi/agent/extensions/
 4. 发布版本并在群里/私聊添加机器人;
 5. 设置页填:App ID、App Secret、允许的发送者 `open_id`(或会话 `chat_id`)。
 
-行为:私聊直接触发;群聊需 **@机器人**(或打开「群聊观察模式」收上下文)。同一聊天 = 同一 Thread(话题按 root 分线程)。答复以引用回复回到原消息。
+行为:私聊直接触发;群聊需 **@机器人**(或打开「群聊观察模式」收上下文)。同一聊天在北京时间同一天共用一个 Thread,隔日新建;root 引用不再额外分线程。答复以引用回复回到原消息。
 
 非文本:富文本(post)取标题、文字、链接、代码块,以及其中的图片和视频;图片、文件、语音(原始音频,飞书不给转写)、视频经「获取消息中的资源文件」接口下载。回复一条带附件的消息时(比如在群里回复那份文件并 @机器人 说"处理这个"),经「获取指定消息的内容」接口取回原消息、下载被回复的那份。合并转发列出最多 50 条子消息的文字。卡片(interactive,比如转发来的审批卡片):事件里只有降级内容(复杂卡片只剩标题),会以 `card_msg_content_type=raw_card_content` 调「获取指定消息的内容」取原始卡片,转成标题、字段标签与取值、@ 的人名和按钮链接;取不到时沿用事件里的标题和卡片链接。飞书不允许机器人下载合并转发和卡片里的资源,这类附件只注明类型。文件夹、名片、位置只写一句说明,表情包忽略。本机应用 2026-11-10 已实测两个接口都有权限;新应用若报权限不足,按错误提示在开放平台补开。
 
@@ -124,7 +124,7 @@ cp pi-extension/superagent.js ~/.pi/agent/extensions/
 2. 应用能力 → 添加**机器人**,接收消息模式选 **Stream 模式**,发布;
 3. 设置页填:ClientId、ClientSecret、允许的发送者 `staffId`(或会话 `conversationId`)。
 
-行为:单聊直接触发;群聊被 @ 才会收到(钉钉机制)。同一 conversationId = 同一 Thread。回复经消息自带的 sessionWebhook(**有过期时间**,Worker 长任务的晚到回复可能失败,失败会记录日志)。
+行为:单聊直接触发;群聊被 @ 才会收到(钉钉机制)。同一 conversationId 在北京时间同一天共用一个 Thread,隔日新建。回复经消息自带的 sessionWebhook(**有过期时间**,Worker 长任务的晚到回复可能失败,失败会记录日志)。
 
 非文本:富文本(文字 + 图片)、图片、文件、视频用消息里的 `downloadCode` 调 `/v1.0/robot/messageFiles/download` 换临时地址下载(access token 用 AppKey/AppSecret 换取并缓存,robotCode 取消息自带的,缺省用 AppKey);语音优先用自带转写 `recognition`,没有转写才下载音频;其余类型只写一句说明。群里只有 @ 消息会投递,群文件无法直接交给机器人,请私聊发送。
 
@@ -143,7 +143,7 @@ cp pi-extension/superagent.js ~/.pi/agent/extensions/
 2. 按需在「另外允许的用户」里填其他人的微信用户 ID(`xxx@im.wechat`)——扫码人自动允许,可以留空;
 3. 保存设置。之后换号或凭证失效时点「重新扫码」,不用改设置;「退出登录」删除本机凭证并停止通道。
 
-行为:仅私聊(官方插件同样未开放群聊;白名单内用户的群消息记为已过滤「微信群消息暂不支持」)。同一用户 = 同一 Thread。收消息走 `getupdates` 长轮询,游标落盘,重启后从断点续收;回复带入站消息的 `context_token`(按用户取最新一枚,重启后回落到触发记录里保存的那枚)。支持文本与语音转写;图片、文件、视频从微信 CDN 下载并按协议 AES-128-ECB 解密,存到 `<IM 附件收件目录>/weixin/<北京时间日期>/<消息 id>/<原文件名>`(0600,单个上限 100 MB),本机路径以 `[微信文件] 名称(大小)已保存到本机:<路径>` 一行写进触发正文交给 Router。`.zip`/`.7z`/`.rar` 压缩包只列清单、不解压:在这一行后面缩进列出文件数、解压后总大小和前 30 个文件名(zip 自带解析,不带 UTF-8 标记的文件名按 GBK 解码;7z/rar 调用本机 `7z`),并标出内含的压缩包、加密条目、会越出解压目录的路径、符号链接与疑似压缩炸弹,`__MACOSX/`、`.DS_Store` 等打包元数据只计数;解压交给 Worker,大小取自压缩包自报的元数据,只作提示。下载失败也照常触发,并写明原因、提示让用户重发。消息本身不带附件而引用了一条带附件的消息时,下载被引用的那份(标为「引用的微信文件」)。群消息里的附件不下载。引用回复按 `ref_msg` 的消息 id 归回线程。服务端返回 `-14`(会话失效)时按官方插件的做法暂停 1 小时再试,设置页显示原因。
+行为:仅私聊(官方插件同样未开放群聊;白名单内用户的群消息记为已过滤「微信群消息暂不支持」)。同一账号下同一用户在北京时间同一天共用一个 Thread,隔日新建。收消息走 `getupdates` 长轮询,游标落盘,重启后从断点续收;回复带入站消息的 `context_token`(按用户取最新一枚,重启后回落到触发记录里保存的那枚)。支持文本与语音转写;图片、文件、视频从微信 CDN 下载并按协议 AES-128-ECB 解密,存到 `<IM 附件收件目录>/weixin/<北京时间日期>/<消息 id>/<原文件名>`(0600,单个上限 100 MB),本机路径以 `[微信文件] 名称(大小)已保存到本机:<路径>` 一行写进触发正文交给 Router。`.zip`/`.7z`/`.rar` 压缩包只列清单、不解压:在这一行后面缩进列出文件数、解压后总大小和前 30 个文件名(zip 自带解析,不带 UTF-8 标记的文件名按 GBK 解码;7z/rar 调用本机 `7z`),并标出内含的压缩包、加密条目、会越出解压目录的路径、符号链接与疑似压缩炸弹,`__MACOSX/`、`.DS_Store` 等打包元数据只计数;解压交给 Worker,大小取自压缩包自报的元数据,只作提示。下载失败也照常触发,并写明原因、提示让用户重发。消息本身不带附件而引用了一条带附件的消息时,下载被引用的那份(标为「引用的微信文件」)。群消息里的附件不下载。引用回复按 `ref_msg` 内联原消息,只有同日引用才归回原线程。服务端返回 `-14`(会话失效)时按官方插件的做法暂停 1 小时再试,设置页显示原因。
 
 凭证(bot token)只保存在 daemon 主机的 `$PASEO_HOME/plugin-data/superagent/weixin/account.json`(0600),不进插件设置,客户端只看得到 bot ID 与扫码人 ID。使用须遵守腾讯《微信ClawBot功能使用条款》;腾讯可随时限流或终止该能力,不宜作为唯一的通知通道。
 
@@ -161,7 +161,9 @@ cp pi-extension/superagent.js ~/.pi/agent/extensions/
 
 主界面是一个对话页,用法和在 Paseo 项目里与 agent 对话一样:左边是对话,右侧栏放对话之外的信息。
 
-Router 每次评估、看门狗每次巡检都新建 agent,同一次 Router 评估内的工具回读与格式纠正仍使用本轮会话。新会话创建成功后归档上一轮,最近一轮保留供查看与问诊;跨轮状态来自插件保存的线程、票据与巡检记录。两者使用专用的「Superagent 后台」工作区,默认不出现在 Paseo 的 Workspaces 列表里,在本插件页面中查看。Worker 的共享工作区与独立 worktree 仍在 Paseo 中显示。升级前留在普通工作区里的当前 Router/看门狗,会在下次评估/巡检时换建到后台,旧会话归档保留历史,新会话从插件保存的线程与票据恢复上下文;正在运行的看门狗等空闲后再换建。换建前先解除旧角色与现有 Worker 的父子关系,避免归档父会话连带停止 Worker;原 Worker 工作区保留。Paseo 自身若开启显示后台工作区,仍可显示这些后台会话。
+每个活跃 Thread 持有自己的 Router agent 和原生会话,下一轮只追加新事件和必要的当前状态;正常续轮不重放历史。IM 入站以北京时间自然日为边界,渠道、机器人账号和聊天会话彼此隔离,平台消息 root ID 不再额外切分当天的聊天。跨日引用旧消息保留引用摘要,新消息仍进入当天 Thread。跨日不打断旧任务;旧 Thread 没有运行任务、待评估触发、待执行动作或跨线程订阅后自动关闭,归档对应 Router 与闲置 Worker。手动关闭 Thread 同样归档 Router;重开时新建。跨线程上下文通过回读与搜索工具获取。
+
+Router 上下文达到 64000 token(较小模型在窗口的 70%)、完成 40 轮评估、配置或原生 session 变化、上一轮异常时受控重建。重建恢复线程摘要、最近 8 条历史存根、最近 8 条直通消息和当前票据状态。旧 Router 归档前先解除 Worker 的父子关系,不归档它们的工作区。看门狗仍每次巡检使用独立会话,显式携带巡检结论和近期干预。Router 与看门狗都在专用的「Superagent 后台」工作区运行,默认隐藏;Worker 使用普通工作区。Paseo 自身若开启显示后台工作区,仍可显示这些后台会话。
 
 1. **对话**:在底部输入框描述任务即开始一段新对话(一个线程),Router 评估后直接答复,或派发 Worker 执行;继续在同一对话里发消息即追加到该线程。桌面端发送键跟随 Paseo 全局设置(Settings → General):默认 Enter 发送、Shift+Enter 换行,设为 Cmd/Ctrl+Enter 后裸 Enter 换行;输入法组字中的回车不会发送。输入框下方实时提示这条消息的去向:新对话、交给 Router,或在有活跃订阅且已有会话的 Worker 时「直通 Worker」(多个订阅时全部直通);已关闭的对话发消息会重新打开。也可在任意 agent 会话里 `/superagent 修复登录页的 CORS 问题并补测试`。
 2. **顶部标签**:同时进行的多段对话以标签并排,点击切换;`+` 开始新对话,发出第一条消息后它成为新标签。标签左侧显示状态:Router 评估或 Worker 执行中为旋转光环,已答复/完成为绿点,出错为红点。关闭标签(×)只是收起,对话仍在右侧栏「对话」里,从那里点开会重新成为标签;在侧栏手动关闭对话时,它的标签也一并关掉(关的是当前对话就切到相邻标签);IM 与 agent 委派产生的对话不会自动成为标签。标签列表与最后查看的对话保存在 daemon 状态里:离开 Superagent 页面或重启 app 后,直接回到最后查看的对话,没有打开的标签时才显示新对话。每个标签的输入框草稿各自保留。首次使用时,在界面里发起、仍进行中且最近 24 小时内有活动的对话(最多 4 个)自动成为标签。
@@ -175,8 +177,9 @@ Router 每次评估、看门狗每次巡检都新建 agent,同一次 Router 评�
 
 ## 设计取舍与限制
 
-- **独立评估与提示缓存**:Router 每轮都补最近 8 条线程事件存根和最近 8 条已直通 Worker 的消息,更早的细节按 ID 回读;看门狗每轮补上次巡检结论、错误及最近 6 条干预记录,进展游标仍保存在插件状态中。固定规则和配置放入支持的 provider 的 system prompt,其余 provider 放在首条消息最前面;线程 ID、触发正文、时间和巡检状态只放动态消息部分。回读工具的名称、定义与次序保持稳定,pi 扩展也固定工具顺序,以便复用提示前缀缓存。实际缓存命中率由 provider 决定。
-- **评估串行**:单个 Router agent 全局串行评估(避免相互打断);高并发线程会排队。
+- **会话与提示缓存**:Thread 与 Router 映射和已读游标随插件状态持久化,插件重启后继续原生会话。固定规则、工具定义与顺序保持稳定,新事件追加在历史后;压缩后补恢复窗口。pi 适配器会移除 Paseo 冻结提示词中位于角色规则之前的通用编程提示词、项目上下文和临时目录,保留角色规则及其后的 daemon 指令。缓存命中率以 provider usage 为准。
+- **调用预算**:Router 单次评估(包含一次格式纠正)和看门狗单次巡检最多执行 12 次回读,同名工具相同参数最多 3 次。超限中断模型;Router 留下异常标记,下次重建恢复。超时和错误返回不能执行历史裁决。pi 扩展还在本地拦截循环,覆盖不经过宿主权限流的调用。
+- **评估串行**:各 Thread 的 Router 会话独立,引擎仍串行评估,避免并发消费同一批触发和副作用。
 - **失败退避(分两类)**:unparsed(Router 输出无法解析)连续 3 次后看门狗不再自动重排,需在对话右侧栏「任务」里点「重新评估」手动重试——防止 Router 持续劣化时烧 token 的失控循环;基础设施异常(provider 未就绪、目录不可用等瞬时故障)不计入熔断,按看门狗节奏持续重查约 5 分钟(20 个周期),对齐文章「瞬时故障持续重查直到恢复」。
 - **权限等待**:Worker 的权限请求走 Paseo 原生权限流(app 内批准);等待期间 Ticket 保持运行,不误判完成。
 - **外部 Trigger 源**:飞书/QQ 已支持;GitHub/Slack 轮询源是下一扩展点(Paseo Hub 触发器亦可作为上游把事件投给 `superagent.dispatch`)。

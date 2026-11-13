@@ -2,7 +2,7 @@
   "name": "paseo-plugin-superagent",
   "private": true,
   "version": "0.1.0",
-  "description": "Router/Worker super-agent orchestration for Paseo: per-evaluation router sessions, ticket workers, thread subscriptions, watchdog",
+  "description": "Router/Worker super-agent orchestration for Paseo: per-thread router sessions, ticket workers, thread subscriptions, watchdog",
   "type": "module",
   "files": [
     "paseo-plugin.json",

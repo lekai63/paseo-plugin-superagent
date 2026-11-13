@@ -270,7 +270,7 @@ export class WeixinSource implements ImSource {
       const summary = joinLines([text, ...media.map((ref) => describePendingAttachment("weixin", ref))]);
       if (summary) {
         onDrop?.({
-          origin: { channel: "weixin", chatId: groupId, messageId, senderId: from, senderName: null },
+          origin: { channel: "weixin", accountId: this.config.account.botId, chatId: groupId, messageId, senderId: from, senderName: null },
           threadKey: `weixin:group:${groupId}`,
           title: `微信群 ${truncate(summary, 40)}`,
           text: summary,
@@ -296,6 +296,7 @@ export class WeixinSource implements ImSource {
     return {
       origin: {
         channel: "weixin",
+        accountId: this.config.account.botId,
         chatId: from,
         messageId,
         replyRef: message.context_token ?? null,

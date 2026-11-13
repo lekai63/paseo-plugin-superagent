@@ -32,6 +32,7 @@ export const TriggerOriginSchema = z.object({
   channel: z.enum(["feishu", "qq", "dingtalk", "wecom", "weixin"]),
   /** 会话标识:飞书 chat_id / QQ group_id 或私聊对方 QQ 号 / 钉钉 conversationId / 企微 chatid 或 userid / 微信用户 ID。 */
   chatId: z.string().min(1),
+  accountId: z.string().optional(),
   /** 通道专属回复引用:飞书/钉钉/企微消息 id,OneBot 用。 */
   messageId: z.string().nullish(),
   /** 通道专属回复通道:钉钉 sessionWebhook、企微 req_id、微信 context_token。 */
@@ -91,6 +92,20 @@ export const ThreadResultSchema = z.object({
 });
 export type ThreadResult = z.infer<typeof ThreadResultSchema>;
 
+/** 一个 Thread 的 Router 及已送达游标;失败标记在发送前落盘,防崩溃后复用半轮上下文。 */
+export const ThreadRouterSchema = z.object({
+  agentId: z.string(),
+  provider: z.string(),
+  configHash: z.string(),
+  sessionId: z.string().nullable(),
+  initialized: z.boolean().default(false),
+  dirty: z.boolean().default(false),
+  compactionSeq: z.number().default(0),
+  evaluations: z.number().default(0),
+  triggerIds: z.array(z.string()).default([]),
+});
+export type ThreadRouter = z.infer<typeof ThreadRouterSchema>;
+
 export const ThreadSchema = z.object({
   id: z.string().min(1),
   /** 稳定关联键,例如 `manual:<uuid>`、`agent:<agentId>:<slug>`。 */
@@ -100,6 +115,10 @@ export const ThreadSchema = z.object({
   /** Router 维护的一句话摘要,供下次评估的上下文存根。 */
   summary: z.string().nullish(),
   latestResult: ThreadResultSchema.nullish(),
+  router: ThreadRouterSchema.nullish(),
+  /** 仅 IM 入站按该日期和渠道会话分流;旧任务的汇报仍回原线程。 */
+  imDay: z.string().optional(),
+  imConversationKey: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

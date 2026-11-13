@@ -588,6 +588,7 @@ export class FeishuSource implements ImSource {
       : `feishu:chat:${message.chat_id}`;
     const origin: TriggerOrigin = {
       channel: "feishu",
+      accountId: this.config.appId,
       chatId: message.chat_id,
       messageId: message.message_id,
       senderId: senderOpenId,

@@ -163,8 +163,12 @@ function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, h
   const tickets = thread
     ? snapshot.tickets.filter((ticket) => ticket.threadId === thread.id || followsOf(ticket).includes(thread.id))
     : currentTickets(snapshot.tickets);
-  // 只读取进行中 Worker 的会话状态;已结束的任务不必轮询。
-  const ids = [snapshot.routerAgentId, ...currentTickets(tickets).map((ticket) => ticket.workerAgentId)]
+  const routerAgentId = thread ? thread.router?.agentId ?? null : snapshot.routerAgentId;
+  const routerSnapshot = thread ? { ...snapshot, routerAgentId, routerProvider: thread.router?.provider ?? snapshot.routerProvider,
+    engine: { ...snapshot.engine, evalInFlight: snapshot.engine.evalInFlight && snapshot.engine.currentEvalThreadId === thread.id },
+  } : snapshot;
+  // 按正在查看的线程观察其 Router,不串到其他线程的最后一次评估。
+  const ids = [routerAgentId, ...currentTickets(tickets).map((ticket) => ticket.workerAgentId)]
     .filter((id): id is string => Boolean(id));
   const agents = useExecutionAgents(hostId, ids);
   const observe = (ticket: Ticket) => (ticket.workerAgentId ? agents[ticket.workerAgentId] : undefined);
@@ -173,7 +177,7 @@ function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, h
   const directs = thread ? directTickets(tickets, thread.id) : [];
   return (
     <>
-      <RouterCard snapshot={snapshot} observation={snapshot.routerAgentId ? agents[snapshot.routerAgentId] : undefined}
+      <RouterCard snapshot={routerSnapshot} observation={routerAgentId ? agents[routerAgentId] : undefined}
         theme={theme} navigation={navigation} />
       <View style={{ gap: space.sm }}>
         <GroupLabel theme={theme}>{thread ? `本对话的 Worker · ${tickets.length}` : `进行中的 Worker · ${tickets.length}`}</GroupLabel>
@@ -201,7 +205,7 @@ function RouterCard({ snapshot, observation, theme, navigation }: {
   theme: Theme;
   navigation: Navigation;
 }) {
-  const evaluating = snapshot.threads.find((thread) => thread.id === snapshot.engine.currentEvalThreadId);
+  const evaluating = snapshot.engine.evalInFlight ? snapshot.threads.find((thread) => thread.id === snapshot.engine.currentEvalThreadId) : undefined;
   const state: StatusLabel = snapshot.engine.evalInFlight ? { label: "评估中", tone: "warning" }
     : { label: snapshot.routerAgentId ? "待命" : "等待新任务", tone: "muted" };
   const session = snapshot.routerAgentId ? observationStatus(observation) : null;

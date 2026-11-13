@@ -303,6 +303,7 @@ export class DingtalkSource implements ImSource {
     const isGroup = message.conversationType === "2";
     const origin: TriggerOrigin = {
       channel: "dingtalk",
+      accountId: this.config.clientId,
       chatId: message.conversationId,
       messageId: message.msgId,
       replyRef: message.sessionWebhook ?? null,

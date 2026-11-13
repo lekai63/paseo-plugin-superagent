@@ -87,7 +87,7 @@ test("weixin private messages from the allowlist become triggers with their cont
   assert.equal(inbound.text, "帮我看下构建");
   assert.equal(inbound.sender, "weixin:owner@im.wechat");
   assert.deepEqual(inbound.origin, {
-    channel: "weixin", chatId: "owner@im.wechat", messageId: "100", replyRef: "ctx-1", senderId: "owner@im.wechat", senderName: null,
+    channel: "weixin", accountId: account.botId, chatId: "owner@im.wechat", messageId: "100", replyRef: "ctx-1", senderId: "owner@im.wechat", senderName: null,
   });
   assert.equal(await source.translate(userMessage({ message_id: "100" })), null, "duplicate deliveries are ignored");
   assert.equal(await source.translate(userMessage({ from_user_id: "stranger@im.wechat" })), null, "strangers are rejected");

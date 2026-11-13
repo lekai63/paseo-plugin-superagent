@@ -212,6 +212,7 @@ export class WecomSource implements ImSource {
 
     const origin: TriggerOrigin = {
       channel: "wecom",
+      accountId: this.config.botId,
       chatId,
       messageId: message.msgid,
       replyRef: reqId,
