@@ -64,7 +64,7 @@ export default function superagentPiAdapter(pi) {
     // 按实时活跃集裁剪后写回:setActiveTools 忽略未知名,尚未连接的回读工具
     // 留给注册时的自动激活(direct 工具注册即激活),不会因此丢失。
     const active = typeof pi.getActiveTools === "function" ? pi.getActiveTools() : [];
-    const keep = active.filter((name) => typeof name === "string" && RECALL_TOOLS.test(name));
+    const keep = active.filter((name) => typeof name === "string" && RECALL_TOOLS.test(name)).sort();
     if (typeof pi.setActiveTools === "function") pi.setActiveTools(keep);
 
     // 决策角色不需要项目上下文与技能提示词(数组原地清空)。

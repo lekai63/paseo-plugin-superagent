@@ -1,7 +1,7 @@
 {
   "id": "superagent",
   "name": "Superagent",
-  "description": "Router/Worker 双层编排:常驻 Router agent 评估触发事件,按 Ticket 派发隔离 Worker,线程订阅直通,看门狗巡检",
+  "description": "Router/Worker 双层编排:独立 Router 会话评估触发事件,按 Ticket 派发隔离 Worker,线程订阅直通,看门狗巡检",
   "requirements": {
     "paseo": ">=0.15.0"
   },

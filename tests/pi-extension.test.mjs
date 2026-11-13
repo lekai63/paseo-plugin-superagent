@@ -69,8 +69,8 @@ test("decision-only roles keep only recall tools and clear skills/contextFiles",
     setEnv("http://127.0.0.1:1/mcp", role);
     const pi = fakePi({
       activeTools: ["read", "bash", "edit", "write", "codemode", "tool_search",
-        "mcp__superagent__superagent_list", "mcp__superagent__superagent_read",
-        "mcp__superagent__superagent_search", "mcp__other__probe"],
+        "mcp__superagent__superagent_search", "mcp__superagent__superagent_read",
+        "mcp__superagent__superagent_list", "mcp__other__probe"],
     });
     extension.default(pi);
     const beforeAgentStart = pi.handlers["before_agent_start"]?.[0];

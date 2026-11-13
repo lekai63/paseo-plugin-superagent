@@ -372,7 +372,7 @@ export const ImDeliverySchema = z.object({
 });
 export type ImDelivery = z.infer<typeof ImDeliverySchema>;
 
-/** Router 原生会话已接收的配置与事件游标;不把正文重复塞回后续评估。 */
+/** 旧版 Router 会话游标,仅为兼容已保存的状态保留;独立评估不再读取。 */
 const RouterPromptStateSchema = z.object({
   agentId: z.string(),
   sessionId: z.string().nullable(),
@@ -383,12 +383,13 @@ const RouterPromptStateSchema = z.object({
 });
 
 /**
- * LLM 看门狗(§6)的持久状态:会话 id、规则游标、上次巡检结论,以及每个 Ticket
+ * LLM 看门狗(§6)的持久状态:最近一次会话 id、上次巡检结论,以及每个 Ticket
  * 上次巡检时看到的时间线位置(判断"有没有实质进展"的依据)。
  */
 const WatchdogStateSchema = z.object({
   agentId: z.string().nullish(),
   provider: z.string().nullish(),
+  /** 旧版规则游标,独立巡检不再使用。 */
   configHash: z.string().nullish(),
   lastRunAt: z.string().nullish(),
   lastSummary: z.string().nullish(),

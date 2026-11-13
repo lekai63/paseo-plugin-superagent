@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { composeEvalPrompt, parseVerdict } from "../server/router.ts";
+import { composeEvalPrompt, composeRouterInstructions, parseVerdict } from "../server/router.ts";
 import { composeWorkerPrompt, taskDirectory } from "../server/workers.ts";
 import { dispatchMandateIssue, emptyState, verdictPlaceholderIssue } from "../shared/model.ts";
 import { MAX_ROUTER_INSTRUCTIONS_CHARS, SETTINGS_DEFAULTS, superagentSettings } from "../shared/settings.ts";
 
-// ACP providers receive initialization in their first user turn; subsequent turns only carry events.
+// Native providers carry stable rules in systemPrompt; ACP providers use a stable user-message prefix.
 
 test("normal Router turns contain each user message once and omit stable instructions and history", () => {
   const text = "请调研项目登录失败的原因，并整理验证结果。";
@@ -401,4 +401,33 @@ test("IM-origin threads get channel reply-style guidance; manual threads do not"
     thread: { ...thread, id: "t2", key: "k2" }, batch: [manualTrigger], state: manualState, worker, includeInstructions: false,
   });
   assert.doesNotMatch(manualPrompt, /Reply style for this channel/);
+});
+
+
+test("Router static rules and examples stay ahead of variable configuration", () => {
+  const worker = { workingDir: "/repo", isolation: "worktree", issue: null };
+  const first = composeRouterInstructions(worker, "用中文回答");
+  const second = composeRouterInstructions({ ...worker, workingDir: "/other", profiles: [
+    { name: "research", provider: "pi/model", description: "research" },
+  ] }, "Answer in English", { speculative: true });
+  const prefix = first.slice(0, first.indexOf("\n\n## Current Router preferences"));
+  assert.ok(prefix.includes('"action":"respond"'));
+  assert.ok(prefix.includes('"action":"stop"'));
+  assert.ok(second.startsWith(prefix));
+  assert.ok(first.indexOf('"action":"stop"') < first.indexOf("用中文回答"));
+});
+
+test("fresh evaluation history stays within eight stubs and excludes other threads", () => {
+  const state = emptyState();
+  for (let i = 0; i < 15; i++) state.triggers.push({
+    id: `old-${i}`, threadId: "thread", status: "evaluated", kind: "manual", sender: "user",
+    text: `old message ${i}`, receivedAt: String(i).padStart(2, "0"),
+  });
+  state.triggers.push({ ...state.triggers.at(-1), id: "other", threadId: "other", text: "other thread secret" });
+  const prompt = composeEvalPrompt({ thread: { id: "thread", title: "topic" },
+    batch: [{ id: "current", text: "current event", sender: "user", kind: "manual" }], state,
+    worker: { workingDir: "/repo", isolation: "worktree", issue: null }, includeInstructions: false });
+  assert.equal(prompt.match(/^- \[trigger /gm).length, 8);
+  assert.match(prompt, /old message 7/);
+  assert.doesNotMatch(prompt, /old message 6|other thread secret/);
 });

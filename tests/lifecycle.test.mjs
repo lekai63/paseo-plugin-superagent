@@ -36,7 +36,7 @@ async function until(predicate) {
 function fixture(t, status = "running", subscribed = true) {
   const state = emptyState();
   Object.assign(state.kv, {
-    routerAgentId: "router", routerProvider: "codex/test", workerProvider: "codex/test",
+    backgroundWorkspaces: { "/mock/repo": "role-workspace" }, routerAgentId: "router", routerProvider: "codex/test", workerProvider: "codex/test",
   });
   state.threads.push({
     id: "thread", key: "manual:test", title: "test", state: "active", summary: null,
@@ -58,7 +58,7 @@ function fixture(t, status = "running", subscribed = true) {
   const controls = {
     send: async () => {},
     createAgent: async () => ({ id: "new-worker" }),
-    createRouterAgent: async () => ref("new-router"),
+    createRouterAgent: async () => ref(calls.routerCreates.length === 1 ? "new-router" : `new-router-${calls.routerCreates.length}`),
     timeline: async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: "work completed" } }] }),
     verdict: { decision: "reply", reply: "done" },
     patrolVerdict: { summary: "all good", actions: [] },
@@ -130,7 +130,7 @@ function fixture(t, status = "running", subscribed = true) {
     if (!workspaceHandles.has(id)) workspaceHandles.set(id, {
       id,
       current: () => daemonWorkspaces.get(id) ?? null,
-      refresh: async () => daemonWorkspaces.get(id) ?? (id === "role-workspace" ? { background: true } : null),
+      refresh: async () => daemonWorkspaces.get(id) ?? (id === "role-workspace" ? { background: true, workspaceDirectory: "/mock/repo" } : null),
       agents: {
         create: async (options) => {
           if (options.labels?.["superagent.role"] === "router") {
@@ -141,8 +141,9 @@ function fixture(t, status = "running", subscribed = true) {
           }
           if (options.labels?.["superagent.role"] === "watchdog") {
             calls.watchdogCreates.push(options);
-            controls.agentWorkspaces.set("watchdog", id);
-            return ref("watchdog");
+            const agentId = calls.watchdogCreates.length === 1 ? "watchdog" : `watchdog-${calls.watchdogCreates.length}`;
+            controls.agentWorkspaces.set(agentId, id);
+            return ref(agentId);
           }
           calls.workerCreates.push(options);
           return controls.createAgent(options);
@@ -480,7 +481,7 @@ test("canceling a blocked Worker clears its pending input and cannot answer a fu
   assert.equal(f.calls.permissionResponses.length, 0);
 });
 
-test("ACP Router bootstraps once, then sends only new events without duplicate user text", async (t) => {
+test("ACP Router starts fresh each evaluation with an identical instruction prefix", async (t) => {
   const f = fixture(t, "waiting");
   f.state.kv.routerAgentId = null;
   f.values.routerProvider = "zcode-acp/builtin:plan\\GLM";
@@ -494,8 +495,12 @@ test("ACP Router bootstraps once, then sends only new events without duplicate u
   assert.equal(first.split(text).length - 1, 1);
   const second = await evaluateRouter(f, "second event");
   assert.match(second, /second event/);
-  assert.doesNotMatch(second, /Superagent Router instructions|"actions"|## Worker environment|Recent thread history|这条用户消息/);
-  assert.equal(f.calls.routerCreates.length, 1);
+  assert.match(second, /Superagent Router instructions|Recent thread history/);
+  assert.match(second, /这条用户消息/);
+  assert.equal(second.split("\n---\n")[0], first.split("\n---\n")[0]);
+  assert.equal(f.calls.routerCreates.length, 2);
+  assert.equal(f.state.kv.routerAgentId, "new-router-2");
+  assert.ok(f.calls.archives.includes("new-router"));
 });
 
 test("a new native Router receives its rules as systemPrompt rather than repeating them in user turns", async (t) => {
@@ -511,12 +516,14 @@ test("a new native Router receives its rules as systemPrompt rather than repeati
   assert.match(prompt, /first event/);
 });
 
-test("configuration changes are sent once and temporary directory issues do not resend static rules", async (t) => {
+test("fresh native sessions receive current configuration and temporary issues stay out of the system prompt", async (t) => {
   const f = fixture(t, "waiting");
   await evaluateRouter(f);
   assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
   f.controls.settingsChanged({ status: "ready", values: { ...f.values, routerInstructions: "报告先写结论。" } });
-  assert.match(await evaluateRouter(f), /报告先写结论/);
+  assert.doesNotMatch(await evaluateRouter(f), /报告先写结论|Superagent Router instructions/);
+  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /报告先写结论/);
+  const stableSystem = f.calls.routerCreates.at(-1).config.systemPrompt;
   assert.doesNotMatch(await evaluateRouter(f), /报告先写结论|Superagent Router instructions/);
   f.controls.isGit = false;
   const unavailable = await evaluateRouter(f);
@@ -526,12 +533,18 @@ test("configuration changes are sent once and temporary directory issues do not 
   const ready = await evaluateRouter(f);
   assert.match(ready, /Worker environment: ready/);
   assert.doesNotMatch(ready, /PROBLEM:|Superagent Router instructions/);
+  assert.equal(f.calls.routerCreates.at(-1).config.systemPrompt, stableSystem);
 });
 
-test("restoring the same native session across engine restart reuses the persisted initialization cursor", async (t) => {
+test("engine restart creates a new Router even when the previous native session still exists", async (t) => {
   const f = fixture(t, "waiting");
   f.controls.routerSessionId = "session-stable";
   await evaluateRouter(f);
+  // 旧版落盘的已读游标不能让新会话省掉线程窗口。
+  f.state.kv.routerPromptState = {
+    agentId: "new-router", sessionId: "session-stable", configHash: "legacy",
+    compactionSeq: 0, threadIds: ["thread"], triggerIds: f.state.triggers.map((trigger) => trigger.id),
+  };
   Object.assign(f.state, SuperagentStateSchema.parse(JSON.parse(JSON.stringify(f.state))));
   const restored = new SuperagentEngine(f.engine.store, {
     subscribe: () => {}, read: async () => ({ status: "ready", values: f.values }),
@@ -542,31 +555,33 @@ test("restoring the same native session across engine restart reuses the persist
   await setImmediate();
   const prompt = await evaluateRouter({ ...f, engine: restored }, "after restart");
   assert.match(prompt, /after restart/);
-  assert.doesNotMatch(prompt, /Superagent Router instructions|Recent thread history/);
+  assert.doesNotMatch(prompt, /Superagent Router instructions/);
+  assert.match(prompt, /Recent thread history/);
+  assert.equal(f.calls.routerCreates.length, 2);
+  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /Superagent Router instructions/);
 });
 
-test("native session replacement and observed compaction restore rules and history once", async (t) => {
+test("every Router evaluation gets bounded history regardless of compaction in the previous session", async (t) => {
   const f = fixture(t, "waiting");
-  f.controls.routerSessionId = "session-one";
   await evaluateRouter(f, "original event");
-  f.controls.routerSessionId = "session-two";
-  const replaced = await evaluateRouter(f, "session replaced");
-  assert.match(replaced, /Superagent Router instructions/);
-  assert.match(replaced, /original event/);
-  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
-  f.controls.routerTimeline = async () => ({ entries: [{ seqStart: 20, item: { type: "compaction", status: "completed" } }] });
-  assert.match(await evaluateRouter(f), /Superagent Router instructions/);
-  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
+  f.controls.routerTimeline = async () => { throw new Error("old timeline must not be read"); };
+  const next = await evaluateRouter(f, "next event");
+  assert.match(next, /original event/);
+  assert.match(next, /Recent thread history/);
+  assert.doesNotMatch(next, /Superagent Router instructions/);
+  assert.equal(f.calls.routerCreates.length, 2);
+  assert.equal(f.calls.routerCreates[0].config.systemPrompt, f.calls.routerCreates[1].config.systemPrompt);
 });
 
-test("unseen direct-to-Worker context reaches Router exactly once without replaying old thread history", async (t) => {
+test("direct-to-Worker context is supplied to every fresh Router without duplicating it in history", async (t) => {
   const f = fixture(t, "waiting");
   await evaluateRouter(f);
   f.state.triggers.push({ ...f.state.triggers[0], id: "direct-followup", status: "delivered", text: "追加要求：输出中文报告。" });
-  const next = await evaluateRouter(f, "worker finished");
-  assert.match(next, /already delivered directly to Workers \(do not dispatch again/);
-  assert.equal(next.split("追加要求：输出中文报告。").length - 1, 1);
-  assert.doesNotMatch(await evaluateRouter(f), /追加要求|Recent thread history/);
+  for (const text of ["worker finished", "next event"]) {
+    const next = await evaluateRouter(f, text);
+    assert.match(next, /already delivered directly to Workers \(do not dispatch again/);
+    assert.equal(next.split("追加要求：输出中文报告。").length - 1, 1);
+  }
 });
 
 test("a new thread gets recovery context without resending the Router protocol", async (t) => {
@@ -587,16 +602,18 @@ test("invalid Router output does not mark a bootstrap as successfully applied", 
   await evaluateRouter(f);
   assert.equal(f.state.kv.routerPromptState, undefined);
   f.controls.verdict = { actions: [{ action: "ignore" }] };
-  assert.match(await evaluateRouter(f), /Superagent Router instructions/);
+  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
+  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /Superagent Router instructions/);
 });
 
-test("invalid continuation output triggers one context repair for an already initialized Router", async (t) => {
+test("invalid output is retried in a new session with its rules and thread window", async (t) => {
   const f = fixture(t, "waiting");
   await evaluateRouter(f);
   f.controls.verdict = { invalid: true };
   assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
   f.controls.verdict = { actions: [{ action: "ignore" }] };
-  assert.match(await evaluateRouter(f), /Superagent Router instructions/);
+  assert.match(await evaluateRouter(f), /Recent thread history/);
+  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /Superagent Router instructions/);
   assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
 });
 
@@ -609,16 +626,9 @@ test("direct context is bounded and older omitted messages do not leak into late
   assert.equal(prompt.match(/id: direct-/g).length, 8);
   assert.doesNotMatch(prompt, /context-0:/);
   assert.match(prompt, /context-11:/);
-  assert.doesNotMatch(await evaluateRouter(f), /context-\d+:/);
-});
-
-test("uncertain compaction state causes a conservative bootstrap rather than silently dropping rules", async (t) => {
-  const f = fixture(t, "waiting");
-  await evaluateRouter(f);
-  f.controls.routerTimeline = async () => { throw new Error("timeline unavailable"); };
-  assert.match(await evaluateRouter(f), /Superagent Router instructions/);
-  f.controls.routerTimeline = async () => ({ entries: [] });
-  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
+  const next = await evaluateRouter(f);
+  assert.doesNotMatch(next, /context-0:/);
+  assert.match(next, /context-11:/);
 });
 
 test("IM sends the complete long reply sequentially and persists each acknowledged part", async (t) => {
@@ -721,20 +731,20 @@ test("IM recovery sends nothing while the durable outbox cannot be written", asy
   assert.equal(f.state.imDeliveries[0].nextPart, 0);
 });
 
-test("Router rules update on the next eval using the same agent and can be cleared", async (t) => {
+test("Router rules update in each new agent system prompt and can be cleared", async (t) => {
   const f = fixture(t, "waiting");
   await setImmediate();
   for (const rules of ["中文汇报,列出验证情况。", "简洁答复,优先说明阻塞项。", ""]) {
     f.controls.settingsChanged({ status: "ready", values: { ...f.values, routerInstructions: rules } });
     pendingTrigger(f.state);
     await f.engine.runEval("thread");
-    const prompt = f.calls.prompts.at(-1);
+    const prompt = f.calls.routerCreates.at(-1).config.systemPrompt;
     if (rules) assert.ok(prompt.includes(rules));
     else assert.match(prompt, /No custom Router preferences are configured\. Use the built-in rules only/);
     f.state.triggers = [];
   }
   assert.equal(f.calls.prompts.length, 3);
-  assert.equal(f.calls.routerCreates.length, 0, "the existing Router is reused");
+  assert.equal(f.calls.routerCreates.length, 3, "each evaluation creates a fresh Router");
   assert.equal(f.calls.workerCreates.length, 0);
 });
 
@@ -809,7 +819,7 @@ test("reply then stop retains both the Router conclusion and full Worker report 
     await archive();
   };
   await f.engine.runEval("thread");
-  assert.deepEqual(f.calls.archives, ["worker"]);
+  assert.deepEqual(f.calls.archives, ["router", "worker"]);
   assert.equal(f.engine.snapshot().threads.length, 0);
   const result = f.engine.snapshot().recentResults[0];
   assert.equal(result.kind, "router_reply");
@@ -944,7 +954,7 @@ for (const closer of ["closeThread", "Router stop"]) {
     await launching;
     assert.equal(f.ticket.status, "canceled");
     assert.equal(f.state.threads[0].state, "closed");
-    assert.deepEqual(f.calls.archives, ["late-worker"]);
+    assert.deepEqual(f.calls.archives, closer === "closeThread" ? ["late-worker"] : ["router", "late-worker"]);
     assert.deepEqual(f.calls.workspaceArchives, ["new-workspace"]);
     assert.deepEqual(f.calls.watches, []);
   });
@@ -1001,7 +1011,7 @@ test("Router stop retires every worker on the thread, including unsubscribed, la
   pendingTrigger(f.state);
   f.controls.verdict = { decision: "stop" };
   await f.engine.runEval("thread");
-  assert.deepEqual(f.calls.archives.sort(), ["finished-worker", "starting-worker", "worker"]);
+  assert.deepEqual(f.calls.archives.sort(), ["finished-worker", "router", "starting-worker", "worker"]);
   assert.deepEqual(f.calls.workspaceArchives.sort(), ["starting-workspace", "workspace", "workspace"]);
   assert.deepEqual(f.state.tickets.map((ticket) => ticket.status), ["canceled", "canceled", "completed"]);
 });
@@ -1051,7 +1061,7 @@ test("Router receives the syntax error and resends all actions before any are ex
   ] };
   const prompts = [];
   const timeouts = [];
-  f.ref("router").run = async (prompt, options) => {
+  f.ref("new-router").run = async (prompt, options) => {
     prompts.push(prompt);
     timeouts.push(options.timeoutMs);
     assert.equal(f.calls.creates, 0);
@@ -1081,7 +1091,7 @@ test("Router gets one correction attempt then records the final error and keeps 
   pendingTrigger(f.state);
   let attempts = 0;
   const final = '{"actions":[{"action":"reply":"still broken"}]}';
-  f.ref("router").run = async () => ({ lastMessage: ++attempts === 1 ? 'no JSON' : final });
+  f.ref("new-router").run = async () => ({ lastMessage: ++attempts === 1 ? 'no JSON' : final });
   f.engine.evalFailures.set("thread", 2);
   await f.engine.runEval("thread");
   assert.equal(attempts, 2);
@@ -1098,7 +1108,7 @@ test("Router can correct a schema error using the same feedback path", async (t)
   const f = fixture(t, "completed");
   pendingTrigger(f.state);
   const prompts = [];
-  f.ref("router").run = async (prompt) => {
+  f.ref("new-router").run = async (prompt) => {
     prompts.push(prompt);
     return { lastMessage: JSON.stringify({ actions: prompts.length === 1
       ? [{ action: "reply" }] : [{ action: "reply", reply: "corrected" }] }) };
@@ -1115,7 +1125,7 @@ test("closing a thread during Router correction discards its late dispatch", asy
   const correction = deferred();
   const entered = deferred();
   let attempts = 0;
-  f.ref("router").run = async () => {
+  f.ref("new-router").run = async () => {
     if (++attempts === 1) return { lastMessage: 'no JSON' };
     entered.resolve();
     return correction.promise;
@@ -1232,7 +1242,7 @@ test("a steer before stop is delivered before the thread closes", async (t) => {
   assert.ok(f.calls.sends[0].text.includes("wrap up now"));
   assert.equal(f.ticket.status, "canceled");
   assert.equal(f.state.threads[0].state, "closed");
-  assert.deepEqual(f.calls.archives, ["worker"]);
+  assert.deepEqual(f.calls.archives, ["router", "worker"]);
   assert.deepEqual(f.calls.workspaceArchives, ["workspace"]);
   assert.equal(f.state.triggers[0].status, "evaluated");
   assert.equal(f.state.pendingActions.length, 0);
@@ -1295,7 +1305,7 @@ test("a Router cancel action cancels exactly one ticket and keeps the thread ope
   assert.equal(f.state.threads[0].state, "active");
   assert.equal(f.ticket.status, "running");
   assert.equal(f.state.tickets.find((ticket) => ticket.id === "other").status, "canceled");
-  assert.deepEqual(f.calls.archives, ["worker2"]);
+  assert.deepEqual(f.calls.archives, ["router", "worker2"]);
   assert.deepEqual(f.calls.workspaceArchives, ["workspace2"]);
   assert.equal(f.state.triggers[0].status, "evaluated");
 });
@@ -1348,7 +1358,7 @@ test("closing a thread during Router evaluation discards the late dispatch verdi
   pendingTrigger(f.state);
   const verdict = deferred();
   const entered = deferred();
-  f.ref("router").run = () => { entered.resolve(); return verdict.promise; };
+  f.ref("new-router").run = () => { entered.resolve(); return verdict.promise; };
   const evaluating = f.engine.runEval("thread");
   await entered.promise;
   await f.engine.closeThread("thread");
@@ -1476,7 +1486,7 @@ test("the Router sees the worker base directory and any problem with it", async 
   pendingTrigger(f.state);
   await f.engine.runEval("thread");
   const prompt = f.calls.prompts.at(-1);
-  assert.match(prompt, /## Worker environment\nbase directory: \/mock\/repo\nisolation: worktree/);
+  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /## Worker environment\nbase directory: \/mock\/repo\nisolation: worktree/);
   assert.match(prompt, /PROBLEM: worker working directory \/mock\/repo is not a git repository/);
   assert.match(f.engine.snapshot().workingDirIssue, /not a git repository/);
 });
@@ -1502,7 +1512,7 @@ test("shared workers and the Router are pointed at the base directory's AGENTS.m
   pendingTrigger(f.state);
   f.state.tickets[0].status = "completed";
   await f.engine.runEval("thread");
-  assert.match(f.calls.prompts.at(-1), /The base directory has its own project instructions \(AGENTS\.md\)/);
+  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /The base directory has its own project instructions \(AGENTS\.md\)/);
 });
 
 test("worktree workers are not told about base-directory instruction files", async (t) => {
@@ -1537,8 +1547,8 @@ test("dispatches run each ticket on the provider of its chosen worker profile", 
   assert.deepEqual([code.profile, code.provider], [null, "codex/test"]);
   assert.deepEqual([report.profile, report.provider], ["glm", GLM]);
   assert.equal(f.state.kv.workerProvider, "codex/test", "a named profile never overwrites the default worker");
-  assert.match(f.calls.prompts.at(-1), /## Worker profiles/);
-  assert.match(f.calls.prompts.at(-1), /- default \(codex\/test\): general work that fits no other profile/);
+  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /## Worker profiles/);
+  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /- default \(codex\/test\): general work that fits no other profile/);
 });
 
 test("an unknown profile from the Router falls back to the default worker and is recorded", async (t) => {
@@ -1640,6 +1650,7 @@ test("the snapshot exposes the configured worker profiles", async (t) => {
 
 test("the Router is created inside a background workspace, which is remembered and reused", async (t) => {
   const f = fixture(t);
+  f.state.kv.backgroundWorkspaces = {};
   f.state.kv.routerAgentId = null;
   f.controls.verdict = { actions: [{ action: "ignore" }] };
   await evaluateRouter(f);
@@ -1685,6 +1696,7 @@ test("shared workers join the 默认 workspace and retiring them never archives 
 
 test("legacy Router and watchdog sessions move to one background workspace without hiding Workers", async (t) => {
   const f = fixture(t, "running");
+  f.state.kv.backgroundWorkspaces = {};
   f.daemonWorkspaces.set("legacy-workspace", {
     id: "legacy-workspace", name: "默认 workspace", workspaceDirectory: "/mock/repo", background: false,
   });
@@ -1738,6 +1750,7 @@ test("a Worker detach failure leaves the legacy Router intact for a later replac
 
 test("a busy legacy watchdog waits until idle before background replacement", async (t) => {
   const f = fixture(t, "running");
+  f.state.kv.backgroundWorkspaces = {};
   f.values.watchdogEnabled = true;
   f.state.kv.watchdog = { agentId: "legacy-watchdog", provider: "codex/test", seen: {} };
   f.controls.sessionStatuses.set("legacy-watchdog", "running");
@@ -2270,7 +2283,7 @@ test("speculative dispatch is honored only when enabled, never subscribes, and i
   f.values.speculativeEnabled = true;
   f.controls.verdict = { actions: [spec("一"), spec("二"), spec("三")] };
   await evaluateRouter(f, "又有人反馈");
-  assert.match(f.calls.prompts.at(-1), /## Speculative execution \(enabled\)/);
+  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /## Speculative execution \(enabled\)/);
   const speculative = f.state.tickets.filter((ticket) => ticket.speculative);
   assert.deepEqual(speculative.map((ticket) => ticket.title), ["一", "二"]);
   assert.ok(speculative.every((ticket) => ticket.subscribed === false));
@@ -2354,9 +2367,16 @@ test("the LLM watchdog patrols unfinished work, judges progress across patrols, 
 
   f.controls.patrolVerdict = { summary: "steady", actions: [] };
   await f.engine.maybePatrol(true);
-  assert.equal(f.calls.watchdogCreates.length, 1, "the watchdog session is reused");
+  assert.equal(f.calls.watchdogCreates.length, 2, "each patrol uses a fresh session");
+  assert.equal(f.state.kv.watchdog.agentId, "watchdog-2");
+  assert.ok(f.calls.archives.includes("watchdog"));
+  assert.equal(f.calls.watchdogCreates[0].config.systemPrompt, f.calls.watchdogCreates[1].config.systemPrompt);
+  assert.match(f.calls.patrols[1], /Previous patrol/);
+  assert.match(f.calls.patrols[1], /ticket loops on the same failure/);
+  assert.match(f.calls.patrols[1], /nudge: 先跑单测再改代码/);
+  assert.match(f.calls.patrols[1], /escalate: 需要人决定是否回滚/);
   assert.match(f.calls.patrols[1], /activity since last patrol: NONE/);
-  assert.doesNotMatch(f.calls.patrols[1], /Superagent Watchdog instructions/, "rules are not resent to the same session");
+  assert.doesNotMatch(f.calls.patrols[1], /Superagent Watchdog instructions/, "rules remain in the system prompt");
   assert.equal(f.engine.snapshot().engine.patrol.lastSummary, "steady");
 });
 
@@ -2507,4 +2527,42 @@ test("a new codex Router is created with a read-only sandbox", async (t) => {
   f.state.kv.routerAgentId = null;
   await evaluateRouter(f, "first event");
   assert.deepEqual(f.calls.routerCreates[0].config.options, { sandbox_mode: "read-only" });
+});
+
+
+test("a failed Router run is remembered for archival and the retry gets a fresh session", async (t) => {
+  const f = fixture(t, "waiting");
+  f.ref("new-router").run = async () => { throw new Error("provider timeout"); };
+  await assert.rejects(evaluateRouter(f, "timeout event"), /provider timeout/);
+  assert.equal(f.state.kv.routerAgentId, "new-router");
+  assert.equal(f.state.triggers.at(-1).status, "pending");
+  await f.engine.runEval("thread");
+  assert.equal(f.state.kv.routerAgentId, "new-router-2");
+  assert.ok(f.calls.archives.includes("new-router"));
+  assert.match(f.calls.prompts.at(-1), /timeout event/);
+});
+
+test("a failed watchdog run is remembered for archival and its error reaches the next fresh patrol", async (t) => {
+  const f = fixture(t, "running");
+  f.values.watchdogEnabled = true;
+  f.ref("watchdog").run = async () => { throw new Error("patrol timeout"); };
+  await assert.rejects(f.engine.maybePatrol(true), /patrol timeout/);
+  assert.equal(f.state.kv.watchdog.agentId, "watchdog");
+  assert.equal(f.state.kv.watchdog.lastError, "patrol timeout");
+  await f.engine.maybePatrol(true);
+  assert.equal(f.state.kv.watchdog.agentId, "watchdog-2");
+  assert.ok(f.calls.archives.includes("watchdog"));
+  assert.match(f.calls.patrols.at(-1), /error: patrol timeout/);
+});
+
+test("a busy watchdog yields even when its provider setting changes", async (t) => {
+  const f = fixture(t, "running");
+  f.values.watchdogEnabled = true;
+  f.state.kv.watchdog = { agentId: "watchdog", provider: "old/model", seen: {} };
+  f.controls.sessionStatuses.set("watchdog", "running");
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.watchdogCreates.length, 0);
+  assert.equal(f.calls.patrols.length, 0);
+  assert.equal(f.state.kv.watchdog.provider, "old/model");
+  assert.match(f.state.kv.watchdog.lastSummary, /skipped/);
 });

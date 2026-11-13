@@ -1,5 +1,4 @@
 import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
-import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
@@ -41,8 +40,6 @@ import {
   newDecision,
   parseVerdict,
   readLastAssistantMessage,
-  routerCompactionSeq,
-  routerSessionId,
   routerUsesSystemPrompt,
   type RouterWorkerEnvironment,
 } from "./router";
@@ -210,8 +207,6 @@ export class SuperagentEngine {
   private sendingDeliveries = new Set<string>();
   /** 已提示过的 provider 设置纠正(每个设置值只告警一次)。 */
   private providerNotes = new Set<string>();
-  /** 无原生 session ID 的 provider,至少在本引擎生命周期内复用初始化状态。 */
-  private routerSessionsSeen = new Set<string>();
   /** Worker 基础目录检查(可替换,便于测试)与缓存结果。 */
   workingDirProbe: WorkingDirProbe = nodeWorkingDirProbe;
   private workingDirIssue: string | null = null;
@@ -809,7 +804,6 @@ export class SuperagentEngine {
     };
     const ruleOptions = { speculative: this.settingsValues.speculativeEnabled };
     const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions, ruleOptions);
-    const configHash = createHash("sha256").update(instructions).digest("hex");
     // Router 与看门狗落在专用后台工作区,与普通 Worker 工作区分离。
     // 回读/检索工具(superagent_list/read/search)由 session_open 转换注入,不经 agent config。
     const router = await ensureRouter(
@@ -829,18 +823,9 @@ export class SuperagentEngine {
       });
     }
 
-    // 2. 按原生会话复用规则与已读事件;仅初始化/配置变化/压缩恢复时补齐。
-    const remembered = state.kv.routerPromptState;
-    const compactionSeq = await routerCompactionSeq(router.handle);
-    const sameSession = !router.created && remembered?.agentId === routerAgentId
-      && (!remembered.sessionId || !router.sessionId || remembered.sessionId === router.sessionId)
-      && ((router.sessionId !== null && remembered.sessionId === router.sessionId) || this.routerSessionsSeen.has(routerAgentId));
-    const restoreContext = !sameSession || compactionSeq === null || compactionSeq > (remembered?.compactionSeq ?? 0)
-      || (this.evalFailures.get(threadId) ?? 0) > 0;
-    const unseenContext = state.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered"
-      && (restoreContext || !remembered?.triggerIds.includes(trigger.id)))
-      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
-    const contextTriggers = unseenContext.slice(-8);
+    // 2. 每次新会话都由持久状态恢复窗口;不依赖旧会话的已读游标。
+    const contextTriggers = state.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered")
+      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt)).slice(-8);
     const chatter = this.chatterFor(state, threadId, batch);
     const prompt = composeEvalPrompt({
       thread,
@@ -848,9 +833,8 @@ export class SuperagentEngine {
       state,
       routerInstructions: this.settingsValues.routerInstructions,
       worker,
-      includeInstructions: (restoreContext || remembered?.configHash !== configHash)
-        && !(router.created && routerUsesSystemPrompt(routerProvider)),
-      includeHistory: restoreContext || !remembered?.threadIds.includes(threadId),
+      includeInstructions: !routerUsesSystemPrompt(routerProvider),
+      includeHistory: true,
       contextTriggers,
       chatter,
       options: ruleOptions,
@@ -1015,16 +999,8 @@ export class SuperagentEngine {
     // 成功裁决也留一份截断的原始回复,挂在批内首条决策上:格式/占位类问题事后可审计。
     decisions[0].raw = truncate(replyText, 1200);
 
-    this.routerSessionsSeen.add(routerAgentId);
     await this.store.update((next) => {
-      next.kv.routerPromptState = {
-        agentId: routerAgentId, sessionId: routerSessionId(router.handle.current()) ?? router.sessionId, configHash,
-        compactionSeq: Math.max(compactionSeq ?? 0, sameSession ? remembered?.compactionSeq ?? 0 : 0),
-        threadIds: [...new Set([...(restoreContext ? [] : remembered?.threadIds ?? []), threadId])]
-          .filter((id) => next.threads.some((thread) => thread.id === id)),
-        triggerIds: [...new Set([...(restoreContext ? [] : remembered?.triggerIds ?? []), ...triggerIds, ...unseenContext.map((trigger) => trigger.id)])]
-          .filter((id) => next.triggers.some((trigger) => trigger.id === id)),
-      };
+      delete next.kv.routerPromptState; // 清除旧版会话游标,不再记录已读历史。
       if (delivery) next.imDeliveries.push(delivery);
       next.decisions.push(...decisions);
       next.tickets.push(...createdTickets);
@@ -1724,9 +1700,7 @@ export class SuperagentEngine {
       : await this.resolveProvider("router", this.store.get().kv.routerProvider);
     if (!provider) throw new Error("no available provider for the watchdog");
     const instructions = composeWatchdogInstructions();
-    const configHash = createHash("sha256").update(instructions).digest("hex");
     const state = this.store.get();
-    const remembered = state.kv.watchdog;
     const watchdog = await ensureWatchdog(
       paseo,
       state,
@@ -1735,31 +1709,26 @@ export class SuperagentEngine {
       instructions,
     );
     if (!watchdog.created) {
-      // 维护者正在和看门狗对话:这次巡检让路,下个间隔再来。
-      const live = (await watchdog.handle.refresh().catch(() => null))?.agent;
-      if (live?.status === "running") {
-        await this.updateWatchdogState({ agentId: watchdog.agentId, provider, lastRunAt: now.toISOString(),
-          lastSummary: "skipped: the watchdog session is busy (a maintainer may be talking to it)" });
-        return;
-      }
+      await this.updateWatchdogState({ lastRunAt: now.toISOString(),
+        lastSummary: "skipped: the watchdog session is busy (a maintainer may be talking to it)" });
+      return;
     }
-    const includeRules = watchdog.created
-      ? !routerUsesSystemPrompt(provider)
-      : remembered?.agentId !== watchdog.agentId || remembered?.configHash !== configHash
-        || Boolean(remembered?.lastError?.startsWith("unparsed"));
+    // 先登记新会话,即使 run 超时/抛错,下轮也能归档它,不会遗留失联 agent。
+    await this.updateWatchdogState({ agentId: watchdog.agentId, provider });
+    const includeRules = !routerUsesSystemPrompt(provider);
     const result = await watchdog.handle.run(composePatrolPrompt(digest, includeRules ? instructions : null), {
       timeoutMs: WATCHDOG_RUN_TIMEOUT_MS,
     });
     const replyText = result.lastMessage?.trim() || (await readLastAssistantMessage(paseo, watchdog.agentId)) || "";
     const parsed = parseWatchdogVerdict(replyText);
     if ("error" in parsed) {
-      await this.updateWatchdogState({ agentId: watchdog.agentId, provider, configHash, lastRunAt: now.toISOString(),
+      await this.updateWatchdogState({ agentId: watchdog.agentId, provider, lastRunAt: now.toISOString(),
         lastError: `unparsed: ${truncate(parsed.error, 300)}` });
       return;
     }
     const executed = await this.executeWatchdogActions(parsed.verdict.actions);
     await this.updateWatchdogState({
-      agentId: watchdog.agentId, provider, configHash, lastRunAt: now.toISOString(),
+      agentId: watchdog.agentId, provider, lastRunAt: now.toISOString(),
       lastSummary: truncate(parsed.verdict.summary, 300), lastError: null, lastActions: executed, seen,
     });
   }
@@ -1839,7 +1808,16 @@ export class SuperagentEngine {
       });
     }
     return {
-      digest: { at: now.toISOString(), intervalMin: this.settingsValues.watchdogIntervalMin, tickets, ...this.healthLines(state, now) },
+      digest: {
+        at: now.toISOString(), intervalMin: this.settingsValues.watchdogIntervalMin, tickets, ...this.healthLines(state, now),
+        ...(state.kv.watchdog?.lastRunAt ? { previousPatrol: {
+          at: state.kv.watchdog.lastRunAt, summary: state.kv.watchdog.lastSummary ?? null, error: state.kv.watchdog.lastError ?? null,
+        } } : {}),
+        recentInterventions: state.decisions.filter((decision) => decision.outcome === "watchdog")
+          .slice(-6).reverse().map((decision) => ({
+            at: decision.createdAt, ticketId: decision.ticketId ?? null, threadId: decision.threadId, note: decision.rationale ?? "",
+          })),
+      },
       seen,
     };
   }
