@@ -168,16 +168,77 @@ test("decision roles preserve the configured instructions after Paseo freezes th
   }
 });
 
-test("the pi fallback aborts repeated tool loops and resets the limit for a new turn", async () => {
+const RECALL = ["mcp__superagent__superagent_list", "mcp__superagent__superagent_read", "mcp__superagent__superagent_search"];
+
+test("the recall budget refuses and withdraws every tool instead of aborting, and the next turn restores them", async () => {
   setEnv("http://127.0.0.1:1/mcp", "router");
-  const pi = fakePi();
+  const pi = fakePi({ activeTools: ["bash", ...RECALL] });
   extension.default(pi);
   let aborted = 0;
   const ctx = { abort: () => { aborted++; } };
-  const call = { toolName: "mcp__superagent__superagent_read", input: { id: "ticket" } };
-  for (let i = 0; i < 3; i++) assert.equal(await pi.handlers.tool_call[0](call, ctx), undefined);
-  assert.equal((await pi.handlers.tool_call[0](call, ctx)).block, true);
-  assert.equal(aborted, 1);
+  const [beforeAgentStart] = pi.handlers.before_agent_start;
+  const [toolCall] = pi.handlers.tool_call;
+  await beforeAgentStart({ prompt: "# Thread: thr_1", systemPromptOptions: {} });
+  for (let i = 0; i < extension.CALL_LIMIT; i++) {
+    assert.equal(await toolCall({ toolName: "mcp__superagent__superagent_search", input: { query: `q${i}` } }, ctx), undefined);
+  }
+  const refused = await toolCall({ toolName: "mcp__superagent__superagent_read", input: { id: "trg_x" } }, ctx);
+  assert.equal(refused.block, true);
+  assert.match(refused.reason, /Recall budget exhausted.*Reply now with the JSON verdict/);
+  assert.equal(aborted, 0, "the model still gets to answer");
+  assert.deepEqual(pi.state.active, [], "no tools are declared on the next model request");
+
+  for (let i = 1; i < extension.OVERFLOW_LIMIT; i++) {
+    assert.match((await toolCall({ toolName: "mcp__superagent__superagent_list", input: {} }, ctx)).reason, /Recall budget exhausted/);
+  }
+  assert.equal(aborted, 0);
+  assert.match((await toolCall({ toolName: "mcp__superagent__superagent_list", input: {} }, ctx)).reason, /this run is stopped/);
+  assert.equal(aborted, 1, "only a model that keeps calling after the refusals is stopped");
+
+  await beforeAgentStart({ prompt: "# Thread: thr_1 next batch", systemPromptOptions: {} });
+  assert.deepEqual(pi.state.active, RECALL, "recall tools come back although the live set was emptied");
+  assert.equal(await toolCall({ toolName: "mcp__superagent__superagent_list", input: {} }, ctx), undefined);
+});
+
+test("identical calls are refused without withdrawing the other recall tools", async () => {
+  setEnv("http://127.0.0.1:1/mcp", "watchdog");
+  const pi = fakePi({ activeTools: RECALL });
+  extension.default(pi);
+  let aborted = 0;
+  const ctx = { abort: () => { aborted++; } };
   await pi.handlers.before_agent_start[0]({ systemPromptOptions: {} });
-  assert.equal(await pi.handlers.tool_call[0](call, ctx), undefined);
+  const call = { toolName: "mcp__superagent__superagent_read", input: { id: "ticket" } };
+  for (let i = 0; i < extension.REPEAT_LIMIT; i++) assert.equal(await pi.handlers.tool_call[0](call, ctx), undefined);
+  assert.match((await pi.handlers.tool_call[0](call, ctx)).reason, /already ran 3 times/);
+  assert.deepEqual(pi.state.active, RECALL);
+  assert.equal(await pi.handlers.tool_call[0]({ ...call, input: { id: "other" } }, ctx), undefined);
+  for (let i = 1; i <= extension.OVERFLOW_LIMIT; i++) await pi.handlers.tool_call[0](call, ctx);
+  assert.equal(aborted, 1, "a polling loop is still stopped");
+  await pi.handlers.before_agent_start[0]({ systemPromptOptions: {} });
+  assert.equal(await pi.handlers.tool_call[0](call, ctx), undefined, "the limit resets for a new turn");
+});
+
+test("the budget-exhausted verdict prompt runs without tools", async () => {
+  setEnv("http://127.0.0.1:1/mcp", "router");
+  const pi = fakePi({ activeTools: RECALL });
+  extension.default(pi);
+  let aborted = 0;
+  const ctx = { abort: () => { aborted++; } };
+  await pi.handlers.before_agent_start[0]({ prompt: `${extension.RECALL_EXHAUSTED_MARKER}\nDecide now.`, systemPromptOptions: {} });
+  assert.deepEqual(pi.state.active, []);
+  assert.match((await pi.handlers.tool_call[0]({ toolName: "mcp__superagent__superagent_list", input: {} }, ctx)).reason,
+    /Recall budget exhausted/);
+  assert.equal(aborted, 0);
+  await pi.handlers.before_agent_start[0]({ prompt: "# Thread: thr_1", systemPromptOptions: {} });
+  assert.deepEqual(pi.state.active, RECALL);
+});
+
+test("the extension's budget and verdict marker match the server", async () => {
+  const budget = await import("../server/decision-budget.ts");
+  const router = await import("../server/router.ts");
+  assert.equal(extension.CALL_LIMIT, budget.DECISION_TOOL_LIMIT);
+  assert.equal(extension.REPEAT_LIMIT, budget.DECISION_REPEAT_LIMIT);
+  assert.equal(extension.OVERFLOW_LIMIT, budget.DECISION_OVERFLOW_LIMIT);
+  assert.equal(extension.RECALL_EXHAUSTED_MARKER, router.RECALL_EXHAUSTED_MARKER);
+  assert.ok(router.composeBudgetExhaustedPrompt("thr_1", 12).startsWith(router.RECALL_EXHAUSTED_MARKER));
 });

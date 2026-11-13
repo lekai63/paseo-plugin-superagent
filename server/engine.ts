@@ -39,6 +39,7 @@ import {
 import {
   composeEvalPrompt,
   composeRouterInstructions,
+  composeBudgetExhaustedPrompt,
   composeVerdictRepairPrompt,
   ensureRouter,
   newDecision,
@@ -91,6 +92,8 @@ const MAX_ACTION_ATTEMPTS = 3;
 const MAX_ABANDONED_ACTIONS = 3;
 /** 基础设施异常的自动重排上限;指数退避从 15s 起,最多等待 5 分钟。 */
 const MAX_EVAL_ERRORS = 20;
+/** 回读预算耗尽后补救轮至少要留的时间;不够就直接按预算耗尽报错。 */
+const BUDGET_VERDICT_MIN_MS = 15_000;
 /** 单线程 filtered 留痕上限:滚动保留最近这么多条(相邻消息内联的来源),旧的先丢。 */
 const MAX_FILTERED_TRIGGERS = 30;
 /** 评估时内联的未 @ 相邻群聊条数(§3.3 Inline:时空相邻的消息)。 */
@@ -955,7 +958,7 @@ export class SuperagentEngine {
     try {
       run.check();
       const evalDeadline = run.expiresAt;
-      const result = await this.runDecision(router.handle, prompt, Math.max(1, evalDeadline - Date.now()), false);
+      const result = await this.runRouterDecision(router.handle, threadId, prompt, budget, run);
       run.check();
       let replyText =
         result.lastMessage?.trim() || "";
@@ -2510,6 +2513,42 @@ export class SuperagentEngine {
     return this.decisionBudgets.get(agentId)?.check(name, args) ?? null;
   }
 
+  /** 放行的回读结果后附带的预算用量;不在评估/巡检中返回 null。 */
+  recallUsage(agentId: string): string | null {
+    return this.decisionBudgets.get(agentId)?.usage() ?? null;
+  }
+
+  /**
+   * Router 裁决运行。回读预算耗尽导致的中止(pi 扩展中止本轮,或服务端在模型
+   * 无视拒绝时硬中断)不是故障:在同一会话里补一轮「不再回读、立即裁决」,保留
+   * 已回读的上下文;补救仍失败才按评估错误上报,错误文案点明预算耗尽。
+   */
+  private async runRouterDecision(
+    handle: PaseoAgentHandle, threadId: string, prompt: string, budget: DecisionBudget, run: Deadline,
+  ) {
+    try {
+      return await this.runDecision(handle, prompt, Math.max(1, run.expiresAt - Date.now()), false);
+    } catch (error) {
+      if (!budget.exhausted || error instanceof DeadlineError) throw error;
+      const cause = error instanceof Error ? error.message : String(error);
+      // 只认预算造成的中止:服务端硬中断,或 pi 扩展 abort 后本轮以 aborted 结束。
+      if (!budget.error && !/\babort/i.test(cause)) throw error;
+      const exhausted = `Router recall budget exhausted after ${budget.used} recall calls`;
+      run.check();
+      if (run.expiresAt - Date.now() < BUDGET_VERDICT_MIN_MS) throw new Error(`${exhausted}; no time left for a verdict (${cause})`);
+      // 服务端硬中断只结束了等待,模型轮次可能还在跑:reload 中断它,会话历史保留。
+      if (budget.error) await bounded(() => handle.reload(), "Router interrupt");
+      budget.closeForVerdict();
+      try {
+        return await this.runDecision(handle, composeBudgetExhaustedPrompt(threadId, budget.used),
+          Math.max(1, run.expiresAt - Date.now()), false);
+      } catch (retryError) {
+        if (retryError instanceof DeadlineError) throw retryError;
+        throw new Error(`${exhausted} and no verdict followed (${retryError instanceof Error ? retryError.message : String(retryError)})`);
+      }
+    }
+  }
+
   private async runDecision(handle: PaseoAgentHandle, prompt: string, timeoutMs: number, interruptOnError = true) {
     const budget = this.decisionBudgets.get(handle.id);
     try {
@@ -2729,9 +2768,11 @@ export class SuperagentEngine {
    * 裁决答复与理由里找「空格分词后全部命中」的记录,返回 ID + 短摘录,newest first。
    * 不知道 ID 时的回读入口;命中摘录取自外部输入,不可信框架由工具层附加。
    */
-  async searchRecords(query: string): Promise<string> {
+  async searchRecords(query: string, callerAgentId?: string): Promise<string> {
     await this.store.ready;
     const state = this.store.get();
+    // 调用方 Router 本线程的待评估触发与线程本身已在提示词里,命中只会误导模型继续搜。
+    const own = callerAgentId ? state.threads.find((t) => t.router?.agentId === callerAgentId) ?? null : null;
     const terms = [...new Set(query.toLowerCase().split(/\s+/).filter((term) => term.length > 0))];
     if (terms.length === 0) {
       return "No usable keywords — pass one or more words that must appear in the record.";
@@ -2759,6 +2800,7 @@ export class SuperagentEngine {
     interface Hit { at: string; line: string; }
     const hits: Hit[] = [];
     for (const trigger of state.triggers) {
+      if (own && trigger.threadId === own.id && trigger.status === "pending") continue;
       if (!matches(joined(trigger.text, trigger.note))) continue;
       hits.push({
         at: trigger.receivedAt,
@@ -2773,6 +2815,7 @@ export class SuperagentEngine {
       });
     }
     for (const thread of state.threads) {
+      if (thread === own) continue;
       if (!matches(joined(thread.title, thread.summary, thread.imDay, thread.imConversationKey))) continue;
       hits.push({
         at: thread.updatedAt,
@@ -2788,7 +2831,8 @@ export class SuperagentEngine {
     }
     hits.sort((a, b) => b.at.localeCompare(a.at));
     if (hits.length === 0) {
-      return `No records match all of: ${terms.join(" ")}. Try fewer or different keywords.`;
+      return `No records match all of: ${terms.join(" ")}. No such record exists, and rephrasing rarely finds one: ` +
+        "retry at most once with a single distinctive keyword, otherwise treat the request as new and decide from the prompt.";
     }
     const shown = hits.slice(0, SuperagentEngine.SEARCH_HITS_LIMIT);
     return [

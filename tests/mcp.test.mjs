@@ -522,6 +522,32 @@ test("pi orchestration and dispatch sessions receive env for the pi extension", 
   assert.deepEqual(dispatch.mcpServers, {});
 });
 
+test("Router recall results carry the budget usage, and search knows the calling Router", async (t) => {
+  const searches = [];
+  let allow = true;
+  const endpoint = await startDispatchMcpServer({
+    dispatch: async () => assert.fail("not dispatch"),
+    beforeRecall: () => allow ? null : "Recall budget exhausted",
+    recallUsage: (agent) => `[Recall budget: used by ${agent}]`,
+    readRecord: async () => null,
+    searchRecords: async (query, caller) => { searches.push([query, caller]); return "No records match all of: x."; },
+  });
+  t.after(() => endpoint.stop());
+  const call = async (id, name, args) => (await rpc(await modernPost(endpoint.routerUrl("router-a"),
+    { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } })))[0].result;
+  const searched = await call(1, SEARCH_TOOL_NAME, { query: "x" });
+  assert.deepEqual(searches, [["x", "router-a"]]);
+  assert.match(searched.content[0].text, /No records match/);
+  assert.equal(searched.content.at(-1).text, "[Recall budget: used by router-a]");
+  const missing = await call(2, READ_TOOL_NAME, { id: "trg_gone" });
+  assert.equal(missing.isError, true);
+  assert.equal(missing.content.at(-1).text, "[Recall budget: used by router-a]", "a recall that ran still counts");
+  allow = false;
+  const refused = await call(3, LIST_TOOL_NAME, {});
+  assert.equal(refused.isError, true);
+  assert.deepEqual(refused.content.map((item) => item.text), ["Recall budget exhausted"]);
+});
+
 test("Router recall checks the caller's evaluation budget before reading any record", async (t) => {
   const guarded = [];
   let reads = 0;

@@ -7,7 +7,7 @@ import { emptyState, SuperagentStateSchema } from "../shared/model.ts";
 import { splitImReply } from "../server/im-replies.ts";
 import { SETTINGS_DEFAULTS } from "../shared/settings.ts";
 import { imDay, imConversationKey, dailyImThreadKey } from "../shared/im-threads.ts";
-import { ROUTER_CONTEXT_LIMIT, ROUTER_EVALUATION_LIMIT } from "../server/router.ts";
+import { RECALL_EXHAUSTED_MARKER, ROUTER_CONTEXT_LIMIT, ROUTER_EVALUATION_LIMIT } from "../server/router.ts";
 import { BACKGROUND_WORKSPACE_TITLE } from "../server/workspace.ts";
 
 const oldTime = "2020-01-01T00:00:00.000Z";
@@ -2022,7 +2022,7 @@ test("searchRecords matches keywords across record types, newest first, with bou
   ];
   assert.ok(order[0] > 0 && order[1] > order[0] && order[2] > order[1], "newest matches come first");
   // 无命中、空白查询给出可读答复;大小写不敏感。
-  assert.match(await f.engine.searchRecords("不存在的关键词"), /No records match all of/);
+  assert.match(await f.engine.searchRecords("不存在的关键词"), /No records match all of: 不存在的关键词\. No such record exists.*retry at most once/);
   assert.match(await f.engine.searchRecords("   "), /No usable keywords/);
   assert.match(await f.engine.searchRecords("CADDY"), /# Search results for \[caddy\]/);
   // 摘录有界:长文本命中时摘录不超 160 字符窗口。
@@ -2035,6 +2035,23 @@ test("searchRecords matches keywords across record types, newest first, with bou
   const excerpt = longHit.split("\n").find((line) => line.includes("trg_long"));
   assert.ok(excerpt.length < 260, `excerpt stays bounded, got ${excerpt.length} chars`);
   assert.ok(excerpt.startsWith("…") || excerpt.includes("…"), "mid-text hits carry an ellipsis");
+});
+
+test("searchRecords hides the calling Router's own pending triggers and thread, which the prompt already shows", async (t) => {
+  const f = fixture(t, "running");
+  const now = new Date().toISOString();
+  Object.assign(f.state.threads[0], { title: "caddy 现在的状态", router: { agentId: "router-a" } });
+  f.state.threads.push({ id: "other", key: "manual:other", title: "caddy 旧调研", state: "active", summary: null, createdAt: now, updatedAt: now });
+  const trigger = (id, threadId, status) => ({ id, threadId, threadKey: `manual:${threadId}`, kind: "manual", sender: "user",
+    text: `caddy ${id}`, status, context: false, receivedAt: now, note: null });
+  f.state.triggers.push(trigger("trg_own_pending", "thread", "pending"), trigger("trg_own_done", "thread", "evaluated"),
+    trigger("trg_other_pending", "other", "pending"));
+  const scoped = await f.engine.searchRecords("caddy", "router-a");
+  assert.doesNotMatch(scoped, /trg_own_pending|\[thread thread active\]/);
+  for (const id of ["trg_own_done", "trg_other_pending", "[other thread active]"]) assert.ok(scoped.includes(id), id);
+  const unscoped = await f.engine.searchRecords("caddy");
+  for (const id of ["trg_own_pending", "[thread thread active]"]) assert.ok(unscoped.includes(id), id);
+  assert.ok((await f.engine.searchRecords("caddy", "unknown-agent")).includes("trg_own_pending"));
 });
 
 test("worker reports truncated in the trigger text keep a recall pointer to the ticket", async (t) => {
@@ -2629,20 +2646,81 @@ test("a native session change rebuilds only its Router and recovers the thread s
   assert.equal(f.calls.routerCreates.length, 2);
 });
 
-test("a repeated recall loop interrupts the run and leaves the batch for a clean replacement", async (t) => {
+test("a recall loop that ignores refusals is stopped, offered one verdict turn, then left for a clean replacement", async (t) => {
   const f = fixture(t, "waiting");
-  f.ref("new-router").run = async () => {
-    for (let i = 0; i < 4; i++) f.engine.beforeRecall("new-router", "superagent_read", { id: "ticket" });
+  const prompts = [];
+  f.ref("new-router").run = async (prompt) => {
+    prompts.push(prompt);
+    // 3 次放行 + 5 次被拒仍继续:服务端硬中断(两轮都无视拒绝)。
+    for (let i = 0; i < 8; i++) f.engine.beforeRecall("new-router", "superagent_read", { id: "ticket" });
     return new Promise(() => {});
   };
-  await assert.rejects(evaluateRouter(f, "budget test"), /tool budget exceeded/);
-  assert.deepEqual(f.calls.reloads, ["new-router"]);
+  await assert.rejects(evaluateRouter(f, "budget test"),
+    /Router recall budget exhausted after 3 recall calls and no verdict followed \(recall budget exhausted: 3 recall calls ran and 5 more were refused/);
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts[1].startsWith(RECALL_EXHAUSTED_MARKER), "the second turn is the tool-free verdict turn");
+  assert.deepEqual(f.calls.reloads, ["new-router", "new-router"], "the still-running turn is interrupted before each retry");
   assert.equal(f.state.threads[0].router.dirty, true);
   assert.equal(f.state.triggers[0].status, "pending");
   assert.equal(f.state.decisions.length, 0);
   await f.engine.runEval("thread");
   assert.equal(f.state.threads[0].router.agentId, "new-router-2");
   assert.equal(f.state.threads[0].router.dirty, false);
+});
+
+test("an exhausted recall budget gets a tool-free verdict turn in the same session instead of an error", async (t) => {
+  const f = fixture(t, "waiting");
+  const prompts = [];
+  f.ref("new-router").run = async (prompt) => {
+    prompts.push(prompt);
+    if (prompts.length === 1) {
+      for (let i = 0; i < 12; i++) assert.equal(f.engine.beforeRecall("new-router", "superagent_search", { query: `q${i}` }), null);
+      assert.match(f.engine.recallUsage("new-router"), /all 12 calls used/);
+      // pi 扩展拒绝第 13 次后模型仍继续调用,扩展中止本轮。
+      return { status: "error", error: "This operation was aborted (stopReason=error, model=zcode-local/glm-5.3-flash)", lastMessage: null };
+    }
+    assert.match(f.engine.beforeRecall("new-router", "superagent_list", {}), /Recall budget exhausted \(12 recall calls used/);
+    return { status: "idle", lastMessage: JSON.stringify({ actions: [{ action: "reply", reply: "decided" }] }) };
+  };
+  await evaluateRouter(f, "needs history");
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts[1].startsWith(RECALL_EXHAUSTED_MARKER));
+  assert.match(prompts[1], /used up its recall budget \(12 recall calls\)/);
+  assert.deepEqual(f.calls.reloads, [], "the session and its recalled context are kept");
+  assert.equal(f.state.threads[0].router.agentId, "new-router");
+  assert.equal(f.state.threads[0].router.dirty, false);
+  assert.equal(f.state.triggers.at(-1).status, "evaluated");
+  assert.ok(f.state.decisions.some((decision) => decision.outcome === "reply" && decision.reply === "decided"));
+  assert.equal(f.engine.recallUsage("new-router"), null, "the budget ends with the evaluation");
+});
+
+test("a failed verdict turn reports the exhausted recall budget explicitly", async (t) => {
+  const f = fixture(t, "waiting");
+  let runs = 0;
+  f.ref("new-router").run = async () => {
+    if (++runs === 1) for (let i = 0; i < 12; i++) f.engine.beforeRecall("new-router", "superagent_search", { query: `q${i}` });
+    return { status: "error", error: "This operation was aborted (stopReason=error, model=m)", lastMessage: null };
+  };
+  await assert.rejects(evaluateRouter(f),
+    /Router recall budget exhausted after 12 recall calls and no verdict followed \(decision run error: This operation was aborted/);
+  assert.equal(runs, 2);
+  assert.equal(f.state.triggers.at(-1).status, "pending");
+  assert.equal(f.state.threads[0].router.dirty, true);
+});
+
+test("an abort or error with recall budget left is an ordinary evaluation error", async (t) => {
+  for (const error of ["This operation was aborted", "provider unavailable"]) {
+    const f = fixture(t, "waiting");
+    let runs = 0;
+    f.ref("new-router").run = async () => {
+      runs++;
+      // 某个调用重复到上限,但不是中止:不当作预算拦截。
+      if (error !== "This operation was aborted") for (let i = 0; i < 3; i++) f.engine.beforeRecall("new-router", "superagent_read", { id: "same" });
+      return { status: "error", error, lastMessage: null };
+    };
+    await assert.rejects(evaluateRouter(f), new RegExp(`^Error: decision run error: ${error}$`));
+    assert.equal(runs, 1, `${error}: no verdict turn`);
+  }
 });
 
 test("a timeout status cannot execute an old valid reply and interrupts the model", async (t) => {

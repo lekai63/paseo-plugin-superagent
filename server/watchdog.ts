@@ -3,6 +3,7 @@ import { z } from "zod";
 import { truncate, WATCHDOG_AGENT_LABEL_VALUE, type SuperagentState } from "../shared/model";
 import { decisionOnlyOptions, jsonCandidates, parseJsonCandidate, ROUTER_LABEL, routerUsesSystemPrompt } from "./router";
 import { detachRoleChildren } from "./workspace";
+import { DECISION_REPEAT_LIMIT, DECISION_TOOL_LIMIT } from "./decision-budget";
 
 /**
  * LLM 看门狗(§6):主系统之外的独立巡检会话,由定时消息驱动。
@@ -35,7 +36,9 @@ const WATCHDOG_RULES = [
   "already run every 15 seconds; do not duplicate them — focus on what needs judgment.",
   "You never execute tasks yourself. Apart from the read-only recall tools (superagent_list,",
   "superagent_read, superagent_search) do not call tools. Act only through the JSON actions below,",
-  "A patrol permits at most 12 recall calls and 3 calls with identical arguments; never poll.",
+  `A patrol permits at most ${DECISION_TOOL_LIMIT} recall calls and ${DECISION_REPEAT_LIMIT} calls with identical arguments; never poll.`,
+  "Every recall result shows how many you have used; once they are used up, recall calls are refused",
+  "and you must answer with what you already know.",
   "Prefer the gentlest action that works:",
   "- nudge: a short corrective note the worker absorbs in its current turn (drifting, forgetting a",
   "  constraint, needs a hint).",

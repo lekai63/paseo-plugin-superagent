@@ -3,6 +3,7 @@ import type { SuperagentState, Thread, Ticket, Trigger, Decision } from "../shar
 import { followsOf } from "../shared/execution";
 import { agentUsesBackgroundWorkspace, detachRoleChildren } from "./workspace";
 import { bounded } from "./deadline";
+import { DECISION_REPEAT_LIMIT, DECISION_TOOL_LIMIT } from "./decision-budget";
 import {
   newId,
   truncate,
@@ -64,8 +65,13 @@ const ROUTER_RULES = [
   "(a trigger, worker report or history stub), to find a record you only remember fragments of",
   "(keyword search), and to inspect a ticket of another thread before steering it;",
   "if they are unavailable, decide from the prompt alone.",
-  "Recall once for each missing fact; never poll live worker state. A single evaluation permits",
-  "at most 12 recall calls and 3 calls with identical arguments. Return a verdict within that budget.",
+  "Recall only when a trigger points at earlier work, an id, or a target you cannot identify from the",
+  "prompt; a self-contained new request needs no recall: decide it directly (the Worker researches).",
+  "Recall once for each missing fact and never poll live worker state; when a search finds nothing,",
+  "the record does not exist, so do not keep rephrasing it. A single evaluation permits at most",
+  `${DECISION_TOOL_LIMIT} recall calls and ${DECISION_REPEAT_LIMIT} calls with identical arguments; every recall result shows how many`,
+  "you have used. Once the budget is used up, further recall calls are refused: return the verdict",
+  "with what you already know.",
   "Memory discipline: this conversation is not durable storage — it may be compacted or rebuilt.",
   "Use supplied current state as authoritative over old messages. Anything that must hold until later (a promised follow-up,",
   "a condition you are waiting for) belongs in a ticket mandate or in your reply text, never only",
@@ -589,6 +595,25 @@ export function parseVerdict(replyText: string): { verdict: RouterVerdict } | { 
 }
 
 /** 同一会话里纠正上一轮输出;整份裁决尚未执行,必须重发全部动作。 */
+/**
+ * 预算耗尽补救轮的首行标记。pi 扩展(pi-extension/superagent.js 的同名常量)据此
+ * 在这一轮撤掉全部工具;两边必须一致(测试校验)。
+ */
+export const RECALL_EXHAUSTED_MARKER = "[Superagent recall budget exhausted: answer without tools]";
+
+/** 回读预算耗尽、本轮被中止后,在同一会话里要求模型凭已有信息直接给出裁决。 */
+export function composeBudgetExhaustedPrompt(threadId: string, used: number): string {
+  return [
+    RECALL_EXHAUSTED_MARKER,
+    `Your evaluation of thread ${threadId} was stopped because it used up its recall budget (${used} recall calls).`,
+    "No actions were executed. Recall tools are no longer available in this evaluation.",
+    "Decide the SAME batch of triggers now, using only the prompt and the recall results you already have.",
+    "If a fact is still missing, dispatch a Worker whose mandate tells it to find out, or reply to the human",
+    "with a clarifying question. Do not call any tools.",
+    `Return exactly one fenced \`\`\`json block containing {"actions":[...]} with 1-${ROUTER_ACTION_LIMIT} real actions, without explanation.`,
+  ].join("\n");
+}
+
 export function composeVerdictRepairPrompt(threadId: string, error: string): string {
   return [
     `Your previous Router verdict for thread ${threadId} was rejected. No actions from it were executed.`,
