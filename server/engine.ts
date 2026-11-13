@@ -1710,9 +1710,12 @@ export class SuperagentEngine {
     const paseo = this.requirePaseo();
     const now = new Date();
     const { digest, seen } = await this.collectPatrolDigest(now);
-    if (digest.tickets.length === 0 && digest.health.length === 0) {
-      // 无事可巡:不调用模型。仅有参考说明(如 Router 已释放)不算异常,看门狗也没有动作可做。
-      await this.updateWatchdogState({ lastRunAt: now.toISOString(), lastSummary: "nothing to patrol", lastError: null, lastActions: 0, seen });
+    if (digest.tickets.every((ticket) => ticket.parked) && digest.health.length === 0) {
+      // 无事可巡:不调用模型。仅有参考说明(如 Router 已释放)不算异常,看门狗也没有动作可做;
+      // 待命票据(已交付、等后续消息)在对话关闭前会一直挂着,同样不该每个间隔都唤醒模型。
+      const parked = digest.tickets.length;
+      const lastSummary = parked > 0 ? `nothing to patrol: ${parked} parked waiting ticket(s)` : "nothing to patrol";
+      await this.updateWatchdogState({ lastRunAt: now.toISOString(), lastSummary, lastError: null, lastActions: 0, seen });
       return;
     }
     const configured = this.settingsValues.watchdogProvider.trim();
@@ -1768,9 +1771,10 @@ export class SuperagentEngine {
     const previous = state.kv.watchdog?.seen ?? {};
     const seen: WatchdogState["seen"] = {};
     const minutes = (from: number) => Math.max(0, Math.round((now.getTime() - from) / 60_000));
+    // 待命票据排在执行中的之后:对话不关它们就一直累积,不能把新票据挤出摘要上限。
     const unfinished = state.tickets
       .filter((t) => !TERMINAL_TICKET_STATUSES.includes(t.status))
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .sort((a, b) => Number(a.status === "waiting") - Number(b.status === "waiting") || a.createdAt.localeCompare(b.createdAt))
       .slice(0, 12);
     const tickets: PatrolTicket[] = [];
     for (const ticket of unfinished) {
@@ -1808,6 +1812,10 @@ export class SuperagentEngine {
         seen[ticket.id] = { seq: latestSeq, at: changed ? new Date(latestAt ?? now.getTime()).toISOString() : before.at };
       }
       const thread = state.threads.find((t) => t.id === ticket.threadId);
+      // 首次见到且读得到时间线的待命票据巡一次建立基线;之后无新动静即视为待命。
+      const parked = ticket.status === "waiting" && pendingPermissions === 0
+        && sessionStatus !== "running" && sessionStatus !== "initializing"
+        && (latestSeq === null || before?.seq === latestSeq);
       tickets.push({
         id: ticket.id,
         title: ticket.title,
@@ -1827,6 +1835,7 @@ export class SuperagentEngine {
         newEntries: before && latestSeq !== null ? Math.max(0, latestSeq - before.seq) : null,
         quietMin: latestAt !== null ? minutes(latestAt) : seen[ticket.id] ? minutes(Date.parse(seen[ticket.id].at)) : null,
         latestMessage,
+        parked,
       });
     }
     return {
@@ -1861,13 +1870,14 @@ export class SuperagentEngine {
         lines.push(`${label(thread.id)}: ${pending.length} trigger(s) waiting for the Router for ${ago(oldest)} min`);
       }
     }
-    for (const delivery of state.imDeliveries.filter((d) => d.status === "failed")) {
-      lines.push(`IM reply ${delivery.id} (${delivery.origin.channel}) failed at part ${delivery.nextPart + 1}/${delivery.parts.length} on ${label(delivery.threadId)}`);
+    // 失败记录不随裁剪清除(界面可从断点补发),只在近两个间隔内报给看门狗,免得一条旧失败让它永远空转。
+    const window = 2 * this.settingsValues.watchdogIntervalMin;
+    for (const delivery of state.imDeliveries.filter((d) => d.status === "failed" && ago(d.updatedAt) <= window)) {
+      lines.push(`IM reply ${delivery.id} (${delivery.origin.channel}) failed ${ago(delivery.updatedAt)} min ago at part ${delivery.nextPart + 1}/${delivery.parts.length} on ${label(delivery.threadId)}`);
     }
     if (state.pendingActions.length > 0) {
       lines.push(`${state.pendingActions.length} Router action(s) still waiting to execute (max attempts ${MAX_ACTION_ATTEMPTS})`);
     }
-    const window = 2 * this.settingsValues.watchdogIntervalMin;
     for (const ticket of state.tickets.filter((t) => t.status === "failed" && ago(t.updatedAt) <= window)) {
       lines.push(`ticket ${ticket.id} "${truncate(ticket.title, 60)}" failed ${ago(ticket.updatedAt)} min ago: ${truncate(ticket.lastError ?? "unknown error", 200)}`);
     }

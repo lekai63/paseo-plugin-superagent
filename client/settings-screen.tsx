@@ -427,7 +427,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
           {form.watchdogEnabled ? (
             <>
               <ModelField {...field} name="watchdogProvider" label="看门狗模型" hint="留空沿用 Router 的模型" emptyLabel="同 Router" />
-              <TextField {...field} name="watchdogIntervalMin" label="巡检间隔(分钟)" hint="没有进行中的任务、也没有异常时跳过,不调用模型" />
+              <TextField {...field} name="watchdogIntervalMin" label="巡检间隔(分钟)" hint="没有进行中的任务(无新动静的待命任务不算)、也没有异常时跳过,不调用模型" />
             </>
           ) : null}
         </SettingsCard>

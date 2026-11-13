@@ -2393,6 +2393,84 @@ test("the LLM watchdog stays off by default and skips the model when there is no
   assert.match(busy.calls.patrols[0], /## Engine health\n- no problems detected\n- \(info, no action needed\) no live Router agent/);
 });
 
+test("parked waiting tickets do not wake the watchdog model; new activity, a live worker or a permission does", async (t) => {
+  const f = fixture(t, "waiting");
+  f.values.watchdogEnabled = true;
+  f.controls.sessionStatuses.set("worker", "idle");
+  f.controls.patrolVerdict = { summary: "delivered, nothing to do", actions: [] };
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 1, "the first sighting sets a baseline");
+  assert.match(f.calls.patrols[0], /status=waiting/);
+
+  // 已交付、会话空闲、无新动静:对话不关就一直挂着,但不再每个间隔唤醒模型。
+  await f.engine.maybePatrol(true);
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 1);
+  assert.equal(f.calls.watchdogCreates.length, 1);
+  assert.equal(f.state.kv.watchdog.lastSummary, "nothing to patrol: 1 parked waiting ticket(s)");
+
+  // 会话有新动静:巡一次,之后又回到待命。
+  f.controls.timeline = async () => ({ entries: [{ seqStart: 2, item: { type: "assistant_message", text: "follow-up done" } }] });
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 2);
+  assert.match(f.calls.patrols[1], /activity since last patrol: \+1 timeline entries/);
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 2);
+
+  // Worker 正在跑或有待决权限:照常巡检。
+  f.controls.sessionStatuses.set("worker", "running");
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 3);
+  f.controls.sessionStatuses.set("worker", "idle");
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 4);
+
+  // 读不到时间线的待命票据看门狗也无从判断,不单独唤醒模型。
+  f.controls.pendingPermissions.set("worker", []);
+  f.controls.timeline = async () => { throw new Error("session gone"); };
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 4);
+
+  // 待命票据与需要判断的票据并存时照常巡检,待命票据随摘要附带。
+  f.state.tickets.push({ ...f.ticket, id: "busy", title: "busy", status: "running", workerAgentId: "worker-busy" });
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 5);
+  assert.match(f.calls.patrols[4], /### ticket "test" — status=waiting/);
+  assert.match(f.calls.patrols[4], /### busy "busy" — status=running/);
+
+  // 累积的待命票据不能把新的执行中票据挤出摘要上限(12)。
+  f.state.tickets = f.state.tickets.filter((ticket) => ticket.id !== "busy");
+  for (let i = 0; i < 12; i += 1) {
+    f.state.tickets.push({ ...f.ticket, id: `parked-${i}`, title: `parked ${i}`, workerAgentId: `worker-parked-${i}` });
+    f.controls.sessionStatuses.set(`worker-parked-${i}`, "idle");
+  }
+  f.state.tickets.push({ ...f.ticket, id: "fresh", title: "fresh", status: "running", workerAgentId: "worker-fresh",
+    createdAt: new Date().toISOString() });
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 6);
+  assert.match(f.calls.patrols[5], /### fresh "fresh" — status=running/);
+});
+
+test("old failed IM deliveries stop waking the watchdog model; recent ones still do", async (t) => {
+  const f = fixture(t, "completed");
+  f.values.watchdogEnabled = true;
+  const now = Date.now();
+  const delivery = {
+    id: "imd_old", threadId: "thread", origin: { channel: "qq", chatId: "g:1", senderId: "user" },
+    parts: ["a", "b"], nextPart: 1, status: "failed", sentMessageIds: [], createdAt: oldTime, updatedAt: oldTime,
+  };
+  f.state.imDeliveries.push(delivery);
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 0, "a failure older than two intervals is left to the UI");
+  assert.equal(f.state.kv.watchdog.lastSummary, "nothing to patrol");
+
+  delivery.updatedAt = new Date(now - 10 * 60_000).toISOString();
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.patrols.length, 1);
+  assert.match(f.calls.patrols[0], /IM reply imd_old \(qq\) failed 10 min ago at part 2\/2/);
+});
+
 test("an unparsable watchdog reply is recorded and the rules are resent next time", async (t) => {
   const f = fixture(t, "running");
   f.values.watchdogEnabled = true;

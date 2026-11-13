@@ -129,13 +129,18 @@ export interface PatrolTicket {
   /** 距最近一次时间线变化的分钟数(读不到为空)。 */
   quietMin: number | null;
   latestMessage: string | null;
+  /**
+   * 已交付、待命的票据:status=waiting、Worker 会话没在跑、无待决权限、自上次巡检无新动静
+   * (或会话读不到)。看门狗对它无事可判(规则不许因待命而提醒),它不单独唤醒模型。
+   */
+  parked: boolean;
 }
 
 export interface PatrolDigest {
   at: string;
   intervalMin: number;
   tickets: PatrolTicket[];
-  /** 需要判断的引擎异常(评估熔断、投递失败、积压动作等);它与未完结票据决定是否调用模型。 */
+  /** 需要判断的引擎异常(评估熔断、投递失败、积压动作等);它与未待命的未完结票据决定是否调用模型。 */
   health: string[];
   /** 仅供参考的状态说明(如 Router 已释放、下次评估自动重建):随巡检附带,单独存在时不调用模型。 */
   notes?: string[];

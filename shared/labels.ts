@@ -166,6 +166,8 @@ export function watchdogNoteLabel(note: string | null | undefined): string {
 export function patrolSummaryLabel(summary: string | null | undefined): string {
   if (!summary) return "无结论";
   if (summary === "nothing to patrol") return "没有进行中的任务,未调用模型";
+  const parked = /^nothing to patrol: (\d+) parked waiting ticket/.exec(summary);
+  if (parked) return `只有 ${parked[1]} 个待命任务且无新动静,未调用模型`;
   if (summary.startsWith("skipped: the watchdog session is busy")) return "巡检会话正被使用,本次跳过";
   return summary;
 }

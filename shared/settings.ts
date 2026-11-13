@@ -201,7 +201,7 @@ export const superagentSettings = defineSettings({
     watchdogEnabled: z.boolean().default(false),
     /** 看门狗的 `provider` 或 `provider/model`;留空沿用 Router 的模型。 */
     watchdogProvider: z.string().trim().max(120).default(""),
-    /** 巡检间隔(分钟)。没有进行中的任务、也没有异常时跳过,不调用模型。 */
+    /** 巡检间隔(分钟)。没有进行中的任务(无新动静的待命任务不算)、也没有异常时跳过,不调用模型。 */
     watchdogIntervalMin: boundedInt("watchdogIntervalMin", 30),
   }),
   /**

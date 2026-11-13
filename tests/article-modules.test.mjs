@@ -214,5 +214,6 @@ test("new outcomes and patrol notes read naturally in Chinese", () => {
   assert.equal(outcomeLabel("subscribe"), "订阅");
   assert.equal(outcomeLabel("watchdog"), "巡检");
   assert.equal(patrolSummaryLabel("nothing to patrol"), "没有进行中的任务,未调用模型");
+  assert.equal(patrolSummaryLabel("nothing to patrol: 4 parked waiting ticket(s)"), "只有 4 个待命任务且无新动静,未调用模型");
   assert.equal(patrolSummaryLabel("2 workers fine"), "2 workers fine");
 });
