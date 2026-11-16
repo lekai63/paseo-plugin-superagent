@@ -4,6 +4,7 @@ import { runInNewContext } from "node:vm";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import * as plugin from "@getpaseo/plugin";
+import { defineTranslations } from "@getpaseo/plugin/client";
 import * as zod from "zod";
 
 async function compile(entry) {
@@ -57,7 +58,13 @@ function load(code, platform, { turbo = null, legacy = null, storage = null, pas
     "react/jsx-runtime": {},
     "react-native": native,
     "@getpaseo/plugin": plugin,
-    "@getpaseo/plugin/client": { usePaseo: () => paseo },
+    // 真实的 defineTranslations:插件加载时按宿主同样的规则校验中英文资源。
+    "@getpaseo/plugin/client": {
+      usePaseo: () => paseo,
+      defineTranslations,
+      useTranslation: () => ({ locale: "en", t: (key) => key }),
+      useRpc: () => async () => ({ ok: true }),
+    },
     "@getpaseo/plugin/client/ui": {},
     "@tanstack/react-query": { useQuery: (options) => options },
     zod,

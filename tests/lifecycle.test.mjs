@@ -8,7 +8,7 @@ import { splitImReply } from "../server/im-replies.ts";
 import { SETTINGS_DEFAULTS } from "../shared/settings.ts";
 import { imDay, imConversationKey, dailyImThreadKey } from "../shared/im-threads.ts";
 import { RECALL_EXHAUSTED_MARKER, ROUTER_CONTEXT_LIMIT, ROUTER_EVALUATION_LIMIT } from "../server/router.ts";
-import { BACKGROUND_WORKSPACE_TITLE } from "../server/workspace.ts";
+import { BACKGROUND_WORKSPACE_TITLE, workspaceTitles } from "../server/workspace.ts";
 
 const oldTime = "2020-01-01T00:00:00.000Z";
 
@@ -688,7 +688,7 @@ test("a failed IM part pauses delivery and manual retry resumes without repeatin
   await f.engine.retryImDelivery(delivery.id);
   assert.deepEqual(sent, expected);
   assert.equal(delivery.status, "sent");
-  await assert.rejects(f.engine.retryImDelivery(delivery.id), /只有发送失败/);
+  await assert.rejects(f.engine.retryImDelivery(delivery.id), /Only replies that failed to send/);
 });
 
 test("a restored pending IM delivery resumes at its durable offset and concurrent drains do not duplicate it", async (t) => {
@@ -1659,7 +1659,7 @@ test("the Router is created inside a background workspace, which is remembered a
   f.controls.verdict = { actions: [{ action: "ignore" }] };
   await evaluateRouter(f);
   assert.equal(f.calls.creates, 1, "exactly one shared workspace is created for the Router");
-  assert.equal(f.daemonWorkspaces.get("new-workspace").name, BACKGROUND_WORKSPACE_TITLE);
+  assert.equal(f.daemonWorkspaces.get("new-workspace").name, "Superagent background");
   assert.equal(f.daemonWorkspaces.get("new-workspace").background, true);
   assert.equal(f.daemonWorkspaces.get("new-workspace").workspaceDirectory, "/mock/repo");
   assert.equal(f.calls.routerCreates.length, 1);
@@ -1684,13 +1684,13 @@ test("the Router is created inside a background workspace, which is remembered a
   assert.equal(f.calls.routerCreates.length, 1);
 });
 
-test("shared workers join the 默认 workspace and retiring them never archives it", async (t) => {
+test("shared workers join the default workspace and retiring them never archives it", async (t) => {
   const f = fixture(t, "pending");
   f.values.workerIsolation = "shared";
   await f.engine.startTicket("ticket");
   assert.equal(f.ticket.workspaceId, "new-workspace");
   assert.equal(f.ticket.ownsWorkspace, false);
-  assert.equal(f.daemonWorkspaces.get("new-workspace").name, "默认 workspace");
+  assert.equal(f.daemonWorkspaces.get("new-workspace").name, "Default workspace");
   assert.equal(f.daemonWorkspaces.get("new-workspace").background, false);
   await f.engine.cancelTicket("ticket");
   assert.deepEqual(f.calls.archives, ["new-worker"]);
@@ -3026,7 +3026,7 @@ test("permission waits get one durable reminder and remain available for a forma
   f.ticket.requestWaitSince = oldTime;
   await f.engine.remindRequestWait("ticket");
   await f.engine.remindRequestWait("ticket");
-  assert.equal(f.state.decisions.filter(d => /24 小时/.test(d.rationale)).length, 1);
+  assert.equal(f.state.decisions.filter(d => /over 24 hours/.test(d.rationale)).length, 1);
   assert.deepEqual(f.ticket.pendingRequests, [questionRequest]);
   assert.equal(f.state.threads[0].state, "active");
   const restored = SuperagentStateSchema.parse(f.state);
@@ -3080,11 +3080,11 @@ test("a hung shared workspace lookup releases the creation chain and fences its 
   let calls = 0;
   f.paseo.workspaces.ref = id => ({ id, refresh: () => ++calls === 1 ? late.promise : Promise.resolve({ background: true, workspaceDirectory: "/mock/repo" }) });
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
-  const failed = assert.rejects(f.engine.sharedWorkspaceFor("/mock/repo", BACKGROUND_WORKSPACE_TITLE, true), /timed out/);
+  const failed = assert.rejects(f.engine.sharedWorkspaceFor("/mock/repo", workspaceTitles(BACKGROUND_WORKSPACE_TITLE), true), /timed out/);
   await until(() => calls === 1);
   t.mock.timers.tick(30_001);
   await failed;
-  const recovered = await f.engine.sharedWorkspaceFor("/mock/repo", BACKGROUND_WORKSPACE_TITLE, true);
+  const recovered = await f.engine.sharedWorkspaceFor("/mock/repo", workspaceTitles(BACKGROUND_WORKSPACE_TITLE), true);
   assert.equal(recovered.id, "role-workspace");
   late.resolve({ background: true, workspaceDirectory: "/mock/repo" });
   await setImmediate();

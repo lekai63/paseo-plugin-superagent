@@ -10,6 +10,7 @@ import {
   type QrStatusResponse,
 } from "./weixin-api";
 import type { WeixinAccount } from "./weixin-store";
+import { t } from "./i18n";
 
 /**
  * 微信扫码登录(iLink get_bot_qrcode → get_qrcode_status 长轮询)。
@@ -92,14 +93,14 @@ export class WeixinLogin {
     this.cancel();
     const abort = new AbortController();
     this.starting = abort;
-    this.state = { ...IDLE, phase: "starting", message: "正在获取二维码" };
+    this.state = { ...IDLE, phase: "starting", message: t("server.weixinLogin.fetching") };
     let qr: { qrcode: string; qrUrl: string };
     try {
       qr = await this.fetchQr(abort.signal);
     } catch (error) {
       if (this.starting === abort) {
         this.starting = null;
-        this.state = { ...IDLE, phase: "failed", message: `获取二维码失败:${error instanceof Error ? error.message : String(error)}` };
+        this.state = { ...IDLE, phase: "failed", message: t("server.weixinLogin.fetchFailed", { error: error instanceof Error ? error.message : String(error) }) };
       }
       return this.snapshot();
     }
@@ -115,10 +116,10 @@ export class WeixinLogin {
       wakeForCode: null,
     };
     this.session = session;
-    this.show(session, "waiting", "用手机微信扫描二维码");
+    this.show(session, "waiting", t("server.weixinLogin.scan"));
     void this.run(session).catch((error) => {
       console.error("[superagent] weixin login loop failed", error);
-      this.finish(session, "failed", "登录流程异常,请重试");
+      this.finish(session, "failed", t("server.weixinLogin.loopFailed"));
     });
     return this.snapshot();
   }
@@ -128,7 +129,7 @@ export class WeixinLogin {
     const trimmed = code.trim();
     if (!session || this.state.phase !== "need_verify" || !trimmed) return this.snapshot();
     session.pendingCode = trimmed;
-    this.show(session, "verifying", "正在校验验证码");
+    this.show(session, "verifying", t("server.weixinLogin.verifying"));
     session.wakeForCode?.();
     return this.snapshot();
   }
@@ -138,14 +139,14 @@ export class WeixinLogin {
     if (starting) {
       this.starting = null;
       starting.abort();
-      this.state = { ...IDLE, message: "已取消扫码登录" };
+      this.state = { ...IDLE, message: t("server.weixinLogin.cancelled") };
     }
     const session = this.session;
     if (session) {
       this.session = null;
       session.abort.abort();
       session.wakeForCode?.();
-      this.state = { ...IDLE, message: "已取消扫码登录" };
+      this.state = { ...IDLE, message: t("server.weixinLogin.cancelled") };
     }
     return this.snapshot();
   }
@@ -170,7 +171,7 @@ export class WeixinLogin {
       { local_token_list: existing ? [existing.token] : [] },
       { timeoutMs: QR_FETCH_TIMEOUT_MS, signal },
     );
-    if (!response.qrcode || !response.qrcode_img_content) throw new Error("服务端未返回二维码");
+    if (!response.qrcode || !response.qrcode_img_content) throw new Error(t("server.weixinLogin.noQr"));
     return { qrcode: response.qrcode, qrUrl: response.qrcode_img_content };
   }
 
@@ -217,14 +218,14 @@ export class WeixinLogin {
         case "scaned":
           awaitingCode = false;
           session.pendingCode = null;
-          this.show(session, "scanned", "已扫码,请在手机微信上确认");
+          this.show(session, "scanned", t("server.weixinLogin.scanned"));
           break;
         case "need_verifycode":
           // 这次请求还没带上刚输入的验证码:立即带上重试,不算输错。
           if (!sentCode && session.pendingCode) continue;
           awaitingCode = true;
           session.pendingCode = null;
-          this.show(session, "need_verify", sentCode ? "验证码不匹配,请重新输入" : "请输入手机微信上显示的数字");
+          this.show(session, "need_verify", t(sentCode ? "server.weixinLogin.codeMismatch" : "server.weixinLogin.enterCode"));
           continue;
         case "expired":
         case "verify_code_blocked": {
@@ -232,7 +233,7 @@ export class WeixinLogin {
           session.pendingCode = null;
           session.codes += 1;
           if (session.codes > MAX_QR_CODES) {
-            this.finish(session, "failed", "二维码多次失效,已停止;请稍后重新扫码");
+            this.finish(session, "failed", t("server.weixinLogin.qrExhausted"));
             return;
           }
           try {
@@ -240,10 +241,10 @@ export class WeixinLogin {
             Object.assign(session, qr, { qrModules: qrModules(qr.qrUrl), baseUrl: WEIXIN_API_BASE });
           } catch (error) {
             if (signal.aborted) return;
-            this.finish(session, "failed", `刷新二维码失败:${error instanceof Error ? error.message : String(error)}`);
+            this.finish(session, "failed", t("server.weixinLogin.refreshFailed", { error: error instanceof Error ? error.message : String(error) }));
             return;
           }
-          this.show(session, "waiting", status.status === "expired" ? "二维码已过期,已刷新,请重新扫描" : "验证码错误次数过多,已换新二维码,请重新扫描");
+          this.show(session, "waiting", t(status.status === "expired" ? "server.weixinLogin.qrExpired" : "server.weixinLogin.codeBlocked"));
           break;
         }
         case "scaned_but_redirect":
@@ -251,13 +252,13 @@ export class WeixinLogin {
           break;
         case "binded_redirect": {
           const existing = await this.deps.loadAccount().catch(() => null);
-          if (existing) this.finish(session, "confirmed", "该微信已绑定本机,沿用已保存的凭证");
-          else this.finish(session, "failed", "该微信 Bot 已绑定其他实例,本机没有对应凭证;请先在微信里解除绑定后重试");
+          if (existing) this.finish(session, "confirmed", t("server.weixinLogin.boundLocal"));
+          else this.finish(session, "failed", t("server.weixinLogin.boundElsewhere"));
           return;
         }
         case "confirmed": {
           if (!status.bot_token || !status.ilink_bot_id) {
-            this.finish(session, "failed", "登录失败:服务端未返回 bot 凭证");
+            this.finish(session, "failed", t("server.weixinLogin.noCredentials"));
             return;
           }
           const account: WeixinAccount = {
@@ -271,10 +272,10 @@ export class WeixinLogin {
             await this.deps.onConfirmed(account);
           } catch (error) {
             console.error("[superagent] weixin account save failed", error);
-            this.finish(session, "failed", "已扫码确认,但保存凭证失败;请查看 daemon 日志");
+            this.finish(session, "failed", t("server.weixinLogin.saveFailed"));
             return;
           }
-          this.finish(session, "confirmed", `已登录微信 Bot ${account.botId}`);
+          this.finish(session, "confirmed", t("server.weixinLogin.loggedIn", { botId: account.botId }));
           return;
         }
         default:
@@ -282,6 +283,6 @@ export class WeixinLogin {
       }
       await sleep(this.pollIntervalMs, signal);
     }
-    if (!signal.aborted) this.finish(session, "failed", "扫码登录超时,请重新发起");
+    if (!signal.aborted) this.finish(session, "failed", t("server.weixinLogin.timeout"));
   }
 }

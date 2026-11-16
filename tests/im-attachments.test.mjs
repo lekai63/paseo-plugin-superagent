@@ -17,6 +17,10 @@ import { FeishuSource, parseFeishuContent } from "../server/feishu.ts";
 import { DingtalkSource, parseDingtalkMessage } from "../server/dingtalk.ts";
 import { WecomSource, decryptWecomFile, parseWecomContent } from "../server/wecom.ts";
 import { zipOf } from "./zip-fixture.mjs";
+import { setServerLanguage } from "../server/i18n.ts";
+
+// These assertions cover the Chinese daemon text; the English variants live in server-i18n.test.mjs.
+setServerLanguage("zh-CN");
 
 async function tempInbox(t) {
   const dir = await mkdtemp(path.join(tmpdir(), "superagent-im-inbox-"));

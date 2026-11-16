@@ -7,6 +7,7 @@ import { TYPE } from "../shared/design";
 import { agentStatusColors, RunningStatusRing } from "./agent-status-icon";
 import { HAIRLINE, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
 import { toneColor } from "./ui";
+import { useT } from "./i18n";
 
 /**
  * 对话页顶部的标签栏:每个打开着的对话一个标签,末尾是「新对话」草稿标签(仅在草稿时出现)
@@ -39,6 +40,7 @@ export function threadBusy(thread: Thread, snapshot: SuperagentSnapshot): boolea
 }
 
 export function ChatTabBar({ tabIds, activeId, snapshot, theme, compact, onSelect, onClose, trailing }: ChatTabBarProps) {
+  const t = useT();
   const ids = activeId && !tabIds.includes(activeId) ? [...tabIds, activeId] : tabIds;
   const draft = activeId === null;
   const threads = new Map((snapshot?.threads ?? []).map((thread) => [thread.id, thread]));
@@ -75,17 +77,17 @@ export function ChatTabBar({ tabIds, activeId, snapshot, theme, compact, onSelec
         {ids.map((id) => {
           const thread = threads.get(id);
           const status = thread && snapshot
-            ? threadStatus(thread, snapshot.tickets.filter((ticket) => ticket.threadId === id), thread.lastDecision ? [thread.lastDecision] : [])
+            ? threadStatus(thread, snapshot.tickets.filter((ticket) => ticket.threadId === id), thread.lastDecision ? [thread.lastDecision] : [], t)
             : null;
           return (
-            <Tab key={id} id={id} onLayout={measure(id)} label={thread?.title ?? "对话"} active={id === activeId} closable={closable} compact={compact}
+            <Tab key={id} id={id} onLayout={measure(id)} label={thread?.title ?? t("chat.tabs.conversation")} active={id === activeId} closable={closable} compact={compact}
               muted={thread?.state === "closed"} status={status}
               indicator={<ThreadIndicator thread={thread} snapshot={snapshot} status={status} theme={theme} />}
               theme={theme} onSelect={() => onSelect(id)} onClose={() => onClose(id)} />
           );
         })}
         {draft ? (
-          <Tab id={DRAFT} onLayout={measure(DRAFT)} label="新对话" active closable={closable} compact={compact} muted={false} status={null}
+          <Tab id={DRAFT} onLayout={measure(DRAFT)} label={t("chat.tabs.new")} active closable={closable} compact={compact} muted={false} status={null}
             indicator={<Icon name="SquarePen" size={STATUS_BOX} color={theme.colors.foreground} />}
             theme={theme} onSelect={() => onSelect(null)} onClose={() => onClose(null)} />
         ) : null}
@@ -115,6 +117,7 @@ function Tab({ id, label, active, closable, compact, muted, status, indicator, t
   const [closeHovered, setCloseHovered] = useState(false);
   const tokens = chatTokens(theme);
   // 触屏没有悬停:只在当前标签上给关闭按钮;桌面悬停时也显示。
+  const t = useT();
   const showClose = closable && (active || (hovered && Platform.OS === "web"));
   const color = active || hovered ? theme.colors.foreground : theme.colors.foregroundMuted;
   return (
@@ -130,7 +133,7 @@ function Tab({ id, label, active, closable, compact, muted, status, indicator, t
           lineHeight: TYPE.label.lineHeight, fontWeight: active ? "500" : "400" }}>{label}</Text>
       </Pressable>
       {closable ? (
-        <Pressable accessibilityRole="button" accessibilityLabel={`关闭标签 ${label}`} hitSlop={4} onPress={onClose}
+        <Pressable accessibilityRole="button" accessibilityLabel={t("chat.tabs.closeTab", { label })} hitSlop={4} onPress={onClose}
           disabled={!showClose} accessibilityElementsHidden={!showClose}
           onHoverIn={() => setCloseHovered(true)} onHoverOut={() => setCloseHovered(false)}
           style={({ pressed }) => ({ width: 20, height: 20, marginRight: space.xs, flexShrink: 0, alignItems: "center", justifyContent: "center",
@@ -144,10 +147,11 @@ function Tab({ id, label, active, closable, compact, muted, status, indicator, t
 }
 
 function NewTabButton({ theme, onPress }: { theme: Theme; onPress(): void }) {
+  const t = useT();
   const [hovered, setHovered] = useState(false);
   const tokens = chatTokens(theme);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel="新对话" hitSlop={4} onPress={onPress}
+    <Pressable accessibilityRole="button" accessibilityLabel={t("chat.tabs.new")} hitSlop={4} onPress={onPress}
       onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
       style={({ pressed }) => ({ width: TAB_HEIGHT, height: TAB_HEIGHT, flexShrink: 0, alignItems: "center", justifyContent: "center",
         borderRadius: radius.block, backgroundColor: pressed ? tokens.pressed : hovered ? tokens.hover : "transparent", ...WEB_TRANSITION })}>

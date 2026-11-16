@@ -9,10 +9,12 @@ import {
   fileNameFromDisposition,
   InboundQueue,
   joinLines,
+  channelLabel,
   saveAttachments,
   type AttachmentKind,
   type PendingAttachment,
 } from "./im-attachments";
+import { t } from "./i18n";
 
 /**
  * 钉钉触发源:官方 dingtalk-stream SDK(Stream 模式 WebSocket,免公网)。
@@ -119,7 +121,7 @@ export function parseDingtalkMessage(message: DingtalkRobotMessage): DingtalkCon
       return {
         text: "",
         resources: downloadCode ? [{ kind: "file", downloadCode, fileName }] : [],
-        note: downloadCode ? undefined : `[钉钉文件]${fileName ? ` ${fileName}` : ""} 消息未带下载码`,
+        note: downloadCode ? undefined : t("server.note.dingtalkNoDownloadCode", { name: fileName ? ` ${fileName}` : "" }),
       };
     }
     case "video": {
@@ -133,7 +135,7 @@ export function parseDingtalkMessage(message: DingtalkRobotMessage): DingtalkCon
       return { text: "", resources: downloadCode ? [{ kind: "audio", downloadCode }] : [] };
     }
     default:
-      return { text: "", resources: [], note: `[钉钉${message.msgtype}消息,暂不支持读取内容]` };
+      return { text: "", resources: [], note: t("server.note.unsupported", { channel: channelLabel("dingtalk"), type: message.msgtype }) };
   }
 }
 
@@ -224,10 +226,10 @@ export class DingtalkSource implements ImSource {
         signal: controller.signal,
       });
       // 错误响应体可能回显凭据,只带状态码。
-      if (!response.ok) throw new Error(`钉钉接口 ${path} 返回 HTTP ${response.status}`);
+      if (!response.ok) throw new Error(t("server.dingtalk.httpError", { path, status: response.status }));
       return (await response.json()) as T;
     } catch (error) {
-      if (controller.signal.aborted) throw new Error(`钉钉接口 ${path} 超时`);
+      if (controller.signal.aborted) throw new Error(t("server.dingtalk.timeout", { path }));
       throw error;
     } finally {
       clearTimeout(timer);
@@ -241,7 +243,7 @@ export class DingtalkSource implements ImSource {
       appKey: this.config.clientId,
       appSecret: this.config.clientSecret,
     });
-    if (!result.accessToken) throw new Error("钉钉没有返回 access token");
+    if (!result.accessToken) throw new Error(t("server.dingtalk.noAccessToken"));
     const lifetimeMs = (result.expireIn ?? 7200) * 1000;
     this.token = { value: result.accessToken, expiresAt: Date.now() + Math.max(lifetimeMs - TOKEN_EARLY_REFRESH_MS, 60_000) };
     return result.accessToken;
@@ -259,7 +261,7 @@ export class DingtalkSource implements ImSource {
           { downloadCode: resource.downloadCode, robotCode },
           { "x-acs-dingtalk-access-token": token },
         );
-        if (!downloadUrl) throw new Error("钉钉没有返回下载地址");
+        if (!downloadUrl) throw new Error(t("server.dingtalk.noDownloadUrl"));
         const { data, headers } = await downloadBuffer(downloadUrl, { signal });
         return { data, fileName: fileNameFromDisposition(headers?.get("content-disposition")) };
       },
@@ -313,7 +315,7 @@ export class DingtalkSource implements ImSource {
     return {
       origin,
       threadKey: `dingtalk:conv:${message.conversationId}`,
-      title: `${isGroup ? "钉钉群" : "钉钉私聊"} ${truncate(headline, 40)}`,
+      title: t(isGroup ? "server.title.dingtalkGroup" : "server.title.dingtalkDirect", { text: truncate(headline, 40) }),
       text: body,
       sender: `dingtalk:${message.senderStaffId}`,
     };

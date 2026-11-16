@@ -44,6 +44,8 @@ import {
   toneDotColor,
   type CardState,
 } from "./ui";
+import { useT } from "./i18n";
+import type { Translate } from "../shared/i18n";
 
 /**
  * 对话页右侧栏:对话之外的信息都在这里——
@@ -53,10 +55,10 @@ import {
 export type SidebarTab = "tasks" | "threads" | "status";
 export const SIDEBAR_WIDTH = 320;
 
-const TABS: { id: SidebarTab; label: string; icon: string }[] = [
-  { id: "tasks", label: "任务", icon: "Workflow" },
-  { id: "threads", label: "对话", icon: "MessagesSquare" },
-  { id: "status", label: "状态", icon: "Activity" },
+const TABS: { id: SidebarTab; label: "sidebar.tabs.tasks" | "sidebar.tabs.threads" | "sidebar.tabs.status"; icon: string }[] = [
+  { id: "tasks", label: "sidebar.tabs.tasks", icon: "Workflow" },
+  { id: "threads", label: "sidebar.tabs.threads", icon: "MessagesSquare" },
+  { id: "status", label: "sidebar.tabs.status", icon: "Activity" },
 ];
 
 type Thread = SuperagentSnapshot["threads"][number];
@@ -93,6 +95,7 @@ export function SidebarTabs({ tab, onTab, theme, trailing }: Pick<ChatSidebarPro
 }
 
 function SidebarTabButton({ item, active, theme, onPress }: { item: (typeof TABS)[number]; active: boolean; theme: Theme; onPress(): void }) {
+  const t = useT();
   const [hovered, setHovered] = useState(false);
   const tokens = chatTokens(theme);
   const color = active || hovered ? theme.colors.foreground : theme.colors.foregroundMuted;
@@ -102,15 +105,16 @@ function SidebarTabButton({ item, active, theme, onPress }: { item: (typeof TABS
       style={({ pressed }) => ({ flexDirection: "row", alignItems: "center", gap: space.xs + 2, height: 28, paddingHorizontal: space.sm + 2,
         borderRadius: radius.block, backgroundColor: active || pressed ? tokens.pressed : hovered ? tokens.hover : "transparent", ...WEB_TRANSITION })}>
       <Icon name={item.icon} size={14} color={color} />
-      <Text style={{ color, fontSize: TYPE.label.size, lineHeight: TYPE.label.lineHeight, fontWeight: active ? "500" : "400" }}>{item.label}</Text>
+      <Text style={{ color, fontSize: TYPE.label.size, lineHeight: TYPE.label.lineHeight, fontWeight: active ? "500" : "400" }}>{t(item.label)}</Text>
     </Pressable>
   );
 }
 
 export function SidebarContent(props: ChatSidebarProps) {
   const { tab, snapshot, theme } = props;
+  const t = useT();
   if (!snapshot) {
-    return <Text style={{ padding: space.lg, color: theme.colors.foregroundMuted, fontSize: TYPE.label.size, lineHeight: TYPE.label.lineHeight }}>正在读取状态…</Text>;
+    return <Text style={{ padding: space.lg, color: theme.colors.foregroundMuted, fontSize: TYPE.label.size, lineHeight: TYPE.label.lineHeight }}>{t("sidebar.loading")}</Text>;
   }
   return (
     <View style={{ padding: space.md, gap: space.lg }}>
@@ -124,6 +128,7 @@ export function SidebarContent(props: ChatSidebarProps) {
 // ---------------------------------------------------------------- tasks
 
 function useAction() {
+  const t = useT();
   const toast = useToast();
   const queryClient = useQueryClient();
   /** 执行操作并提示结果;返回是否成功。 */
@@ -132,33 +137,35 @@ function useAction() {
       const result = await action();
       void queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
       if (result.ok) toast.show(successLabel, { variant: "success" });
-      else toast.error(result.error ?? "操作失败");
+      else toast.error(result.error ?? t("sidebar.actionFailed"));
       return result.ok;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
       return false;
     }
-  }, [queryClient, toast]);
+  }, [queryClient, toast, t]);
 }
 
 /** 关闭对话(取消它未结束的 Worker),成功后关掉它的标签。 */
 function useCloseThread(onThreadClosed: (threadId: string) => void) {
+  const t = useT();
   const run = useAction();
   const closeThread = useRpc(superagentCloseThreadRpc);
   return (threadId: string) => {
-    void run("对话已关闭", () => closeThread({ threadId })).then((ok) => {
+    void run(t("sidebar.threadClosed"), () => closeThread({ threadId })).then((ok) => {
       if (ok) onThreadClosed(threadId);
     });
   };
 }
 
-function observationStatus(observation?: AgentObservation): StatusLabel | null {
+function observationStatus(observation: AgentObservation | undefined, t: Translate): StatusLabel | null {
   if (!observation || observation.loading) return null;
-  if (observation.error) return { label: "会话状态暂不可用", tone: "warning" };
-  return agentStatus(observation.agent);
+  if (observation.error) return { label: t("sidebar.sessionUnavailable"), tone: "warning" };
+  return agentStatus(observation.agent, t);
 }
 
 function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, hostId, navigation }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
+  const t = useT();
   const thread = threadId ? snapshot.threads.find((item) => item.id === threadId) : undefined;
   const tickets = thread
     ? snapshot.tickets.filter((ticket) => ticket.threadId === thread.id || followsOf(ticket).includes(thread.id))
@@ -180,16 +187,16 @@ function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, h
       <RouterCard snapshot={routerSnapshot} observation={routerAgentId ? agents[routerAgentId] : undefined}
         theme={theme} navigation={navigation} />
       <View style={{ gap: space.sm }}>
-        <GroupLabel theme={theme}>{thread ? `本对话的 Worker · ${tickets.length}` : `进行中的 Worker · ${tickets.length}`}</GroupLabel>
+        <GroupLabel theme={theme}>{t(thread ? "sidebar.tasks.workersInThread" : "sidebar.tasks.workersActive", { count: tickets.length })}</GroupLabel>
         {ordered.length === 0 ? (
           <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.labelRead.size, lineHeight: TYPE.labelRead.lineHeight }}>
-            {thread ? "Router 还没有为这段对话派发 Worker。" : "暂无进行中的 Worker。选择一段对话查看它的全部任务。"}
+            {t(thread ? "sidebar.tasks.emptyThread" : "sidebar.tasks.emptyAll")}
           </Text>
         ) : ordered.map((ticket) => (
           <TicketItem key={ticket.id} ticket={ticket} observation={observe(ticket)} direct={directs.some((direct) => direct.id === ticket.id)}
             viewThreadId={thread?.id ?? null}
             threadTitle={thread && ticket.threadId === thread.id ? null
-              : snapshot.threads.find((item) => item.id === ticket.threadId)?.title ?? (thread ? "其他对话" : null)}
+              : snapshot.threads.find((item) => item.id === ticket.threadId)?.title ?? (thread ? t("sidebar.tasks.otherConversation") : null)}
             readOnly={thread?.state === "closed"} theme={theme} navigation={navigation}
             onOpenThread={thread ? undefined : () => onSelectThread(ticket.threadId)} />
         ))}
@@ -205,29 +212,30 @@ function RouterCard({ snapshot, observation, theme, navigation }: {
   theme: Theme;
   navigation: Navigation;
 }) {
+  const t = useT();
   const evaluating = snapshot.engine.evalInFlight ? snapshot.threads.find((thread) => thread.id === snapshot.engine.currentEvalThreadId) : undefined;
-  const state: StatusLabel = snapshot.engine.evalInFlight ? { label: "评估中", tone: "warning" }
-    : { label: snapshot.routerAgentId ? "待命" : "等待新任务", tone: "muted" };
-  const session = snapshot.routerAgentId ? observationStatus(observation) : null;
+  const state: StatusLabel = snapshot.engine.evalInFlight ? { label: t("sidebar.router.evaluating"), tone: "warning" }
+    : { label: t(snapshot.routerAgentId ? "sidebar.router.standby" : "sidebar.router.waiting"), tone: "muted" };
+  const session = snapshot.routerAgentId ? observationStatus(observation, t) : null;
   const routerAgentId = snapshot.routerAgentId;
   return (
     <SidebarCard theme={theme}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
         <View style={{ width: 16, alignItems: "center" }}>
-          {snapshot.engine.evalInFlight ? <RunningDot color={chatTokens(theme).status.running} accessibilityLabel="Router 评估中" />
+          {snapshot.engine.evalInFlight ? <RunningDot color={chatTokens(theme).status.running} accessibilityLabel={t("sidebar.router.evaluatingA11y")} />
             : <Icon name="Route" size={15} color={theme.colors.foregroundMuted} />}
         </View>
         <Text style={{ flex: 1, color: theme.colors.foreground, fontSize: TYPE.body.size, lineHeight: TYPE.body.lineHeight, fontWeight: "600" }}>Router</Text>
         <StatusBadge theme={theme} {...state} />
       </View>
-      {session && session.tone !== "muted" && session.label !== "会话执行中" ? (
+      {session && session.tone !== "muted" && session.label !== t("labels.agentStatus.running") ? (
         <View style={{ flexDirection: "row" }}><StatusBadge theme={theme} {...session} /></View>
       ) : null}
-      <CardMeta theme={theme} lines={2}>{snapshot.routerProvider || "自动选择模型"}</CardMeta>
-      {evaluating ? <CardMeta theme={theme} lines={2}>{`正在评估 · ${evaluating.title}`}</CardMeta> : null}
+      <CardMeta theme={theme} lines={2}>{snapshot.routerProvider || t("sidebar.router.autoModel")}</CardMeta>
+      {evaluating ? <CardMeta theme={theme} lines={2}>{t("sidebar.router.evaluatingThread", { title: evaluating.title })}</CardMeta> : null}
       {routerAgentId && navigation ? (
         <View style={{ flexDirection: "row" }}>
-          <Button theme={theme} size="xs" variant="outline" icon="ArrowUpRight" label="打开 Router 会话"
+          <Button theme={theme} size="xs" variant="outline" icon="ArrowUpRight" label={t("sidebar.router.openSession")}
             onPress={() => navigation.openAgent({ agentId: routerAgentId })} />
         </View>
       ) : null}
@@ -247,6 +255,7 @@ function TicketItem({ ticket, observation, direct, viewThreadId = null, threadTi
   navigation: Navigation;
   onOpenThread?: () => void;
 }) {
+  const t = useT();
   const run = useAction();
   const cancelTicket = useRpc(superagentCancelTicketRpc);
   const retryTicket = useRpc(superagentRetryTicketRpc);
@@ -256,23 +265,23 @@ function TicketItem({ ticket, observation, direct, viewThreadId = null, threadTi
   const following = scopeThreadId !== ticket.threadId;
   const subscribed = subscribesTo(ticket, scopeThreadId) && SUBSCRIBED_STATUSES.includes(ticket.status);
   const active = ACTIVE_TICKET_STATUSES.includes(ticket.status);
-  const session = ticket.workerAgentId ? observationStatus(observation) : null;
+  const session = ticket.workerAgentId ? observationStatus(observation, t) : null;
   // 普通的执行中/空闲不重复占徽标,权限等待与异常仍独立可见。
-  const sessionNotice = session && !["会话执行中", "会话空闲", "会话初始化"].includes(session.label) ? session : null;
+  const sessionNotice = session && ![t("labels.agentStatus.running"), t("labels.agentStatus.idle"), t("labels.agentStatus.initializing")].includes(session.label) ? session : null;
   const attention = ticketPriority(ticket, observation?.error ? null : observation?.agent) === 0;
   const meta = [
-    ticket.profile || "默认 Worker",
+    ticket.profile || t("sidebar.ticket.defaultWorker"),
     ticket.provider,
-    ticket.branchName ? `分支 ${ticket.branchName}` : null,
-    active && ticket.startedAt ? `已运行 ${elapsedTime(ticket.startedAt)}` : relativeTime(ticket.updatedAt),
-    ticket.attempts > 1 ? `第 ${ticket.attempts} 次尝试` : null,
+    ticket.branchName ? t("sidebar.ticket.branch", { name: ticket.branchName }) : null,
+    active && ticket.startedAt ? t("sidebar.ticket.runningFor", { elapsed: elapsedTime(ticket.startedAt, t) }) : relativeTime(ticket.updatedAt, t),
+    ticket.attempts > 1 ? t("sidebar.ticket.attempt", { count: ticket.attempts }) : null,
   ].filter(Boolean).join(" · ");
   const workerId = ticket.workerAgentId;
   return (
     <SidebarCard theme={theme} state={ticket.status === "failed" || (attention && (session?.tone ?? "danger") === "danger") ? "failed"
       : attention ? "attention" : "rest"}>
       {threadTitle ? (
-        <Pressable accessibilityRole="button" accessibilityLabel={`打开对话:${threadTitle}`} disabled={!onOpenThread} onPress={onOpenThread}
+        <Pressable accessibilityRole="button" accessibilityLabel={t("sidebar.ticket.openConversationA11y", { title: threadTitle })} disabled={!onOpenThread} onPress={onOpenThread}
           style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2 }}>
           <Icon name="MessagesSquare" size={12} color={theme.colors.foregroundMuted} />
           <Text numberOfLines={1} style={{ flexShrink: 1, color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size,
@@ -281,19 +290,19 @@ function TicketItem({ ticket, observation, direct, viewThreadId = null, threadTi
       ) : null}
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: space.sm }}>
         <View style={{ width: 16, height: TYPE.body.lineHeight, alignItems: "center", justifyContent: "center" }}>
-          {active ? <RunningDot color={chatTokens(theme).status.running} accessibilityLabel={ticketStatusLabel(ticket.status)} />
+          {active ? <RunningDot color={chatTokens(theme).status.running} accessibilityLabel={ticketStatusLabel(ticket.status, t)} />
             : <Icon name="Bot" size={15} color={theme.colors.foregroundMuted} />}
         </View>
         <Text numberOfLines={2} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: TYPE.body.size, lineHeight: TYPE.body.lineHeight,
           fontWeight: "500" }}>{ticket.title}</Text>
       </View>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs }}>
-        <StatusBadge theme={theme} label={ticketStatusLabel(ticket.status)} tone={ticketStatusTone(ticket.status)} />
+        <StatusBadge theme={theme} label={ticketStatusLabel(ticket.status, t)} tone={ticketStatusTone(ticket.status)} />
         {sessionNotice ? <StatusBadge theme={theme} {...sessionNotice} /> : null}
-        {direct ? <StatusBadge theme={theme} label="直通" tone="default" /> : null}
-        {following ? <StatusBadge theme={theme} label="跟随本对话" tone="default" /> : null}
-        {!following && followsOf(ticket).length ? <StatusBadge theme={theme} label={`另跟随 ${followsOf(ticket).length} 段对话`} tone="muted" /> : null}
-        {ticket.speculative ? <StatusBadge theme={theme} label="投机执行" tone="warning" /> : null}
+        {direct ? <StatusBadge theme={theme} label={t("sidebar.ticket.badgeDirect")} tone="default" /> : null}
+        {following ? <StatusBadge theme={theme} label={t("sidebar.ticket.badgeFollowing")} tone="default" /> : null}
+        {!following && followsOf(ticket).length ? <StatusBadge theme={theme} label={t("sidebar.ticket.badgeFollowsOther", { count: followsOf(ticket).length })} tone="muted" /> : null}
+        {ticket.speculative ? <StatusBadge theme={theme} label={t("sidebar.ticket.badgeSpeculative")} tone="warning" /> : null}
       </View>
       <CardMeta theme={theme} lines={3}>{meta}</CardMeta>
       {ticket.lastError ? (
@@ -301,28 +310,28 @@ function TicketItem({ ticket, observation, direct, viewThreadId = null, threadTi
       ) : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.xs }}>
         {workerId && navigation ? (
-          <Button theme={theme} size="xs" variant="outline" icon="ArrowUpRight" label="打开会话"
+          <Button theme={theme} size="xs" variant="outline" icon="ArrowUpRight" label={t("sidebar.ticket.openSession")}
             onPress={() => navigation.openAgent({ agentId: workerId })} />
         ) : null}
-        {onOpenThread ? <Button theme={theme} size="xs" variant="ghost" icon="MessagesSquare" label="对话" onPress={onOpenThread} /> : null}
+        {onOpenThread ? <Button theme={theme} size="xs" variant="ghost" icon="MessagesSquare" label={t("sidebar.ticket.conversation")} onPress={onOpenThread} /> : null}
         {subscribed && !readOnly ? (
           <Button theme={theme} size="xs" variant="ghost"
-            label={following ? "取消跟随" : ticket.status === "waiting" && followsOf(ticket).length === 0 ? "标记完成" : "取消直通"}
-            onPress={() => void run(following ? "已取消跟随,本对话的后续消息交给 Router"
-              : ticket.status === "waiting" && followsOf(ticket).length === 0 ? "已标记完成" : "已取消直通,后续消息交给 Router",
+            label={following ? t("sidebar.ticket.unfollow") : ticket.status === "waiting" && followsOf(ticket).length === 0 ? t("sidebar.ticket.markComplete") : t("sidebar.ticket.stopDirect")}
+            onPress={() => void run(following ? t("sidebar.ticket.unfollowed")
+              : ticket.status === "waiting" && followsOf(ticket).length === 0 ? t("sidebar.ticket.completed") : t("sidebar.ticket.directStopped"),
             () => unsubscribe({ threadId: scopeThreadId, ticketId: ticket.id }))} />
         ) : null}
         {terminal && !readOnly ? (
-          <Button theme={theme} size="xs" variant="ghost" icon="RotateCcw" label="重试"
-            onPress={() => void run("已重新派发", () => retryTicket({ ticketId: ticket.id }))} />
+          <Button theme={theme} size="xs" variant="ghost" icon="RotateCcw" label={t("sidebar.ticket.retry")}
+            onPress={() => void run(t("sidebar.ticket.redispatched"), () => retryTicket({ ticketId: ticket.id }))} />
         ) : null}
         {terminal && !readOnly && workerId ? (
-          <ConfirmButton theme={theme} size="xs" icon="Trash2" label="清理" confirmLabel="确认清理(归档会话与工作区)"
-            onConfirm={() => void run("已清理遗留会话", () => cancelTicket({ ticketId: ticket.id }))} />
+          <ConfirmButton theme={theme} size="xs" icon="Trash2" label={t("sidebar.ticket.cleanup")} confirmLabel={t("sidebar.ticket.cleanupConfirm")}
+            onConfirm={() => void run(t("sidebar.ticket.cleanedUp"), () => cancelTicket({ ticketId: ticket.id }))} />
         ) : null}
         {terminal || readOnly ? null : (
-          <ConfirmButton theme={theme} size="xs" label="取消" confirmLabel="确认取消"
-            onConfirm={() => void run("已取消 Ticket", () => cancelTicket({ ticketId: ticket.id }))} />
+          <ConfirmButton theme={theme} size="xs" label={t("sidebar.ticket.cancel")} confirmLabel={t("sidebar.ticket.cancelConfirm")}
+            onConfirm={() => void run(t("sidebar.ticket.canceled"), () => cancelTicket({ ticketId: ticket.id }))} />
         )}
       </View>
     </SidebarCard>
@@ -330,16 +339,17 @@ function TicketItem({ ticket, observation, direct, viewThreadId = null, threadTi
 }
 
 function ThreadActions({ thread, theme, onThreadClosed }: { thread: Thread; theme: Theme; onThreadClosed(threadId: string): void }) {
+  const t = useT();
   const run = useAction();
   const forceEval = useRpc(superagentForceEvalRpc);
   const closeThread = useCloseThread(onThreadClosed);
   return (
     <View style={{ gap: space.sm }}>
-      <GroupLabel theme={theme}>对话操作</GroupLabel>
+      <GroupLabel theme={theme}>{t("sidebar.threadActions.title")}</GroupLabel>
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: space.sm }}>
-        <Button theme={theme} size="xs" variant="outline" icon="RotateCcw" label="重新评估"
-          onPress={() => void run("已请求 Router 重新评估", () => forceEval({ threadId: thread.id }))} />
-        <ConfirmButton theme={theme} size="xs" icon="X" label="关闭对话" confirmLabel="确认关闭(取消进行中的 Worker)"
+        <Button theme={theme} size="xs" variant="outline" icon="RotateCcw" label={t("sidebar.threadActions.reevaluate")}
+          onPress={() => void run(t("sidebar.threadActions.reevaluateRequested"), () => forceEval({ threadId: thread.id }))} />
+        <ConfirmButton theme={theme} size="xs" icon="X" label={t("sidebar.threadActions.close")} confirmLabel={t("sidebar.threadActions.closeConfirm")}
           onConfirm={() => closeThread(thread.id)} />
       </View>
     </View>
@@ -349,6 +359,7 @@ function ThreadActions({ thread, theme, onThreadClosed }: { thread: Thread; them
 // ---------------------------------------------------------------- threads
 
 function ThreadsTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
+  const t = useT();
   const open = snapshot.threads.filter((thread) => thread.state !== "closed");
   const closed = snapshot.threads.filter((thread) => thread.state === "closed");
   // 正在看已关闭的对话时默认展开,让选中项可见;之后展开/收起只由按钮决定。
@@ -361,18 +372,18 @@ function ThreadsTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme 
   );
   return (
     <>
-      <Button theme={theme} variant="secondary" icon="SquarePen" label="新对话" onPress={() => onSelectThread(null)} />
+      <Button theme={theme} variant="secondary" icon="SquarePen" label={t("sidebar.threads.new")} onPress={() => onSelectThread(null)} />
       <View style={{ gap: space.xs }}>
-        <GroupLabel theme={theme}>{`进行中 · ${open.length}`}</GroupLabel>
+        <GroupLabel theme={theme}>{t("sidebar.threads.open", { count: open.length })}</GroupLabel>
         {open.length ? open.map(row) : (
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.label.size, lineHeight: TYPE.label.lineHeight }}>没有进行中的对话</Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.label.size, lineHeight: TYPE.label.lineHeight }}>{t("sidebar.threads.none")}</Text>
         )}
       </View>
       {closed.length ? (
         <View style={{ gap: space.xs }}>
           <GroupLabel theme={theme} trailing={
-            <TextButton theme={theme} label={showClosed ? "收起" : "展开"} onPress={() => setShowClosed((value) => !value)} />
-          }>{`已关闭 · ${closed.length}`}</GroupLabel>
+            <TextButton theme={theme} label={showClosed ? t("sidebar.threads.collapse") : t("sidebar.threads.expand")} onPress={() => setShowClosed((value) => !value)} />
+          }>{t("sidebar.threads.closed", { count: closed.length })}</GroupLabel>
           {showClosed ? closed.map(row) : null}
         </View>
       ) : null}
@@ -395,12 +406,13 @@ function ThreadRow({ thread, tickets, selected, theme, onPress, onClose }: {
   /** 给出时可在时间处关闭对话(再点一次确认),不必先打开对话再去「任务」里关。 */
   onClose?: () => void;
 }) {
+  const t = useT();
   const [hovered, setHovered] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [armed, setArmed] = useState(false);
   const [armedWidth, setArmedWidth] = useState(0);
   const own = tickets.filter((ticket) => ticket.threadId === thread.id);
-  const status = threadStatus(thread, own, thread.lastDecision ? [thread.lastDecision] : []);
+  const status = threadStatus(thread, own, thread.lastDecision ? [thread.lastDecision] : [], t);
   const preview = thread.latestResult ? markdownPreview(thread.latestResult.text).replace(/\s+/g, " ").trim() : thread.summary ?? "";
   // 关闭对话会取消它所有未结束的 Ticket(含待命的 Worker),确认文案里说清楚。
   const workers = own.filter((ticket) => !TERMINAL_TICKET_STATUSES.includes(ticket.status)).length;
@@ -417,7 +429,7 @@ function ThreadRow({ thread, tickets, selected, theme, onPress, onClose }: {
     <View onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}
       style={{ borderRadius: radius.block, ...WEB_TRANSITION,
         backgroundColor: selected || pressed ? tokens.pressed : hovered ? tokens.hover : "transparent" }}>
-      <Pressable accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={`${thread.title},${status.label}`}
+      <Pressable accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={t("sidebar.threads.rowA11y", { title: thread.title, status: status.label })}
         onPress={onPress} onPressIn={() => setPressed(true)} onPressOut={() => setPressed(false)}
         style={{ gap: 2, paddingHorizontal: space.sm, paddingVertical: space.sm }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
@@ -430,7 +442,7 @@ function ThreadRow({ thread, tickets, selected, theme, onPress, onClose }: {
           <View style={{ minWidth: showAction ? actionWidth : 0, alignItems: "flex-end" }}>
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight,
               fontVariant: ["tabular-nums"], opacity: showAction ? 0 : 1 }}>
-              {relativeTime(thread.updatedAt)}
+              {relativeTime(thread.updatedAt, t)}
             </Text>
           </View>
         </View>
@@ -445,8 +457,8 @@ function ThreadRow({ thread, tickets, selected, theme, onPress, onClose }: {
       {onClose && showAction ? (
         <View onLayout={armed ? (event) => setArmedWidth(event.nativeEvent.layout.width) : undefined}
           style={{ position: "absolute", right: space.sm, top: space.sm + (THREAD_LINE_HEIGHT - THREAD_ACTION_SIZE) / 2 }}>
-          <ConfirmButton theme={theme} size="xs" variant="ghost" icon="Archive" accessibilityLabel={`关闭对话 ${thread.title}`}
-            confirmLabel={workers ? `关闭并取消 ${workers} 个 Worker` : "确认关闭"}
+          <ConfirmButton theme={theme} size="xs" variant="ghost" icon="Archive" accessibilityLabel={t("sidebar.threads.closeA11y", { title: thread.title })}
+            confirmLabel={workers ? t("sidebar.threads.closeAndCancel", { count: workers }) : t("sidebar.threads.confirmClose")}
             onArmedChange={setArmed} onConfirm={onClose} />
         </View>
       ) : null}
@@ -456,15 +468,16 @@ function ThreadRow({ thread, tickets, selected, theme, onPress, onClose }: {
 
 // ---------------------------------------------------------------- status
 
-const CHANNEL_LABELS: [keyof SuperagentSettingsValues, string][] = [
-  ["feishuEnabled", "飞书"],
-  ["qqEnabled", "QQ"],
-  ["dingtalkEnabled", "钉钉"],
-  ["wecomEnabled", "企业微信"],
-  ["weixinEnabled", "微信"],
+const CHANNEL_LABELS: [keyof SuperagentSettingsValues, "feishu" | "qq" | "dingtalk" | "wecom" | "weixin"][] = [
+  ["feishuEnabled", "feishu"],
+  ["qqEnabled", "qq"],
+  ["dingtalkEnabled", "dingtalk"],
+  ["wecomEnabled", "wecom"],
+  ["weixinEnabled", "weixin"],
 ];
 
 function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
+  const t = useT();
   const settingsState = useSettings(superagentSettings);
   const settings = settingsState.status === "ready" ? settingsState.values : null;
   const { engine } = snapshot;
@@ -472,68 +485,68 @@ function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSi
   const failed = snapshot.tickets.filter((ticket) => ticket.status === "failed").length;
   const pending = snapshot.threads.reduce((sum, thread) => sum + thread.pendingTriggers, 0);
   const undelivered = undeliveredReplies(snapshot.imDeliveries);
-  const sources = ["App", settings?.agentToolEnabled ? "Agent 委派" : null,
-    ...CHANNEL_LABELS.map(([key, label]) => (settings?.[key] ? label : null))].filter(Boolean).join(" · ");
-  let watchdog = "引擎未启动,首次派发或任意 agent 事件后自动启动";
+  const sources = ["App", settings?.agentToolEnabled ? t("sidebar.status.sourceAgent") : null,
+    ...CHANNEL_LABELS.map(([key, label]) => (settings?.[key] ? t(`sidebar.channel.${label}`) : null))].filter(Boolean).join(" · ");
+  let watchdog = t("sidebar.status.watchdogIdle");
   if (engine.primed) {
     watchdog = engine.lastWatchdogAt
-      ? `${clockTime(engine.lastWatchdogAt)} 巡检 · ${watchdogNoteLabel(engine.lastWatchdogNote)}`
-      : "等待首次巡检(每 15 秒一次)";
+      ? t("sidebar.status.watchdogLast", { time: clockTime(engine.lastWatchdogAt), note: watchdogNoteLabel(engine.lastWatchdogNote, t) })
+      : t("sidebar.status.watchdogWaiting");
   }
   const patrol = engine.patrol;
   let patrolText: string | null = null;
   if (patrol?.enabled) {
-    if (patrol.running) patrolText = "巡检中…";
+    if (patrol.running) patrolText = t("sidebar.status.patrolRunning");
     else if (patrol.lastRunAt) {
-      patrolText = `${clockTime(patrol.lastRunAt)} · ${patrol.lastError ? `出错:${patrol.lastError}` : patrolSummaryLabel(patrol.lastSummary)}`;
-    } else patrolText = `等待首次巡检(每 ${settings?.watchdogIntervalMin ?? 30} 分钟)`;
+      patrolText = t("sidebar.status.patrolResult", { time: clockTime(patrol.lastRunAt), result: patrol.lastError ? t("sidebar.status.patrolError", { error: patrol.lastError }) : patrolSummaryLabel(patrol.lastSummary, t) });
+    } else patrolText = t("sidebar.status.patrolWaiting", { minutes: settings?.watchdogIntervalMin ?? 30 });
   }
   const patrolAgentId = patrol?.agentId ?? null;
   return (
     <>
       <View style={{ gap: space.sm }}>
         <View style={{ flexDirection: "row", gap: space.sm }}>
-          <StatTile theme={theme} label="对话" value={snapshot.threads.filter((thread) => thread.state !== "closed").length} />
-          <StatTile theme={theme} label="运行中" value={running} tone={running > 0 ? "warning" : "default"} />
+          <StatTile theme={theme} label={t("sidebar.status.conversations")} value={snapshot.threads.filter((thread) => thread.state !== "closed").length} />
+          <StatTile theme={theme} label={t("sidebar.status.running")} value={running} tone={running > 0 ? "warning" : "default"} />
         </View>
         <View style={{ flexDirection: "row", gap: space.sm }}>
-          <StatTile theme={theme} label="待评估" value={pending} tone={engine.evalInFlight ? "warning" : "default"}
-            caption={engine.evalInFlight ? "评估中" : null} />
-          <StatTile theme={theme} label="失败" value={failed} tone={failed > 0 ? "danger" : "default"} />
+          <StatTile theme={theme} label={t("sidebar.status.pendingEval")} value={pending} tone={engine.evalInFlight ? "warning" : "default"}
+            caption={engine.evalInFlight ? t("sidebar.status.evaluating") : null} />
+          <StatTile theme={theme} label={t("sidebar.status.failed")} value={failed} tone={failed > 0 ? "danger" : "default"} />
         </View>
       </View>
       <View style={{ gap: space.md }}>
-        <GroupLabel theme={theme}>组件</GroupLabel>
-        <InfoRow theme={theme} label="Router" value={snapshot.routerProvider || "自动选择"} />
-        <InfoRow theme={theme} label={snapshot.workerProfiles.length ? "默认 Worker" : "Worker"}
-          value={`${snapshot.workerProvider || "自动选择"} · ${settings?.workerIsolation === "shared" ? "共享目录" : "独立 worktree"}`} />
+        <GroupLabel theme={theme}>{t("sidebar.status.components")}</GroupLabel>
+        <InfoRow theme={theme} label="Router" value={snapshot.routerProvider || t("sidebar.status.auto")} />
+        <InfoRow theme={theme} label={snapshot.workerProfiles.length ? t("sidebar.ticket.defaultWorker") : "Worker"}
+          value={`${snapshot.workerProvider || t("sidebar.status.auto")} · ${settings?.workerIsolation === "shared" ? t("sidebar.status.sharedDir") : t("sidebar.status.isolatedWorktree")}`} />
         {snapshot.workerProfiles.length ? (
-          <InfoRow theme={theme} label="Worker 档位"
+          <InfoRow theme={theme} label={t("sidebar.status.workerProfiles")}
             value={snapshot.workerProfiles.map((profile) => `${profile.name} → ${profile.provider}`).join("\n")} />
         ) : null}
-        <InfoRow theme={theme} label="工作目录" value={snapshot.workingDir || "未配置"}
+        <InfoRow theme={theme} label={t("sidebar.status.workingDir")} value={snapshot.workingDir || t("sidebar.status.notConfigured")}
           tone={snapshot.workingDirIssue || !snapshot.workingDir ? "warning" : undefined} />
-        {snapshot.workingDirIssue ? <InfoRow theme={theme} label="目录问题" value={snapshot.workingDirIssue} tone="danger" /> : null}
-        <InfoRow theme={theme} label="触发来源" value={sources} />
-        <InfoRow theme={theme} label="看门狗" value={watchdog} />
+        {snapshot.workingDirIssue ? <InfoRow theme={theme} label={t("sidebar.status.dirIssue")} value={snapshot.workingDirIssue} tone="danger" /> : null}
+        <InfoRow theme={theme} label={t("sidebar.status.triggerSources")} value={sources} />
+        <InfoRow theme={theme} label={t("sidebar.status.watchdog")} value={watchdog} />
         {patrolText ? (
-          <InfoRow theme={theme} label="LLM 巡检" value={patrolText} tone={patrol?.lastError ? "warning" : undefined} />
+          <InfoRow theme={theme} label={t("sidebar.status.llmPatrol")} value={patrolText} tone={patrol?.lastError ? "warning" : undefined} />
         ) : null}
         {patrolAgentId && navigation ? (
           <View style={{ flexDirection: "row" }}>
-            <Button theme={theme} variant="outline" size="xs" icon="ShieldCheck" label="打开巡检会话(可直接问诊)"
+            <Button theme={theme} variant="outline" size="xs" icon="ShieldCheck" label={t("sidebar.status.openPatrol")}
               onPress={() => navigation.openAgent({ agentId: patrolAgentId })} />
           </View>
         ) : null}
       </View>
       {undelivered.length ? (
         <View style={{ gap: space.sm }}>
-          <GroupLabel theme={theme}>{`未送达的 IM 回复(${undelivered.length})`}</GroupLabel>
+          <GroupLabel theme={theme}>{t("sidebar.status.undelivered", { count: undelivered.length })}</GroupLabel>
           <ImDeliveries deliveries={undelivered} theme={theme} hostId={hostId} />
         </View>
       ) : null}
       <View style={{ flexDirection: "row" }}>
-        <Button theme={theme} variant="outline" size="xs" icon="Settings" label="打开设置" onPress={openSettings} />
+        <Button theme={theme} variant="outline" size="xs" icon="Settings" label={t("sidebar.status.openSettings")} onPress={openSettings} />
       </View>
     </>
   );

@@ -1,5 +1,6 @@
 import { truncate, type TriggerOrigin } from "../shared/model";
 import type { ImSource, InboundDrop, InboundMessage } from "./im";
+import { t } from "./i18n";
 
 /**
  * QQ 触发源:OneBot 11 正向 WebSocket(NapCat / Lagrange 等实现)。
@@ -183,7 +184,7 @@ export class QqSource implements ImSource {
               senderName: null,
             },
             threadKey: `qq:group:${groupId}`,
-            title: `QQ群 ${truncate(text, 40)}`,
+            title: t("server.title.qqGroup", { text: truncate(text, 40) }),
             text,
             sender: `qq:${userId}`,
             context: true,
@@ -200,10 +201,10 @@ export class QqSource implements ImSource {
             senderName: null,
           },
           threadKey: `qq:group:${groupId}`,
-          title: `QQ群 ${truncate(text, 40)}`,
+          title: t("server.title.qqGroup", { text: truncate(text, 40) }),
           text,
           sender: `qq:${userId}`,
-          reason: "群消息未 @ 机器人",
+          reason: t("server.filter.notMentioned"),
           replyTo,
         });
         return null;
@@ -220,7 +221,7 @@ export class QqSource implements ImSource {
       return {
         origin,
         threadKey: `qq:group:${groupId}`,
-        title: `QQ群 ${truncate(text, 40)}`,
+        title: t("server.title.qqGroup", { text: truncate(text, 40) }),
         text,
         sender: `qq:${userId}`,
         replyTo,
@@ -239,7 +240,7 @@ export class QqSource implements ImSource {
       return {
         origin,
         threadKey: `qq:friend:${userId}`,
-        title: `QQ私聊 ${truncate(text, 40)}`,
+        title: t("server.title.qqDirect", { text: truncate(text, 40) }),
         text,
         sender: `qq:${userId}`,
         replyTo,

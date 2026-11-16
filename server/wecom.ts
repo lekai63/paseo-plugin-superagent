@@ -10,10 +10,12 @@ import {
   IM_ATTACHMENT_MAX_BYTES,
   InboundQueue,
   joinLines,
+  channelLabel,
   saveAttachments,
   type AttachmentKind,
   type PendingAttachment,
 } from "./im-attachments";
+import { t } from "./i18n";
 
 /**
  * 企业微信触发源:官方 @wecom/aibot-node-sdk(智能机器人 WebSocket 长连接,免公网)。
@@ -80,7 +82,7 @@ export function parseWecomContent(message: Pick<BaseMessage, "msgtype"> & Record
       return { text: parts.join("\n"), resources };
     }
     default:
-      return { text: "", resources: [], note: `[企微${message.msgtype}消息,暂不支持读取内容]` };
+      return { text: "", resources: [], note: t("server.note.unsupported", { channel: channelLabel("wecom"), type: message.msgtype }) };
   }
 }
 
@@ -90,13 +92,13 @@ export function parseWecomContent(message: Pick<BaseMessage, "msgtype"> & Record
  */
 export function decryptWecomFile(encrypted: Buffer, aesKey: string): Buffer {
   const key = Buffer.from(aesKey, "base64");
-  if (key.length !== 32) throw new Error(`解密密钥格式不对(解码后 ${key.length} 字节)`);
+  if (key.length !== 32) throw new Error(t("server.crypto.badKeyLength", { length: key.length }));
   const decipher = createDecipheriv("aes-256-cbc", key, key.subarray(0, 16));
   decipher.setAutoPadding(false);
   const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
   const pad = decrypted[decrypted.length - 1] ?? 0;
   if (pad < 1 || pad > 32 || pad > decrypted.length || !decrypted.subarray(decrypted.length - pad).every((byte) => byte === pad)) {
-    throw new Error("解密失败(填充不对,数据可能已损坏)");
+    throw new Error(t("server.crypto.badPadding"));
   }
   return decrypted.subarray(0, decrypted.length - pad);
 }
@@ -205,7 +207,7 @@ export class WecomSource implements ImSource {
       text,
       parsed.note,
       ...saved.map((attachment) => describeSavedAttachment("wecom", attachment)),
-      quoteText ? `(引用的消息:${truncate(quoteText.replace(/\s*\n\s*/g, " "), QUOTE_MAX_CHARS)})` : null,
+      quoteText ? t("server.note.quotedMessage", { text: truncate(quoteText.replace(/\s*\n\s*/g, " "), QUOTE_MAX_CHARS) }) : null,
     ]);
     if (!body) return null;
     const headline = text || parsed.note || attachments.map((item) => describePendingAttachment("wecom", item)).join(" ") || body;
@@ -222,7 +224,7 @@ export class WecomSource implements ImSource {
     return {
       origin,
       threadKey: `wecom:chat:${chatId}`,
-      title: `${isGroup ? "企微群" : "企微私聊"} ${truncate(headline, 40)}`,
+      title: t(isGroup ? "server.title.wecomGroup" : "server.title.wecomDirect", { text: truncate(headline, 40) }),
       text: body,
       sender: `wecom:${message.from.userid}`,
     };

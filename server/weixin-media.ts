@@ -2,6 +2,7 @@ import { createDecipheriv } from "node:crypto";
 import { formatSize } from "./archive";
 import { downloadBuffer, IM_ATTACHMENT_MAX_BYTES, type PendingAttachment } from "./im-attachments";
 import { WeixinItemType, type WeixinCdnMedia, type WeixinMessageItem } from "./weixin-api";
+import { t } from "./i18n";
 
 /**
  * 微信入站附件(图片/文件/视频)的取法:从微信 CDN 下载,AES-128-ECB 解密。落盘、命名、
@@ -68,7 +69,7 @@ export function parseWeixinAesKey(aesKeyBase64: string): Buffer {
   if (decoded.length === 16) return decoded;
   const ascii = decoded.toString("ascii");
   if (decoded.length === 32 && /^[0-9a-fA-F]{32}$/.test(ascii)) return Buffer.from(ascii, "hex");
-  throw new Error(`解密密钥格式不对(解码后 ${decoded.length} 字节)`);
+  throw new Error(t("server.crypto.badKeyLength", { length: decoded.length }));
 }
 
 function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
@@ -87,12 +88,12 @@ function downloadUrl(media: WeixinCdnMedia): string | null {
 /** 下载并解密一份媒体,返回明文。 */
 export async function downloadWeixinMedia(ref: WeixinMediaRef, signal?: AbortSignal): Promise<Buffer> {
   const url = downloadUrl(ref.media);
-  if (!url) throw new Error("消息未带 CDN 下载参数");
+  if (!url) throw new Error(t("server.weixin.noCdnParam"));
   // 图片没有密钥时按明文图片处理(官方插件同样如此);文件/视频必须解密。
-  if (!ref.aesKey && ref.kind !== "image") throw new Error("消息未带解密密钥");
+  if (!ref.aesKey && ref.kind !== "image") throw new Error(t("server.weixin.noDecryptKey"));
   const key = ref.aesKey ? parseWeixinAesKey(ref.aesKey) : null;
   if (ref.declaredBytes !== undefined && ref.declaredBytes > IM_ATTACHMENT_MAX_BYTES) {
-    throw new Error(`超过 ${formatSize(IM_ATTACHMENT_MAX_BYTES)} 上限(${formatSize(ref.declaredBytes)})`);
+    throw new Error(t("server.attachment.tooLarge", { limit: formatSize(IM_ATTACHMENT_MAX_BYTES), size: formatSize(ref.declaredBytes) }));
   }
   // 密文比明文多至多 16 字节的 PKCS#7 填充。
   const { data } = await downloadBuffer(url, { signal, label: "CDN ", maxBytes: IM_ATTACHMENT_MAX_BYTES + 16 });

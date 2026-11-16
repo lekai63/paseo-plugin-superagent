@@ -18,6 +18,7 @@ import {
 import { describePendingAttachment, describeSavedAttachment, joinLines, saveAttachments } from "./im-attachments";
 import { weixinMediaRefs, weixinPendingAttachment } from "./weixin-media";
 import { loadWeixinCursor, saveWeixinCursor, type WeixinAccount } from "./weixin-store";
+import { t } from "./i18n";
 
 /**
  * 微信触发源:腾讯官方 iLink Bot 协议(微信 ClawBot),HTTP 长轮询,免公网。
@@ -115,7 +116,7 @@ export class WeixinSource implements ImSource {
     void this.notify("ilink/bot/msg/notifystart");
     this.loop = this.run(abort.signal, onTrigger, onDrop).catch((error) => {
       console.error("[superagent] weixin poll loop crashed", error);
-      this.current = { ...this.current, state: "stopped", lastError: "轮询异常退出,请查看 daemon 日志" };
+      this.current = { ...this.current, state: "stopped", lastError: t("server.weixin.pollCrashed") };
     });
   }
 
@@ -210,14 +211,14 @@ export class WeixinSource implements ImSource {
           ...this.current,
           state: "paused",
           pausedUntil,
-          lastError: "微信会话已失效(-14),暂停 1 小时后重试;持续失效请重新扫码登录",
+          lastError: t("server.weixin.sessionExpired"),
         };
         console.warn("[superagent] weixin bot token is stale; pausing for 1 hour");
         await sleep(STALE_PAUSE_MS, signal);
         continue;
       }
       if (code !== null) {
-        await fail(`getupdates 返回 ${code}${response.errmsg ? ` ${response.errmsg}` : ""}`);
+        await fail(t("server.weixin.getUpdatesFailed", { code, detail: response.errmsg ? ` ${response.errmsg}` : "" }));
         continue;
       }
       failures = 0;
@@ -272,10 +273,10 @@ export class WeixinSource implements ImSource {
         onDrop?.({
           origin: { channel: "weixin", accountId: this.config.account.botId, chatId: groupId, messageId, senderId: from, senderName: null },
           threadKey: `weixin:group:${groupId}`,
-          title: `微信群 ${truncate(summary, 40)}`,
+          title: t("server.title.weixinGroup", { text: truncate(summary, 40) }),
           text: summary,
           sender,
-          reason: "微信群消息暂不支持",
+          reason: t("server.filter.weixinGroupUnsupported"),
           replyTo,
         });
       }
@@ -304,7 +305,7 @@ export class WeixinSource implements ImSource {
         senderName: null,
       },
       threadKey: `weixin:user:${from}`,
-      title: `微信 ${truncate(headline, 40)}`,
+      title: t("server.title.weixinDirect", { text: truncate(headline, 40) }),
       text: body,
       sender,
       replyTo,

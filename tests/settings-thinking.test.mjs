@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { defineTranslations } from "@getpaseo/plugin/client";
 import test from "node:test";
 import {
   validateProviderThinkingOption,
@@ -146,6 +147,8 @@ test("compact snapshot: queryFn expands thinkingSets and ThinkingPicker offers t
     "react-native": { View: "View", Text: "Text" },
     "@getpaseo/plugin": await import("@getpaseo/plugin"),
     "@getpaseo/plugin/client": {
+      defineTranslations,
+      useTranslation: () => ({ locale: "zh-CN", t: (key) => key }),
       useSettings: () => settings,
       usePaseo: () => ({ providers: { snapshot: async () => compactPayload } }),
     },
@@ -242,7 +245,7 @@ test("ThinkingPicker falls back to free-text input when no catalog is reported",
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": { View: "View", Text: "Text" },
     "@getpaseo/plugin": await import("@getpaseo/plugin"),
-    "@getpaseo/plugin/client": { useSettings: () => settings, usePaseo: () => ({}) },
+    "@getpaseo/plugin/client": { defineTranslations, useTranslation: () => ({ locale: "zh-CN", t: (key) => key }), useSettings: () => settings, usePaseo: () => ({}) },
     "@getpaseo/plugin/client/ui": Object.fromEntries(
       ["SettingsAction", "SettingsCard", "SettingsInput", "SettingsSection", "SettingsSelect", "SettingsSwitch", "TextInput"].map((n) => [n, n]),
     ),

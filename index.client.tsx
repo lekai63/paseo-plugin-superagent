@@ -7,10 +7,13 @@ import { superagentDispatchRpc } from "./shared/rpc";
 import { useExecutionAgents, useSuperagentState, useRouterAgents } from "./client/query";
 import { routerStatusMark, sidebarWorkerCounts } from "./shared/sidebar-status";
 import { SidebarRouterMark, SidebarWorkerCounts } from "./client/sidebar-worker-counts";
+import { messages, useReportLocale } from "./client/i18n";
 
 const SETTINGS_SCREEN_ID = "general";
 
 function SuperagentSidebarItem({ currentScreen, openScreen, host, theme }: PluginSidebarItemProps) {
+  // 侧栏行常驻挂载:由它把 app 语言告诉 daemon(daemon 生成的文字随之切换)。
+  useReportLocale(host.id);
   const query = useSuperagentState(host.id);
   const snapshot = query.data;
   const workerIds = (snapshot?.tickets ?? [])
@@ -66,17 +69,18 @@ export default function contribute(client: PluginClientContext) {
   });
   client.addCommandCenterItem({
     id: "open-history",
-    title: "Superagent 对话记录",
+    title: messages.message("host.commandConversations"),
     icon: "MessagesSquare",
-    keywords: ["superagent", "历史", "消息", "线程", "对话"],
+    // 搜索关键词不随语言切换:中英文都收,两种界面语言下都能搜到。
+    keywords: ["superagent", "history", "messages", "threads", "conversations", "历史", "消息", "线程", "对话"],
     context: "global",
     onSelect: () => openChat({ panel: "threads" }),
   });
   client.addCommandCenterItem({
     id: "open-status",
-    title: "Superagent 运行状态",
+    title: messages.message("host.commandStatus"),
     icon: "Activity",
-    keywords: ["superagent", "状态", "watchdog"],
+    keywords: ["superagent", "status", "watchdog", "状态", "看门狗"],
     context: "global",
     onSelect: () => openChat({ panel: "status" }),
   });
@@ -89,9 +93,9 @@ export default function contribute(client: PluginClientContext) {
   });
   client.addCommandCenterItem({
     id: "open-settings",
-    title: "Superagent 设置",
+    title: messages.message("host.commandSettings"),
     icon: "Settings",
-    keywords: ["superagent", "router", "worker", "设置"],
+    keywords: ["superagent", "router", "worker", "settings", "设置"],
     context: "global",
     onSelect({ openSettings: open }) {
       open(SETTINGS_SCREEN_ID);
@@ -102,7 +106,7 @@ export default function contribute(client: PluginClientContext) {
   // 输入框清空与错误提示由宿主负责;成功后 Router 的答复会回到本会话。
   client.addSlashCommand({
     name: "superagent",
-    description: "把任务委派给 Superagent 编排(Router 评估 → Worker 执行,结果回到本会话)",
+    description: messages.message("host.slashDescription"),
     argumentHint: "<task>",
     context: "agent",
     async onSubmit({ args, agent, rpc }) {

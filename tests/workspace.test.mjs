@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BACKGROUND_WORKSPACE_TITLE, detachRoleChildren, ensureSharedWorkspace } from "../server/workspace.ts";
+import { BACKGROUND_WORKSPACE_TITLE, detachRoleChildren, ensureSharedWorkspace, workspaceTitles } from "../server/workspace.ts";
 import { DEFAULT_WORKSPACE_TITLE } from "../shared/settings.ts";
 
 /**
@@ -100,6 +100,17 @@ test("a remembered id that no longer matches (archived or moved) is recovered by
   assert.equal(paseo.createCalls.length, 2, "no third workspace is created");
   assert.equal(found.handle.id, preexisting.id);
   assert.equal(found.remembered, false);
+});
+
+test("a workspace named in the other language is adopted after the UI language changes", async () => {
+  const paseo = fakePaseo();
+  // 以中文界面时建的「默认 workspace」,登记丢失后(状态重置)切到英文界面再找回。
+  const chinese = await paseo.workspaces.create({ title: "默认 workspace", source: { kind: "directory", path: "/repo" } });
+  const found = await ensureSharedWorkspace(paseo, null, "/repo", workspaceTitles(DEFAULT_WORKSPACE_TITLE));
+  assert.equal(found.handle.id, chinese.id);
+  assert.equal(paseo.createCalls.length, 1, "no English-named duplicate is created");
+  const fresh = await ensureSharedWorkspace(paseo, null, "/other", workspaceTitles(DEFAULT_WORKSPACE_TITLE));
+  assert.equal(paseo.records.get(fresh.handle.id).name, "Default workspace", "new workspaces use the current language");
 });
 
 test("a same-titled workspace on another directory is never adopted", async () => {

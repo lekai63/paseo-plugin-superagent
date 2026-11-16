@@ -9,9 +9,11 @@ import {
   readStream,
   saveAttachments,
   withTimeout,
+  channelLabel,
   type AttachmentKind,
   type PendingAttachment,
 } from "./im-attachments";
+import { t } from "./i18n";
 
 /**
  * 飞书触发源:官方 SDK 长连接(WSClient),无需公网回调。
@@ -170,7 +172,7 @@ const CARD_SKIP_TAGS = new Set([
 function cleanCardMarkdown(text: string, names: Record<string, string>): string {
   return text
     .replace(/<at\s+(?:id|user_id|open_id)=["']?([^"'\s>]+)["']?\s*>([^<]*)<\/at>/g, (_, id: string, inner: string) =>
-      `@${inner.trim() || names[id] || (id === "all" ? "所有人" : "用户")}`)
+      `@${inner.trim() || names[id] || (id === "all" ? t("server.feishu.card.everyone") : t("server.feishu.card.user"))}`)
     .replace(/<br\s*\/?>/gi, "\n")
     .replace(/<\/?(?:font|text_tag|link|local_datetime|number_tag|u|s|i|b|strong|em)\b[^>]*>/gi, "");
 }
@@ -222,7 +224,7 @@ class CardText {
       case "at":
       case "person": {
         const id = str(prop.userID) || str(prop.user_id) || str(prop.id);
-        return `@${this.names[id] || str(prop.user_name) || "用户"}`;
+        return `@${this.names[id] || str(prop.user_name) || t("server.feishu.card.user")}`;
       }
       case "a":
       case "link": {
@@ -254,13 +256,13 @@ class CardText {
       case "img":
       case "image":
       case "img_combination":
-        this.lines.push("[卡片图片]");
+        this.lines.push(t("server.feishu.card.image"));
         return;
       case "button": {
-        const label = this.inline(prop.text)?.trim() || "按钮";
+        const label = this.inline(prop.text)?.trim() || t("server.feishu.card.button");
         const url = findCardUrl(prop);
         if (url) this.hasLink = true;
-        this.lines.push(url ? `[${label}](${url})` : `[按钮] ${label}`);
+        this.lines.push(url ? `[${label}](${url})` : t("server.feishu.card.buttonNoLink", { label }));
         return;
       }
       case "div":
@@ -320,10 +322,10 @@ export function parseFeishuCard(body: Json): string | null {
   }
   if (!hasLink) {
     const link = findCardUrl(card.card_link) || (isObject(card.config) ? findCardUrl(card.config.cardLink ?? card.config.card_link) : "");
-    if (link) lines.push(`[打开卡片](${link})`);
+    if (link) lines.push(t("server.feishu.card.open", { link }));
   }
   if (!title && lines.length === 0) return null;
-  return truncate(joinLines([`[飞书卡片]${title ? ` ${title}` : ""}`, ...lines]), CARD_TEXT_CHARS);
+  return truncate(joinLines([t("server.feishu.card.header", { title: title ? ` ${title}` : "" }), ...lines]), CARD_TEXT_CHARS);
 }
 
 /** 消息内容 → 文字 + 可下载资源(+ 只能说明的部分)。 */
@@ -333,16 +335,16 @@ export function parseFeishuContent(messageType: string, content: string | undefi
     case "sticker":
       return { text: "", resources: [], ignore: true };
     case "merge_forward":
-      return { text: "", resources: [], note: "[飞书合并转发]" };
+      return { text: "", resources: [], note: t("server.feishu.mergeForward") };
     case "share_chat":
-      return { text: "", resources: [], note: "[飞书群名片]" };
+      return { text: "", resources: [], note: t("server.feishu.groupCard") };
     case "share_user":
-      return { text: "", resources: [], note: "[飞书个人名片]" };
+      return { text: "", resources: [], note: t("server.feishu.userCard") };
     default:
       break;
   }
   const body = parseJson(content);
-  if (!body) return { text: "", resources: [], note: `[飞书${messageType}消息,内容无法解析]` };
+  if (!body) return { text: "", resources: [], note: t("server.note.unparsable", { channel: channelLabel("feishu"), type: messageType }) };
   switch (messageType) {
     case "text":
       return { text: str(body.text), resources: [] };
@@ -363,15 +365,15 @@ export function parseFeishuContent(messageType: string, content: string | undefi
         resources: str(body.file_key) ? [{ kind: "video", key: str(body.file_key), type: "file", fileName: str(body.file_name) || undefined }] : [],
       };
     case "location":
-      return { text: "", resources: [], note: `[飞书位置] ${str(body.name)}`.trim() };
+      return { text: "", resources: [], note: t("server.feishu.location", { name: str(body.name) }).trim() };
     case "folder": {
       const name = str(body.file_name);
-      return { text: "", resources: [], note: `[飞书文件夹]${name ? ` ${name}` : ""}(文件夹无法下载,请打包成压缩包再发)` };
+      return { text: "", resources: [], note: t("server.feishu.folder", { name: name ? ` ${name}` : "" }) };
     }
     case "interactive":
-      return { text: "", resources: [], note: parseFeishuCard(body) ?? "[飞书卡片] 内容为空" };
+      return { text: "", resources: [], note: parseFeishuCard(body) ?? t("server.feishu.cardEmpty") };
     default:
-      return { text: "", resources: [], note: `[飞书${messageType}消息,暂不支持读取内容]` };
+      return { text: "", resources: [], note: t("server.note.unsupported", { channel: channelLabel("feishu"), type: messageType }) };
   }
 }
 
@@ -516,11 +518,11 @@ export class FeishuSource implements ImSource {
     try {
       items = await this.fetchMessages(messageId);
     } catch (error) {
-      return [`[飞书合并转发] 读取失败:${error instanceof Error ? error.message : String(error)}`];
+      return [t("server.feishu.forwardReadFailedWith", { error: error instanceof Error ? error.message : String(error) })];
     }
-    if (!items) return ["[飞书合并转发] 读取失败"];
+    if (!items) return [t("server.feishu.forwardReadFailed")];
     const children = items.filter((item) => item.message_id !== messageId);
-    const lines = [`[飞书合并转发] 共 ${children.length} 条消息:`];
+    const lines = [t("server.feishu.forwardHeader", { count: children.length })];
     let hasAttachments = false;
     for (const child of children.slice(0, MERGE_FORWARD_LISTED)) {
       const parsed = parseFeishuContent(child.msg_type ?? "", child.body?.content);
@@ -536,8 +538,8 @@ export class FeishuSource implements ImSource {
         .replace(/\s*\n\s*/g, " ");
       if (summary) lines.push(`  - ${truncate(summary, MERGE_FORWARD_LINE_CHARS)}`);
     }
-    if (children.length > MERGE_FORWARD_LISTED) lines.push(`  - …其余 ${children.length - MERGE_FORWARD_LISTED} 条未列出`);
-    if (hasAttachments) lines.push("  (合并转发里的图片和文件飞书不允许机器人下载,需要的话请单独发送)");
+    if (children.length > MERGE_FORWARD_LISTED) lines.push(t("server.feishu.forwardMore", { count: children.length - MERGE_FORWARD_LISTED }));
+    if (hasAttachments) lines.push(t("server.feishu.forwardNoAttachments"));
     return lines;
   }
 
@@ -608,20 +610,20 @@ export class FeishuSource implements ImSource {
         onDrop?.({
           origin,
           threadKey,
-          title: `飞书群 ${titleText(summary)}`,
+          title: t("server.title.feishuGroup", { text: titleText(summary) }),
           text: summary,
           sender: `feishu:${senderOpenId}`,
-          reason: "群消息未 @ 机器人",
+          reason: t("server.filter.notMentioned"),
           replyTo,
         });
       }
       return null;
     }
-    const chatLabel = isGroup ? "飞书群" : "飞书私聊";
+    const chatTitle = (text: string) => t(isGroup ? "server.title.feishuGroup" : "server.title.feishuDirect", { text });
     if (observe) {
       if (!summary) return null;
       return {
-        origin, threadKey, title: `${chatLabel} ${titleText(summary)}`, text: summary,
+        origin, threadKey, title: chatTitle(titleText(summary)), text: summary,
         sender: `feishu:${senderOpenId}`, context: true, replyTo,
       };
     }
@@ -642,7 +644,7 @@ export class FeishuSource implements ImSource {
     return {
       origin,
       threadKey,
-      title: `${chatLabel} ${titleText(headline)}`,
+      title: chatTitle(titleText(headline)),
       text: body,
       sender: `feishu:${senderOpenId}`,
       replyTo,

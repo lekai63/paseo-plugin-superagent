@@ -18,6 +18,7 @@ import { SIDEBAR_WIDTH, SidebarContent, SidebarTabs, type SidebarTab } from "./c
 import { STATE_QUERY_KEY, useSuperagentState } from "./query";
 import { HAIRLINE, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
 import { Button, Notice, StatusBadge, cardSurface } from "./ui";
+import { useT } from "./i18n";
 
 /**
  * 主界面:像在 Paseo 项目里和 agent 对话一样和 Superagent 对话。
@@ -49,6 +50,7 @@ function panelParam(value: string | undefined): SidebarTab | null {
 
 export function ChatScreen(props: ChatScreenProps) {
   const { theme, layout, host, params, navigation, openSettings } = props;
+  const t = useT();
   const list = useSuperagentState(host.id, { includeClosed: true, omitRecords: true });
   const { tabs, update: updateTabs } = useChatTabs(host.id, list.data?.chatTabs, Boolean(list.data), list.isError);
   // undefined:标签还没读到,稍后进入最后查看的对话;null:新对话。
@@ -103,8 +105,8 @@ export function ChatScreen(props: ChatScreenProps) {
     .filter((ticket) => ticket.threadId === threadId || (threadId !== null && followsOf(ticket).includes(threadId))),
     [detailData, snapshot, threadId]);
   const entries = useMemo(
-    () => (detailData ? buildChatEntries(detailData.triggers, detailData.decisions, detailData.tickets) : []),
-    [detailData],
+    () => (detailData ? buildChatEntries(detailData.triggers, detailData.decisions, detailData.tickets, t) : []),
+    [detailData, t],
   );
   const truncated = Boolean(detailData && (detailData.triggers.length >= RECORD_LIMIT || detailData.decisions.length >= RECORD_LIMIT));
 
@@ -120,13 +122,13 @@ export function ChatScreen(props: ChatScreenProps) {
     if (!thread || !engine) return null;
     const pendingSince = (detailData?.triggers ?? []).filter((trigger) => trigger.status === "pending")
       .map((trigger) => trigger.receivedAt).sort()[0] ?? null;
-    if (engine.currentEvalThreadId === thread.id) return { label: "Router 正在评估", since: pendingSince };
-    if (thread.pendingTriggers > 0) return { label: "等待 Router 评估", since: pendingSince };
+    if (engine.currentEvalThreadId === thread.id) return { label: t("chat.working.evaluating"), since: pendingSince };
+    if (thread.pendingTriggers > 0) return { label: t("chat.working.awaiting"), since: pendingSince };
     const active = tickets.filter((ticket) => ticket.status === "launching" || ticket.status === "running");
     if (!active.length) return null;
     const since = active.map((ticket) => ticket.startedAt).filter((value): value is string => Boolean(value)).sort()[0] ?? null;
-    return { label: active.length === 1 ? `Worker 执行中 · ${active[0].title}` : `${active.length} 个 Worker 执行中`, since };
-  }, [detailData, snapshot, thread, tickets]);
+    return { label: active.length === 1 ? t("chat.working.workerRunning", { title: active[0].title }) : t("chat.working.workersRunning", { count: active.length }), since };
+  }, [detailData, snapshot, thread, tickets, t]);
 
   const dispatch = useRpc(superagentDispatchRpc);
   const queryClient = useQueryClient();
@@ -146,7 +148,7 @@ export function ChatScreen(props: ChatScreenProps) {
       return true;
     } catch (error) {
       setPending(null);
-      toast.error(`发送失败:${error instanceof Error ? error.message : String(error)}`);
+      toast.error(t("chat.sendFailed", { error: error instanceof Error ? error.message : String(error) }));
       return false;
     }
   };
@@ -175,17 +177,17 @@ export function ChatScreen(props: ChatScreenProps) {
   };
 
   const directs = thread && thread.state !== "closed" ? directTickets(tickets, thread.id) : [];
-  let hint: ComposerHint = { icon: "Route", label: "交给 Router 评估" };
-  if (!threadId) hint = { icon: "Sparkles", label: "新对话 · Router 评估后答复或派发 Worker" };
-  else if (thread?.state === "closed") hint = { icon: "RotateCcw", label: "对话已关闭,发送后重新打开" };
-  else if (directs.length === 1) hint = { icon: "CornerDownRight", label: `直通 Worker · ${directs[0].title}` };
-  else if (directs.length > 1) hint = { icon: "CornerDownRight", label: `直通 ${directs.length} 个订阅 Worker` };
+  let hint: ComposerHint = { icon: "Route", label: t("chat.hint.router") };
+  if (!threadId) hint = { icon: "Sparkles", label: t("chat.hint.newConversation") };
+  else if (thread?.state === "closed") hint = { icon: "RotateCcw", label: t("chat.hint.closed") };
+  else if (directs.length === 1) hint = { icon: "CornerDownRight", label: t("chat.hint.direct", { title: directs[0].title }) };
+  else if (directs.length > 1) hint = { icon: "CornerDownRight", label: t("chat.hint.directMany", { count: directs.length }) };
   let disabledReason: string | null = null;
-  if (deciding) disabledReason = "正在读取对话";
+  if (deciding) disabledReason = t("chat.disabled.loadingConversation");
   else if (!threadId) {
-    if (!snapshot) disabledReason = list.isError ? "状态不可用,请先重试" : "正在读取配置";
-    else if (!snapshot.configured) disabledReason = "先在设置里填写工作目录";
-    else if (snapshot.workingDirIssue) disabledReason = "工作目录不可用,Worker 暂时无法启动";
+    if (!snapshot) disabledReason = list.isError ? t("chat.disabled.statusUnavailable") : t("chat.disabled.loadingConfig");
+    else if (!snapshot.configured) disabledReason = t("chat.disabled.needWorkingDir");
+    else if (snapshot.workingDirIssue) disabledReason = t("chat.disabled.workingDirUnavailable");
   }
 
   const activeQuery = threadId ? detail : list;
@@ -216,11 +218,11 @@ export function ChatScreen(props: ChatScreenProps) {
           <ChatTabBar tabIds={tabs?.open ?? []} activeId={threadId} snapshot={snapshot} theme={theme} compact={layout.compact}
             onSelect={selectThread} onClose={closeTab} trailing={docked ? (
               sidebarOpen ? null : (
-                <Button theme={theme} variant="ghost" size="xs" icon="PanelRightOpen" accessibilityLabel="显示侧栏"
+                <Button theme={theme} variant="ghost" size="xs" icon="PanelRightOpen" accessibilityLabel={t("chat.sidebar.show")}
                   onPress={() => setSidebarOpen(true)} />
               )
             ) : (
-              <Button theme={theme} variant="ghost" size="xs" icon="PanelRight" accessibilityLabel="任务、对话与状态"
+              <Button theme={theme} variant="ghost" size="xs" icon="PanelRight" accessibilityLabel={t("chat.sidebar.open")}
                 onPress={() => setSheetOpen(true)} />
             )} />
         )}
@@ -229,9 +231,9 @@ export function ChatScreen(props: ChatScreenProps) {
           <View style={{ paddingHorizontal: space.lg, paddingTop: space.md, alignItems: "center" }}>
             <View style={{ width: "100%", maxWidth: metrics.maxWidth }}>
               <Notice theme={theme} tone={activeQuery.data ? "warning" : "danger"}
-                title={activeQuery.data ? "状态刷新失败,当前显示上一次的数据" : "无法读取 Superagent 状态"}
+                title={activeQuery.data ? t("chat.stateRefreshFailed") : t("chat.stateLoadFailed")}
                 description={activeQuery.error instanceof Error ? activeQuery.error.message : String(activeQuery.error)}>
-                <Button theme={theme} label="重试" size="xs" variant="outline" onPress={() => void activeQuery.refetch()} />
+                <Button theme={theme} label={t("chat.retry")} size="xs" variant="outline" onPress={() => void activeQuery.refetch()} />
               </Notice>
             </View>
           </View>
@@ -265,7 +267,7 @@ export function ChatScreen(props: ChatScreenProps) {
           theme={theme}
           layout={layout}
           metrics={metrics}
-          placeholder={threadId ? "继续对话…" : "描述要交给 Superagent 的任务…"}
+          placeholder={threadId ? t("chat.composer.placeholderReply") : t("chat.composer.placeholderNew")}
           hint={hint}
           disabledReason={disabledReason}
           onSubmit={submit}
@@ -275,7 +277,7 @@ export function ChatScreen(props: ChatScreenProps) {
       {docked && sidebarOpen ? (
         <View style={{ width: SIDEBAR_WIDTH, borderLeftWidth: HAIRLINE, borderLeftColor: theme.colors.border, backgroundColor: theme.colors.surface0 }}>
           <SidebarTabs tab={tab} onTab={setTab} theme={theme} trailing={
-            <Button theme={theme} variant="ghost" size="xs" icon="PanelRightClose" accessibilityLabel="收起侧栏"
+            <Button theme={theme} variant="ghost" size="xs" icon="PanelRightClose" accessibilityLabel={t("chat.sidebar.hide")}
               onPress={() => setSidebarOpen(false)} />
           } />
           <ScrollView style={{ flex: 1 }} keyboardShouldPersistTaps="handled">
@@ -303,6 +305,7 @@ function Welcome({ snapshot, theme, openSettings, onSelectThread }: {
   openSettings(): void;
   onSelectThread(threadId: string): void;
 }) {
+  const t = useT();
   const recent = (snapshot?.threads ?? []).filter((thread) => thread.state !== "closed").slice(0, 4);
   const muted = theme.colors.foregroundMuted;
   return (
@@ -313,10 +316,10 @@ function Welcome({ snapshot, theme, openSettings, onSelectThread }: {
           <Icon name="Network" size={18} color={muted} />
         </View>
         <Text style={{ color: theme.colors.foreground, fontSize: TYPE.stat.size, lineHeight: 28, fontWeight: "600", textAlign: "center" }}>
-          要交给 Superagent 做什么?
+          {t("chat.welcome.title")}
         </Text>
         <Text style={{ maxWidth: 480, color: muted, fontSize: TYPE.bodyRead.size, lineHeight: TYPE.bodyRead.lineHeight, textAlign: "center" }}>
-          Router 会评估你的消息,直接答复,或派发 Worker 执行。在任意 agent 会话里输入 /superagent 也能委派。
+          {t("chat.welcome.body")}
         </Text>
         {snapshot?.workingDir ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs + 2, maxWidth: "100%", marginTop: space.xs }}>
@@ -329,17 +332,17 @@ function Welcome({ snapshot, theme, openSettings, onSelectThread }: {
         ) : null}
       </View>
       {snapshot?.configured && snapshot.workingDirIssue ? (
-        <Notice theme={theme} tone="danger" title="Worker 无法启动" description={snapshot.workingDirIssue}>
-          <Button theme={theme} variant="outline" size="xs" label="打开设置" onPress={openSettings} />
+        <Notice theme={theme} tone="danger" title={t("chat.welcome.workerCannotStart")} description={snapshot.workingDirIssue}>
+          <Button theme={theme} variant="outline" size="xs" label={t("chat.welcome.openSettings")} onPress={openSettings} />
         </Notice>
       ) : snapshot && !snapshot.configured ? (
-        <Notice theme={theme} tone="warning" title="先设置工作目录,即可派发任务">
-          <Button theme={theme} variant="outline" size="xs" label="打开设置" onPress={openSettings} />
+        <Notice theme={theme} tone="warning" title={t("chat.welcome.setWorkingDir")}>
+          <Button theme={theme} variant="outline" size="xs" label={t("chat.welcome.openSettings")} onPress={openSettings} />
         </Notice>
       ) : null}
       {recent.length ? (
         <View style={{ gap: space.sm }}>
-          <Text style={{ color: muted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight, fontWeight: "600" }}>继续最近的对话</Text>
+          <Text style={{ color: muted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight, fontWeight: "600" }}>{t("chat.welcome.recent")}</Text>
           {recent.map((thread) => (
             <RecentThread key={thread.id} thread={thread} snapshot={snapshot!} theme={theme} onPress={() => onSelectThread(thread.id)} />
           ))}
@@ -355,10 +358,11 @@ function RecentThread({ thread, snapshot, theme, onPress }: {
   theme: Theme;
   onPress(): void;
 }) {
+  const t = useT();
   const [hovered, setHovered] = useState(false);
   const card = chatTokens(theme).card;
   const status = threadStatus(thread, snapshot.tickets.filter((ticket) => ticket.threadId === thread.id),
-    thread.lastDecision ? [thread.lastDecision] : []);
+    thread.lastDecision ? [thread.lastDecision] : [], t);
   const preview = thread.latestResult ? markdownPreview(thread.latestResult.text).replace(/\s+/g, " ").trim() : thread.summary ?? "";
   return (
     <Pressable accessibilityRole="button" accessibilityLabel={`${thread.title},${status.label}`} onPress={onPress}
@@ -371,20 +375,21 @@ function RecentThread({ thread, snapshot, theme, onPress }: {
         <StatusBadge theme={theme} {...status} />
       </View>
       <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight }}>
-        {relativeTime(thread.updatedAt)}{preview ? ` · ${preview}` : ""}
+        {relativeTime(thread.updatedAt, t)}{preview ? ` · ${preview}` : ""}
       </Text>
     </Pressable>
   );
 }
 
 function NotFound({ theme, onClose }: { theme: Theme; onClose(): void }) {
+  const t = useT();
   return (
     <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: space.md }}>
       <Icon name="MessageSquareOff" size={20} color={theme.colors.foregroundMuted} />
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.body.size, lineHeight: TYPE.body.lineHeight }}>
-        找不到这段对话,它可能已被清理。
+        {t("chat.notFound.message")}
       </Text>
-      <Button theme={theme} variant="outline" size="xs" icon="X" label="关闭此标签" onPress={onClose} />
+      <Button theme={theme} variant="outline" size="xs" icon="X" label={t("chat.notFound.closeTab")} onPress={onClose} />
     </View>
   );
 }

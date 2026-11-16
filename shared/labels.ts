@@ -1,6 +1,7 @@
+import type { Translate } from "./i18n";
 import type { Decision, Ticket, Trigger } from "./model";
 
-/** 展示层中文标签与状态推导(client/server 共用;纯函数无运行时依赖)。 */
+/** 展示层标签与状态推导(client/server 共用;纯函数无运行时依赖,文字经传入的 t 翻译)。 */
 
 /** 状态色调:映射到宿主 theme 的 status token;default = 前景色,muted = 次要色。 */
 export type Tone = "default" | "success" | "danger" | "warning" | "muted";
@@ -10,52 +11,12 @@ export interface StatusLabel {
   tone: Tone;
 }
 
-export function outcomeLabel(outcome: Decision["outcome"]): string {
-  switch (outcome) {
-    case "dispatch":
-      return "派发";
-    case "steer":
-      return "转向";
-    case "respond":
-      return "处理请求";
-    case "cancel":
-      return "取消";
-    case "retry":
-      return "重试";
-    case "reply":
-      return "答复";
-    case "ignore":
-      return "忽略";
-    case "stop":
-      return "终止";
-    case "subscribe":
-      return "订阅";
-    case "watchdog":
-      return "巡检";
-    case "unparsed":
-      return "未解析";
-    case "error":
-      return "错误";
-  }
+export function outcomeLabel(outcome: Decision["outcome"], t: Translate): string {
+  return t(`labels.outcome.${outcome}`);
 }
 
-export function ticketStatusLabel(status: Ticket["status"]): string {
-  switch (status) {
-    case "pending":
-      return "待启动";
-    case "launching":
-      return "启动中";
-    case "running":
-      return "运行中";
-    case "waiting":
-      return "待命";
-    case "completed":
-      return "已完成";
-    case "failed":
-      return "失败";
-    case "canceled":
-      return "已取消";
-  }
+export function ticketStatusLabel(status: Ticket["status"], t: Translate): string {
+  return t(`labels.ticketStatus.${status}`);
 }
 
 export function ticketStatusTone(status: Ticket["status"]): Tone {
@@ -72,27 +33,8 @@ export function ticketStatusTone(status: Ticket["status"]): Tone {
   }
 }
 
-export function triggerKindLabel(kind: Trigger["kind"]): string {
-  switch (kind) {
-    case "manual":
-      return "手动";
-    case "agent":
-      return "Agent 委派";
-    case "report":
-      return "Worker 汇报";
-    case "engine":
-      return "引擎";
-    case "feishu":
-      return "飞书";
-    case "qq":
-      return "QQ";
-    case "dingtalk":
-      return "钉钉";
-    case "wecom":
-      return "企业微信";
-    case "weixin":
-      return "微信";
-  }
+export function triggerKindLabel(kind: Trigger["kind"], t: Translate): string {
+  return t(`labels.triggerKind.${kind}`);
 }
 
 /**
@@ -123,27 +65,28 @@ export function threadStatus(
   thread: { state: "active" | "closed"; pendingTriggers: number },
   tickets: readonly Pick<Ticket, "status" | "updatedAt">[],
   decisions: readonly Pick<Decision, "outcome" | "createdAt">[],
+  t: Translate,
 ): StatusLabel {
-  if (thread.state === "closed") return { label: "已关闭", tone: "muted" };
-  if (tickets.some((t) => ACTIVE_TICKET_STATUSES.includes(t.status))) return { label: "运行中", tone: "warning" };
-  if (thread.pendingTriggers > 0) return { label: "待评估", tone: "warning" };
+  if (thread.state === "closed") return { label: t("labels.threadStatus.closed"), tone: "muted" };
+  if (tickets.some((ticket) => ACTIVE_TICKET_STATUSES.includes(ticket.status))) return { label: t("labels.threadStatus.running"), tone: "warning" };
+  if (thread.pendingTriggers > 0) return { label: t("labels.threadStatus.pendingEval"), tone: "warning" };
 
-  const latestTicket = latestBy(tickets, (t) => t.updatedAt);
+  const latestTicket = latestBy(tickets, (ticket) => ticket.updatedAt);
   const latestDecision = latestBy(decisions, (d) => d.createdAt);
   const decisionFailed = latestDecision && (latestDecision.outcome === "unparsed" || latestDecision.outcome === "error");
   if (decisionFailed && (!latestTicket || latestDecision.createdAt > latestTicket.updatedAt)) {
-    return { label: "评估失败", tone: "danger" };
+    return { label: t("labels.threadStatus.evalFailed"), tone: "danger" };
   }
-  if (latestTicket) return { label: ticketStatusLabel(latestTicket.status), tone: ticketStatusTone(latestTicket.status) };
+  if (latestTicket) return { label: ticketStatusLabel(latestTicket.status, t), tone: ticketStatusTone(latestTicket.status) };
   switch (latestDecision?.outcome) {
     case "reply":
-      return { label: "已答复", tone: "success" };
+      return { label: t("labels.threadStatus.replied"), tone: "success" };
     case "ignore":
-      return { label: "已忽略", tone: "muted" };
+      return { label: t("labels.threadStatus.ignored"), tone: "muted" };
     case "stop":
-      return { label: "已终止", tone: "muted" };
+      return { label: t("labels.threadStatus.stopped"), tone: "muted" };
     default:
-      return { label: "空闲", tone: "muted" };
+      return { label: t("labels.threadStatus.idle"), tone: "muted" };
   }
 }
 
@@ -156,39 +99,46 @@ function latestBy<T>(items: readonly T[], key: (item: T) => string): T | undefin
 }
 
 /** 看门狗备注(引擎原文为英文 `reconciled N item(s)`)。 */
-export function watchdogNoteLabel(note: string | null | undefined): string {
-  if (!note) return "一切正常";
+export function watchdogNoteLabel(note: string | null | undefined, t: Translate): string {
+  if (!note) return t("labels.watchdogNote.allClear");
   const match = /reconciled (\d+)/.exec(note);
-  return match ? `已自动修复 ${match[1]} 项` : note;
+  return match ? t("labels.watchdogNote.reconciled", { count: Number(match[1]) }) : note;
 }
 
-/** LLM 巡检结论:引擎写入的固定英文说明译成中文,模型给出的摘要原样显示。 */
-export function patrolSummaryLabel(summary: string | null | undefined): string {
-  if (!summary) return "无结论";
-  if (summary === "nothing to patrol") return "没有进行中的任务,未调用模型";
+/** LLM 巡检结论:引擎写入的固定英文说明按界面语言改写,模型给出的摘要原样显示。 */
+export function patrolSummaryLabel(summary: string | null | undefined, t: Translate): string {
+  if (!summary) return t("labels.patrolSummary.none");
+  if (summary === "nothing to patrol") return t("labels.patrolSummary.nothingToPatrol");
   const parked = /^nothing to patrol: (\d+) parked waiting ticket/.exec(summary);
-  if (parked) return `只有 ${parked[1]} 个待命任务且无新动静,未调用模型`;
-  if (summary.startsWith("skipped: the watchdog session is busy")) return "巡检会话正被使用,本次跳过";
+  if (parked) return t("labels.patrolSummary.parked", { count: Number(parked[1]) });
+  if (summary.startsWith("skipped: the watchdog session is busy")) return t("labels.patrolSummary.busy");
   return summary;
 }
 
+/** 月日(中文「3月5日」,英文「Mar 5」);跨年时带年份。 */
+function monthDayLabel(date: Date, withYear: boolean, t: Translate): string {
+  const month = t(`labels.time.months.m${(date.getMonth() + 1) as MonthNumber}`);
+  const monthDay = t("labels.time.monthDay", { month, day: date.getDate() });
+  return withYear ? t("labels.time.withYear", { date: monthDay, year: date.getFullYear() }) : monthDay;
+}
+
+type MonthNumber = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12;
+
 /** 相对时间:刚刚 / N 分钟前 / N 小时前 / N 天前 / M月D日(跨年带年份)。 */
-export function relativeTime(iso: string | null | undefined, now: number = Date.now()): string {
+export function relativeTime(iso: string | null | undefined, t: Translate, now: number = Date.now()): string {
   if (!iso) return "";
   const time = Date.parse(iso);
   if (Number.isNaN(time)) return "";
   const seconds = Math.max(0, Math.round((now - time) / 1000));
-  if (seconds < 45) return "刚刚";
+  if (seconds < 45) return t("labels.time.justNow");
   const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} 分钟前`;
+  if (minutes < 60) return t("labels.time.minutesAgo", { count: minutes });
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
+  if (hours < 24) return t("labels.time.hoursAgo", { count: hours });
   const days = Math.round(hours / 24);
-  if (days < 7) return `${days} 天前`;
+  if (days < 7) return t("labels.time.daysAgo", { count: days });
   const date = new Date(time);
-  const sameYear = date.getFullYear() === new Date(now).getFullYear();
-  const monthDay = `${date.getMonth() + 1}月${date.getDate()}日`;
-  return sameYear ? monthDay : `${date.getFullYear()}年${monthDay}`;
+  return monthDayLabel(date, date.getFullYear() !== new Date(now).getFullYear(), t);
 }
 
 /**
@@ -220,7 +170,7 @@ export function clockTime(iso: string | null | undefined): string {
  * 对话里的时间戳(better-paseo 页脚同款):今天只写「时:分」,今年其他日子「M月D日 时:分」,
  * 往年再加年份。24 小时制、两位数字,同一列的时间等宽对齐。
  */
-export function stampTime(iso: string | null | undefined, now: number = Date.now()): string {
+export function stampTime(iso: string | null | undefined, t: Translate, now: number = Date.now()): string {
   if (!iso) return "";
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "";
@@ -230,8 +180,7 @@ export function stampTime(iso: string | null | undefined, now: number = Date.now
   if (date.getFullYear() === today.getFullYear() && date.getMonth() === today.getMonth() && date.getDate() === today.getDate()) {
     return clock;
   }
-  const monthDay = `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
-  return date.getFullYear() === today.getFullYear() ? monthDay : `${date.getFullYear()}年${monthDay}`;
+  return t("labels.time.withClock", { date: monthDayLabel(date, date.getFullYear() !== today.getFullYear(), t), clock });
 }
 
 /** 完整时刻(无障碍标签、悬停说明):YYYY-MM-DD 时:分:秒。 */

@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TYPE, bubbleStep, contrastRatio, even, isDarkColor, mix, proseScale, readableOn, withAlpha } from "../shared/design.ts";
 import { defaultHostAppearance, resolveHostAppearance, sameHostAppearance } from "../shared/host-font.ts";
-import { fullStamp, stampTime } from "../shared/labels.ts";
+import * as labels from "../shared/labels.ts";
+import { translator } from "../shared/i18n.ts";
+
+// 既有断言按简体中文书写;英文见 i18n.test.mjs。
+const zh = translator("zh-CN");
+const { fullStamp } = labels;
+const stampTime = (iso, now) => labels.stampTime(iso, zh, now);
 
 test("reading text follows the host content size on better-paseo's 1.5 grid", () => {
   assert.equal(even(22.5), 22);

@@ -17,12 +17,15 @@ import {
   MAX_ROUTER_INSTRUCTIONS_CHARS,
   NUMBER_LIMITS,
   parseAllowlist,
+  settingsIssueText,
   superagentSettings,
   WORKER_PROFILE_NAME_HINT,
   type NumberSettingKey,
   type SuperagentSettingsValues,
   type WorkerProfile,
 } from "../shared/settings";
+import type { MessageKey, Translate } from "../shared/i18n";
+import { useT } from "./i18n";
 import { STATE_QUERY_KEY, useProviderSnapshot, type ProviderSnapshotEntry } from "./query";
 import { fontSize, radius, space } from "./ui";
 import { WeixinAccountPanel } from "./weixin-account";
@@ -73,7 +76,7 @@ function isAbsolutePath(path: string): boolean {
   return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
 
-function parseForm(form: FormValues): { values: Values | null; errors: FormErrors; profileErrors: ProfileErrors } {
+function parseForm(form: FormValues, t: Translate): { values: Values | null; errors: FormErrors; profileErrors: ProfileErrors } {
   const errors: FormErrors = {};
   const profileErrors: ProfileErrors = form.workerProfiles.map(() => ({}));
   const raw = { ...form, workerProfiles: stripProfileKeys(form.workerProfiles) } as Record<string, unknown>;
@@ -82,19 +85,19 @@ function parseForm(form: FormValues): { values: Values | null; errors: FormError
     const text = form[key].trim();
     const value = /^\d+$/.test(text) ? Number(text) : Number.NaN;
     if (!Number.isInteger(value) || value < min || value > max) {
-      errors[key] = `请输入 ${min}–${max} 之间的整数`;
+      errors[key] = t("settings.validation.intRange", { min, max });
     }
     raw[key] = value;
   }
   const workingDir = form.workingDir.trim();
-  if (workingDir && !isAbsolutePath(workingDir)) errors.workingDir = "需要绝对路径,例如 /home/me/project";
+  if (workingDir && !isAbsolutePath(workingDir)) errors.workingDir = t("settings.validation.absolutePath");
   const imInboxDir = form.imInboxDir.trim();
-  if (imInboxDir && !isAbsolutePath(imInboxDir)) errors.imInboxDir = "需要绝对路径,留空使用默认目录";
+  if (imInboxDir && !isAbsolutePath(imInboxDir)) errors.imInboxDir = t("settings.validation.absolutePathInbox");
   // 档位专属目录:留空合法(用全局工作目录),填写时必须是绝对路径。
   form.workerProfiles.forEach((row, index) => {
     const dir = row.workingDir.trim();
     if (dir && !isAbsolutePath(dir)) {
-      profileErrors[index] = { ...profileErrors[index], workingDir: "需要绝对路径,留空使用上方的工作目录" };
+      profileErrors[index] = { ...profileErrors[index], workingDir: t("settings.validation.absolutePathProfile") };
     }
   });
 
@@ -102,7 +105,7 @@ function parseForm(form: FormValues): { values: Values | null; errors: FormError
   if (!parsed.success) {
     for (const issue of parsed.error.issues) {
       const key = issue.path[0] as keyof Values | undefined;
-      const message = issue.code === "too_big" ? "内容过长" : issue.message;
+      const message = settingsIssueText(issue, t);
       if (key === "workerProfiles" && typeof issue.path[1] === "number") {
         // 档位错误标在对应行的对应输入框上。
         const row = profileErrors[issue.path[1]];
@@ -124,25 +127,26 @@ function countProfileErrors(profileErrors: ProfileErrors): number {
 
 export function SuperagentSettingsScreen({ theme, host }: PluginSurfaceProps) {
   const settings = useSettings(superagentSettings);
+  const t = useT();
 
   if (settings.status === "loading") {
-    return <Text style={{ color: theme.colors.foregroundMuted, fontSize: 14 }}>正在加载设置...</Text>;
+    return <Text style={{ color: theme.colors.foregroundMuted, fontSize: 14 }}>{t("settings.unavailable.loading")}</Text>;
   }
   if (settings.status !== "ready") {
     return (
-      <SettingsSection title="设置不可用">
+      <SettingsSection title={t("settings.unavailable.title")}>
         <SettingsCard>
           <SettingsAction
-            label="读取设置失败"
+            label={t("settings.unavailable.readFailed")}
             hint={settings.error}
-            actionLabel="重新加载"
+            actionLabel={t("settings.unavailable.reload")}
             onPress={() => void settings.reload()}
           />
           {settings.status === "invalid" ? (
             <SettingsAction
-              label="恢复默认设置"
-              hint="已保存的设置无法解析,恢复后需要重新填写"
-              actionLabel="恢复默认"
+              label={t("settings.unavailable.restoreLabel")}
+              hint={t("settings.unavailable.restoreHint")}
+              actionLabel={t("settings.unavailable.restoreAction")}
               onPress={() => void settings.reset()}
             />
           ) : null}
@@ -154,6 +158,7 @@ export function SuperagentSettingsScreen({ theme, host }: PluginSurfaceProps) {
 }
 
 function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: string; theme: PluginSurfaceProps["theme"] }) {
+  const t = useT();
   // 草稿与它基于的 revision 一起保存:别的客户端先保存时,这里的保存会冲突而不是静默覆盖。
   const [base, setBase] = useState({ values: settings.values, revision: settings.revision });
   const [form, setForm] = useState<FormValues>(() => toForm(settings.values));
@@ -162,7 +167,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
 
   const baseForm = useMemo(() => comparable(toForm(base.values)), [base.values]);
   const dirty = comparable(form) !== baseForm;
-  const { values: parsedValues, errors, profileErrors } = useMemo(() => parseForm(form), [form]);
+  const { values: parsedValues, errors, profileErrors } = useMemo(() => parseForm(form, t), [form, t]);
   const errorCount = Object.keys(errors).length + countProfileErrors(profileErrors);
 
   useEffect(() => {
@@ -227,7 +232,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
   const cached = useQueryClient().getQueryData<SuperagentSnapshot>([...STATE_QUERY_KEY, hostId, {}]);
   const serverIssue =
     cached?.workingDirIssue && cached.workingDir === settings.values.workingDir && form.workingDir === settings.values.workingDir
-      ? `Worker 无法启动:${cached.workingDirIssue}`
+      ? t("settings.serverIssue", { issue: cached.workingDirIssue })
       : null;
 
   // 模型候选:与引擎启动校验同源的 provider 快照;不可用时模型字段回退为手工输入。
@@ -241,35 +246,35 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
   const disabled = settings.saving;
   const field = { form, errors, set, disabled, snapshot };
 
-  let saveLabel = "所有修改已保存";
-  if (dirty) saveLabel = errorCount > 0 ? `有 ${errorCount} 处需要修正` : "有未保存的修改";
+  let saveLabel = t("settings.status.saved");
+  if (dirty) saveLabel = errorCount > 0 ? t("settings.status.errors", { count: errorCount }) : t("settings.status.unsaved");
 
   return (
     <View key={formKey}>
       <SettingsSection
-        title="工作目录"
-        info="默认的基础目录:Router 与默认 Worker 共用它。共享目录隔离时,两者都住在按此目录创建的「默认 workspace」里;独立 worktree 隔离时,每个 Ticket 从它切出独立分支。Router 的自定义规则在下方直接填写。"
+        title={t("settings.workingDir.title")}
+        info={t("settings.workingDir.info")}
       >
         <SettingsCard>
           <TextField
             {...field}
             name="workingDir"
-            label="工作目录"
-            hint="主机上的绝对路径;选择独立 worktree 时必须位于 git 仓库内"
+            label={t("settings.workingDir.label")}
+            hint={t("settings.workingDir.hint")}
             placeholder="/home/me/project"
             errorOverride={serverIssue}
           />
           <SettingsSelect
-            label="Worker 隔离"
+            label={t("settings.isolation.label")}
             hint={
               form.workerIsolation === "worktree"
-                ? "每个 Ticket 在独立分支的 worktree 里工作,互不干扰"
-                : "直接在工作目录里工作,不需要 git;产出按 AGENTS.md 规则或放进 tasks/ 子目录"
+                ? t("settings.isolation.worktreeHint")
+                : t("settings.isolation.sharedHint")
             }
             value={form.workerIsolation}
             options={[
-              { label: "独立 worktree", value: "worktree" },
-              { label: "共享目录", value: "shared" },
+              { label: t("settings.isolation.worktree"), value: "worktree" },
+              { label: t("settings.isolation.shared"), value: "shared" },
             ]}
             onValueChange={(value) => set("workerIsolation", value)}
             disabled={disabled}
@@ -278,40 +283,40 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
       </SettingsSection>
 
       <SettingsSection
-        title="模型"
-        info="从 daemon 的 provider 快照中选取(与启动时校验同源),model id 由选项原样带入,不会出现反斜杠转义或笔误;清单读取失败时可退回手工填写 provider 或 provider/model。留空时按 claude → codex → opencode 的顺序自动选择。"
+        title={t("settings.model.title")}
+        info={t("settings.model.info")}
       >
         <SettingsCard>
           <ModelField
             {...field}
             name="routerProvider"
             label="Router"
-            hint="只做评估与分派,轻量模型即可"
-            emptyLabel="自动选择"
+            hint={t("settings.model.routerHint")}
+            emptyLabel={t("settings.model.auto")}
           />
           <ThinkingPicker
-            label="Router thinking 档位(可选)"
+            label={t("settings.model.routerThinking")}
             providerSelection={form.routerProvider}
             value={form.routerThinkingOptionId}
             onChange={(value) => set("routerThinkingOptionId", value)}
             disabled={disabled}
             error={errors.routerThinkingOptionId ?? null}
             snapshot={snapshot}
-            fallbackHint="用于新建或重建的 Router 会话,不影响运行中的会话"
+            fallbackHint={t("settings.model.routerThinkingFallback")}
           />
           <ModelField
             {...field}
             name="workerProvider"
-            label={form.workerProfiles.length > 0 ? "默认 Worker" : "Worker"}
+            label={form.workerProfiles.length > 0 ? t("settings.model.defaultWorker") : t("settings.model.worker")}
             hint={
               form.workerProfiles.length > 0
-                ? "Router 没有指定档位、或指定的档位不存在时使用"
-                : "负责真正干活,建议用最强的模型"
+                ? t("settings.model.defaultWorkerHint")
+                : t("settings.model.workerHint")
             }
-            emptyLabel="自动选择"
+            emptyLabel={t("settings.model.auto")}
           />
           <ModePicker
-            label="Worker 模式(可选)"
+            label={t("settings.model.workerMode")}
             providerSelection={form.workerProvider}
             value={form.workerModeId}
             onChange={(value) => set("workerModeId", value)}
@@ -320,42 +325,42 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             snapshot={snapshot}
           />
           <ThinkingPicker
-            label="默认 Worker thinking 档位(可选)"
+            label={t("settings.model.defaultWorkerThinking")}
             providerSelection={form.workerProvider}
             value={form.workerThinkingOptionId}
             onChange={(value) => set("workerThinkingOptionId", value)}
             disabled={disabled}
             error={errors.workerThinkingOptionId ?? null}
             snapshot={snapshot}
-            fallbackHint="随新建或重试的 Worker 传入,不修改运行中的会话"
+            fallbackHint={t("settings.model.workerThinkingFallback")}
           />
           {form.workerProfiles.length > 0 ? (
             <TextField
               {...field}
               name="workerDescription"
-              label="默认 Worker 的用途"
-              hint="写进 Router 提示词,和下方各档位的用途一起供 Router 选择;留空时视为「其他档位都不合适的通用任务」"
-              placeholder="通用任务、调研、中文文档与报告"
+              label={t("settings.model.workerDescriptionLabel")}
+              hint={t("settings.model.workerDescriptionHint")}
+              placeholder={t("settings.model.workerDescriptionPlaceholder")}
             />
           ) : null}
         </SettingsCard>
       </SettingsSection>
 
       <SettingsSection
-        title="Router 规则"
-        info="设置答复语言、任务分派偏好和汇报格式。仅影响 Router;保存后从下一次评估开始使用,无需重建会话。"
+        title={t("settings.routerRules.title")}
+        info={t("settings.routerRules.info")}
       >
         <SettingsCard>
           <View style={{ padding: space.lg, gap: space.sm }}>
-            <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base, lineHeight: 20 }}>自定义规则</Text>
+            <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base, lineHeight: 20 }}>{t("settings.routerRules.custom")}</Text>
             <TextInput
-              accessibilityLabel="Router 自定义规则"
+              accessibilityLabel={t("settings.routerRules.accessibility")}
               multiline
               textAlignVertical="top"
               value={form.routerInstructions}
               onChangeText={(value) => set("routerInstructions", value)}
               editable={!disabled}
-              placeholder={"面向用户使用中文。\n独立任务分别派发给 Worker。\n汇报包含结论、产出路径、验证情况与未解决问题。"}
+              placeholder={t("settings.routerRules.placeholder")}
               placeholderTextColor={theme.colors.foregroundMuted}
               style={{
                 minHeight: 180, maxHeight: 420, padding: space.md, borderWidth: 1,
@@ -366,7 +371,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
               }}
             />
             <Text style={{ color: errors.routerInstructions ? theme.colors.statusDanger : theme.colors.foregroundMuted, fontSize: fontSize.sm, lineHeight: 18 }}>
-              {errors.routerInstructions ? `${errors.routerInstructions},最多 ${MAX_ROUTER_INSTRUCTIONS_CHARS} 字符。` : "留空使用默认规则。内置的职责和输出约束始终保留。"}
+              {errors.routerInstructions ? t("settings.validation.withMax", { error: errors.routerInstructions, max: MAX_ROUTER_INSTRUCTIONS_CHARS }) : t("settings.routerRules.emptyHint")}
               {` ${form.routerInstructions.length}/${MAX_ROUTER_INSTRUCTIONS_CHARS}`}
             </Text>
           </View>
@@ -374,8 +379,8 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
       </SettingsSection>
 
       <SettingsSection
-        title="Worker 档位"
-        info="让不同类型的任务跑在不同模型上。Router 派发时按用途说明为每个任务选一个档位;没有选、或选了不存在的名字时用默认 Worker。每个档位可选择该 provider 提供的模式,留空沿用 Paseo 默认,也可另填专属工作目录。模式和模型的修改用于新建或重试的 Worker。"
+        title={t("settings.profiles.title")}
+        info={t("settings.profiles.info")}
       >
         {form.workerProfiles.map((row, index) => (
           <ProfileCard
@@ -390,70 +395,70 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
         ))}
         <SettingsCard>
           <SettingsAction
-            label={form.workerProfiles.length > 0 ? `已配置 ${form.workerProfiles.length} 个档位` : "只使用默认 Worker"}
+            label={form.workerProfiles.length > 0 ? t("settings.profiles.configured", { count: form.workerProfiles.length }) : t("settings.profiles.onlyDefault")}
             hint={
               form.workerProfiles.length >= MAX_WORKER_PROFILES
-                ? `最多 ${MAX_WORKER_PROFILES} 个档位`
-                : "例如:code → codex,负责写码、修 bug、跑测试"
+                ? t("settings.profiles.max", { max: MAX_WORKER_PROFILES })
+                : t("settings.profiles.example")
             }
-            actionLabel="添加档位"
+            actionLabel={t("settings.profiles.add")}
             disabled={disabled || form.workerProfiles.length >= MAX_WORKER_PROFILES}
             onPress={addProfile}
           />
         </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="执行">
+      <SettingsSection title={t("settings.execution.title")}>
         <SettingsCard>
-          <TextField {...field} name="workerTimeoutMin" label="Worker 超时(分钟)" hint="单轮运行超过这个时长会被中断并判为失败" />
-          <TextField {...field} name="routerEvalTimeoutMin" label="Router 评估超时(分钟)" hint="准备和裁决共享的总时限；准备阶段最多 1 分钟" />
-          <TextField {...field} name="routerIdleTimeoutMin" label="Router 空闲回收(分钟)" hint="归档空闲 Router，保留对话，下次评估自动重建" />
-          <TextField {...field} name="threadIdleTimeoutMin" label="对话空闲过期(分钟)" hint="默认 1440 分钟；有运行任务、待处理消息或审批时暂缓关闭" />
-          <TextField {...field} name="workerIdleTimeoutMin" label="Worker 待命回收(分钟)" hint="默认 1440 分钟；完成工作后长期待命的 Worker 自动完结并回收" />
-          <TextField {...field} name="maxTicketAttempts" label="失败重试次数" hint="Ticket 失败后自动重试的上限,0 表示不重试" />
-          <TextField {...field} name="evalBatchMs" label="批处理窗口(毫秒)" hint="窗口内同一线程的多条消息合并成一次 Router 评估" />
-          <TextField {...field} name="triggerMaxChars" label="单条消息上限(字符)" hint="超出部分会被截断" />
+          <TextField {...field} name="workerTimeoutMin" label={t("settings.execution.workerTimeout.label")} hint={t("settings.execution.workerTimeout.hint")} />
+          <TextField {...field} name="routerEvalTimeoutMin" label={t("settings.execution.routerEvalTimeout.label")} hint={t("settings.execution.routerEvalTimeout.hint")} />
+          <TextField {...field} name="routerIdleTimeoutMin" label={t("settings.execution.routerIdleTimeout.label")} hint={t("settings.execution.routerIdleTimeout.hint")} />
+          <TextField {...field} name="threadIdleTimeoutMin" label={t("settings.execution.threadIdleTimeout.label")} hint={t("settings.execution.threadIdleTimeout.hint")} />
+          <TextField {...field} name="workerIdleTimeoutMin" label={t("settings.execution.workerIdleTimeout.label")} hint={t("settings.execution.workerIdleTimeout.hint")} />
+          <TextField {...field} name="maxTicketAttempts" label={t("settings.execution.maxAttempts.label")} hint={t("settings.execution.maxAttempts.hint")} />
+          <TextField {...field} name="evalBatchMs" label={t("settings.execution.evalBatch.label")} hint={t("settings.execution.evalBatch.hint")} />
+          <TextField {...field} name="triggerMaxChars" label={t("settings.execution.triggerMaxChars.label")} hint={t("settings.execution.triggerMaxChars.hint")} />
         </SettingsCard>
       </SettingsSection>
 
       <SettingsSection
-        title="主动与巡检"
-        info="投机执行:Router 依据「Router 规则」里写明的主动策略(例如「群里有人反馈问题时,静默复现并尝试简单修复」),对没人明确提出的事项先在后台派 Worker 尝试,结果有价值才交付,否则静默丢弃。LLM 看门狗:独立的巡检会话按间隔检查每个 Worker 是否有实质进展、是否偏离任务,必要时提醒、打断、取消、重试,或交 Router 告诉你;也可以直接打开它的会话问诊。两者都会额外消耗模型调用,默认关闭。"
+        title={t("settings.proactive.title")}
+        info={t("settings.proactive.info")}
       >
         <SettingsCard>
           <SwitchField
             {...field}
             name="speculativeEnabled"
-            label="投机执行"
-            hint={`需要在「Router 规则」里写明主动策略才会触发;同时最多 ${MAX_SPECULATIVE_TICKETS} 个投机任务`}
+            label={t("settings.proactive.speculative.label")}
+            hint={t("settings.proactive.speculative.hint", { max: MAX_SPECULATIVE_TICKETS })}
           />
-          <SwitchField {...field} name="watchdogEnabled" label="LLM 看门狗" hint="独立巡检会话,判断 Worker 的进展与偏离" />
+          <SwitchField {...field} name="watchdogEnabled" label={t("settings.proactive.watchdog.label")} hint={t("settings.proactive.watchdog.hint")} />
           {form.watchdogEnabled ? (
             <>
-              <ModelField {...field} name="watchdogProvider" label="看门狗模型" hint="留空沿用 Router 的模型" emptyLabel="同 Router" />
-              <TextField {...field} name="watchdogIntervalMin" label="巡检间隔(分钟)" hint="没有进行中的任务(无新动静的待命任务不算)、也没有异常时跳过,不调用模型" />
+              <ModelField {...field} name="watchdogProvider" label={t("settings.proactive.watchdogModel.label")} hint={t("settings.proactive.watchdogModel.hint")} emptyLabel={t("settings.proactive.watchdogModel.empty")} />
+              <TextField {...field} name="watchdogIntervalMin" label={t("settings.proactive.interval.label")} hint={t("settings.proactive.interval.hint")} />
             </>
           ) : null}
         </SettingsCard>
       </SettingsSection>
 
       <SettingsSection
-        title="委派"
-        info="向普通 agent 会话注入 superagent_dispatch 工具,让 agent 自己把工作委派给编排层。走插件自带的本地 MCP 通道,不受 Paseo tools 开关影响。"
+        title={t("settings.delegation.title")}
+        info={t("settings.delegation.info")}
       >
         <SettingsCard>
           <SwitchField
             {...field}
             name="agentToolEnabled"
-            label="向 agent 注入委派工具"
-            hint="在任意会话里也可以直接输入 /superagent <任务>"
+            label={t("settings.delegation.inject.label")}
+            hint={t("settings.delegation.inject.hint")}
           />
           {form.agentToolEnabled ? (
             <TextField
               {...field}
               name="agentToolProviders"
-              label="注入的 provider"
-              hint="逗号分隔。不支持 MCP 的 provider(如 ACP 系)注入会导致会话启动失败;pi 走 pi 扩展通道,填 pi 前先安装扩展(见 README)"
+              label={t("settings.delegation.providers.label")}
+              hint={t("settings.delegation.providers.hint")}
               placeholder="claude,codex,opencode,omp,copilot"
             />
           ) : null}
@@ -461,8 +466,8 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
       </SettingsSection>
 
       <SettingsSection
-        title="IM 触发源"
-        info="从聊天软件接收指令,Router 的答复回到原聊天。白名单(发送者或会话至少填一项)是硬门槛:全空时该通道不会启动;微信的扫码人自动在白名单内。保存后自动重连,无需重启 daemon。"
+        title={t("settings.im.title")}
+        info={t("settings.im.info")}
       >
         {CHANNELS.map((channel) => (
           <ChannelCard key={channel.enabled} channel={channel} {...field}>
@@ -472,31 +477,31 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
           </ChannelCard>
         ))}
         <SettingsCard>
-          <TextField {...field} name="imReplyMaxChars" label="IM 单条消息上限(字符)" hint="包含分段序号;长答复自动分成多条依次发完" />
+          <TextField {...field} name="imReplyMaxChars" label={t("settings.im.replyMaxChars.label")} hint={t("settings.im.replyMaxChars.hint")} />
           <TextField
             {...field}
             name="imInboxDir"
-            label="IM 附件收件目录"
-            hint="daemon 主机上的绝对路径。聊天里收到的文件存到 <目录>/<通道>/<北京时间日期>/<消息 id>/ 下,压缩包附清单交给 Router;改后立即生效"
-            placeholder="留空:$PASEO_HOME/plugin-data/superagent/inbox"
+            label={t("settings.im.inboxDir.label")}
+            hint={t("settings.im.inboxDir.hint")}
+            placeholder={t("settings.im.inboxDir.placeholder")}
           />
         </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="保存">
+      <SettingsSection title={t("settings.save.title")}>
         <SettingsCard>
           <SettingsAction
             label={saveLabel}
             error={settings.saveError}
-            actionLabel={settings.saving ? "保存中..." : "保存"}
+            actionLabel={settings.saving ? t("settings.save.saving") : t("settings.save.action")}
             disabled={!dirty || !parsedValues || settings.saving}
             onPress={() => void save()}
           />
           {dirty || settings.saveError ? (
             <SettingsAction
-              label="放弃修改"
-              hint={settings.saveError ? "载入别处保存的最新设置,丢弃这里的草稿" : "恢复为已保存的设置"}
-              actionLabel="放弃"
+              label={t("settings.save.discardLabel")}
+              hint={settings.saveError ? t("settings.save.discardHintConflict") : t("settings.save.discardHint")}
+              actionLabel={t("settings.save.discardAction")}
               disabled={settings.saving}
               onPress={discard}
             />
@@ -524,11 +529,12 @@ function ProfileCard({
   onChange(key: string, field: ProfileField, value: string): void;
   onRemove(key: string): void;
 }) {
+  const t = useT();
   return (
     <SettingsCard>
       <SettingsInput
-        label="档位名"
-        hint={`Router 在派发时填写的名字;${WORKER_PROFILE_NAME_HINT}`}
+        label={t("settings.profiles.name")}
+        hint={t("settings.profiles.nameHint", { hint: t(WORKER_PROFILE_NAME_HINT) })}
         placeholder="code"
         initialValue={row.name}
         onChangeText={(value) => onChange(row.key, "name", value)}
@@ -537,17 +543,17 @@ function ProfileCard({
       />
       <ModelPicker
         label="Provider"
-        hint="从 daemon 的 provider 快照中选取;清单缺失时可手动填写 provider/model"
+        hint={t("settings.profiles.providerHint")}
         placeholder="codex/gpt-5.5"
         value={row.provider}
         onChange={(value) => onChange(row.key, "provider", value)}
         disabled={disabled}
         error={errors.provider ?? null}
         snapshot={snapshot}
-        emptyLabel="未选择"
+        emptyLabel={t("settings.profiles.notSelected")}
       />
       <ModePicker
-        label="模式(可选)"
+        label={t("settings.profiles.mode")}
         providerSelection={row.provider}
         value={row.modeId}
         onChange={(value) => onChange(row.key, "modeId", value)}
@@ -556,37 +562,37 @@ function ProfileCard({
         snapshot={snapshot}
       />
       <ThinkingPicker
-        label="thinking 档位(可选)"
+        label={t("settings.profiles.thinking")}
         providerSelection={row.provider}
         value={row.thinkingOptionId}
         onChange={(value) => onChange(row.key, "thinkingOptionId", value)}
         disabled={disabled}
         error={errors.thinkingOptionId ?? null}
         snapshot={snapshot}
-        fallbackHint="留空不继承默认 Worker 的档位"
+        fallbackHint={t("settings.profiles.thinkingFallback")}
       />
       <SettingsInput
-        label="工作目录(可选)"
-        hint="该档位 Worker 的专属基础目录,可与上方的工作目录不同;留空使用它。共享目录隔离时以其档位名单独建工作区"
-        placeholder="留空使用上方的工作目录"
+        label={t("settings.profiles.workingDir")}
+        hint={t("settings.profiles.workingDirHint")}
+        placeholder={t("settings.profiles.workingDirPlaceholder")}
         initialValue={row.workingDir}
         onChangeText={(value) => onChange(row.key, "workingDir", value)}
         disabled={disabled}
         error={errors.workingDir ?? null}
       />
       <SettingsInput
-        label="用途"
-        hint="原样写进 Router 提示词:说清楚哪类任务该交给这个档位"
-        placeholder="仓库内写码、修 bug、重构、跑测试"
+        label={t("settings.profiles.purpose")}
+        hint={t("settings.profiles.purposeHint")}
+        placeholder={t("settings.profiles.purposePlaceholder")}
         initialValue={row.description}
         onChangeText={(value) => onChange(row.key, "description", value)}
         disabled={disabled}
         error={errors.description ?? null}
       />
       <SettingsAction
-        label="删除这个档位"
-        hint="运行中的任务不受影响;尚未启动或之后重试的任务会改用默认 Worker"
-        actionLabel="删除"
+        label={t("settings.profiles.removeLabel")}
+        hint={t("settings.profiles.removeHint")}
+        actionLabel={t("settings.profiles.removeAction")}
         disabled={disabled}
         onPress={() => onRemove(row.key)}
       />
@@ -663,11 +669,11 @@ function splitProviderModel(value: string): { provider: string; model: string } 
   return { provider: value.slice(0, separator).trim(), model: value.slice(separator + 1).trim() };
 }
 
-function providerOptionLabel(entry: ProviderSnapshotEntry): string {
+function providerOptionLabel(entry: ProviderSnapshotEntry, t: Translate): string {
   const label = entry.label && entry.label !== entry.provider ? `${entry.label}(${entry.provider})` : entry.provider;
-  if (entry.enabled === false) return `${label}(已禁用)`;
-  if (entry.status === "loading") return `${label}(加载中)`;
-  if (entry.status !== "ready") return `${label}(未就绪)`;
+  if (entry.enabled === false) return t("settings.providerOption.disabled", { label });
+  if (entry.status === "loading") return t("settings.providerOption.loading", { label });
+  if (entry.status !== "ready") return t("settings.providerOption.notReady", { label });
   return label;
 }
 
@@ -683,26 +689,27 @@ function ModePicker({
   error: string | null;
   snapshot: SnapshotState;
 }) {
+  const t = useT();
   const { provider } = splitProviderModel(providerSelection);
   const entry = snapshot.entries?.find((candidate) => candidate.provider === provider);
   const modes = entry?.modes ?? [];
   const selected = modes.find((mode) => mode.id === value);
   const options = [
-    { label: "Paseo 默认", value: "" },
+    { label: t("settings.modePicker.default"), value: "" },
     ...modes.map((mode) => ({ label: mode.label || mode.id, value: mode.id })),
-    ...(value && !selected ? [{ label: `${value}(已保存,当前未上报)`, value }] : []),
+    ...(value && !selected ? [{ label: t("settings.modePicker.saved", { value }), value }] : []),
   ];
   const hint = !provider
-    ? "先选择 Worker 的 provider,即可查看其模式;留空沿用 Paseo 默认"
+    ? t("settings.modePicker.noProvider")
     : snapshot.status === "loading" || entry?.status === "loading"
-      ? "正在读取该 provider 的模式;留空沿用 Paseo 默认"
+      ? t("settings.modePicker.loading")
       : snapshot.status === "error"
-        ? "无法读取模式列表,可稍后重新打开设置;已保存的选择会保留"
+        ? t("settings.modePicker.error")
         : value && !selected
-          ? "该 provider 当前未上报已保存的模式,请核对或选择 Paseo 默认"
+          ? t("settings.modePicker.missing")
           : modes.length === 0
-            ? "该 provider 未上报可选模式,留空沿用 Paseo 默认"
-            : selected?.description ?? "留空沿用 Paseo 默认;所选模式用于新建或重试的 Worker";
+            ? t("settings.modePicker.none")
+            : selected?.description ?? t("settings.modePicker.default_hint");
   return (
     <SettingsSelect
       label={label}
@@ -732,6 +739,7 @@ function ThinkingPicker({
   snapshot: SnapshotState;
   fallbackHint: string;
 }) {
+  const t = useT();
   const { provider, model } = splitProviderModel(providerSelection);
   const entry = snapshot.entries?.find((candidate) => candidate.provider === provider);
   const models = entry?.models ?? [];
@@ -743,8 +751,8 @@ function ThinkingPicker({
       <SettingsInput
         key={providerSelection}
         label={label}
-        hint={`${fallbackHint};当前快照未上报 thinking 档位,可手工填写档位 id(如 high),留空使用 provider 默认`}
-        placeholder="留空使用 provider 默认"
+        hint={t("settings.thinkingPicker.manualHint", { hint: fallbackHint })}
+        placeholder={t("settings.thinkingPicker.manualPlaceholder")}
         initialValue={value}
         onChangeText={onChange}
         disabled={disabled}
@@ -753,18 +761,18 @@ function ThinkingPicker({
     );
   }
   const options = [
-    { label: "Provider 默认", value: "" },
+    { label: t("settings.thinkingPicker.default"), value: "" },
     ...reported.flatMap((row) =>
       (row.thinkingOptions ?? []).map((option) => ({ label: option.label || option.id, value: option.id })),
     ),
     ...(value && !reported.some((row) => (row.thinkingOptions ?? []).some((option) => option.id === value))
-      ? [{ label: `${value}(已保存,未在快照中)`, value }]
+      ? [{ label: t("settings.thinkingPicker.saved", { value }), value }]
       : []),
   ];
   return (
     <SettingsSelect
       label={label}
-      hint={`留空沿用 provider 默认档位;${fallbackHint}`}
+      hint={t("settings.thinkingPicker.hint", { hint: fallbackHint })}
       value={value}
       options={options}
       onValueChange={onChange}
@@ -801,15 +809,16 @@ function ModelPicker({
   /** 留空选项的文案;不提供时字段必填。 */
   emptyLabel?: string;
 }) {
+  const t = useT();
   if (!snapshot.entries) {
     const stateHint =
       snapshot.status === "loading"
-        ? "正在读取 daemon 的 provider 列表,也可先手动填写 provider 或 provider/model"
-        : "无法读取 daemon 的 provider 列表(连接异常或版本过旧),请手动填写 provider 或 provider/model";
+        ? t("settings.modelPicker.loading")
+        : t("settings.modelPicker.error");
     return (
       <SettingsInput
         label={label}
-        hint={hint ? `${hint};${stateHint}` : stateHint}
+        hint={hint ? t("settings.modelPicker.withHint", { hint, state: stateHint }) : stateHint}
         placeholder={placeholder ?? "provider/model"}
         initialValue={value}
         onChangeText={onChange}
@@ -825,19 +834,19 @@ function ModelPicker({
   const enabled = snapshot.entries.filter((candidate) => candidate.enabled !== false);
   const providerOptions = [
     ...(emptyLabel ? [{ label: emptyLabel, value: "" }] : []),
-    ...enabled.map((candidate) => ({ label: providerOptionLabel(candidate), value: candidate.provider })),
+    ...enabled.map((candidate) => ({ label: providerOptionLabel(candidate, t), value: candidate.provider })),
     ...(provider && !enabled.some((candidate) => candidate.provider === provider)
-      ? [{ label: entry ? providerOptionLabel(entry) : `${provider}(本机未提供)`, value: provider }]
+      ? [{ label: entry ? providerOptionLabel(entry, t) : t("settings.modelPicker.notProvided", { provider }), value: provider }]
       : []),
   ];
   const models = entry?.models ?? [];
   if (provider && models.length > 0) {
     const fallback = models.find((candidate) => candidate.isDefault) ?? models[0];
     const modelOptions = [
-      { label: `默认模型(${fallback.label || fallback.id})`, value: "" },
+      { label: t("settings.modelPicker.defaultModel", { name: fallback.label || fallback.id }), value: "" },
       ...models.map((candidate) => ({ label: candidate.label || candidate.id, value: candidate.id })),
       ...(model && !models.some((candidate) => candidate.id === model)
-        ? [{ label: `${model}(不在清单)`, value: model }]
+        ? [{ label: t("settings.modelPicker.notInList", { model }), value: model }]
         : []),
     ];
     return (
@@ -856,7 +865,7 @@ function ModelPicker({
         />
         <SettingsSelect
           label="Model"
-          hint="选项 id 原样写入;「默认模型」只填 provider,由引擎按快照取默认"
+          hint={t("settings.modelPicker.modelHint")}
           value={model}
           options={modelOptions}
           onValueChange={(next) => onChange(next ? `${provider}/${next}` : provider)}
@@ -883,8 +892,8 @@ function ModelPicker({
         // key 绑定 provider,切换 provider 时输入框重挂载以显示新值。
         <SettingsInput
           key={provider}
-          label="Model(手动)"
-          hint={entry ? "该 provider 未上报模型清单,手动填写 provider 或 provider/model" : "该 provider 不在 daemon 清单中,请手动核对"}
+          label={t("settings.modelPicker.manual")}
+          hint={entry ? t("settings.modelPicker.manualNoModels") : t("settings.modelPicker.manualNotInList")}
           placeholder={placeholder ?? "provider/model"}
           initialValue={value}
           onChangeText={onChange}
@@ -922,8 +931,10 @@ function ModelField({
 
 interface ChannelField {
   name: StringKey;
-  label: string;
-  hint?: string;
+  /** 不需翻译的原样标签(如 App ID);需翻译的用 labelKey。 */
+  label?: string;
+  labelKey?: MessageKey;
+  hintKey?: MessageKey;
   placeholder?: string;
   secret?: boolean;
   /** 白名单字段:同一通道至少填一个。 */
@@ -932,8 +943,8 @@ interface ChannelField {
 
 interface Channel {
   enabled: BooleanKey;
-  title: string;
-  hint: string;
+  titleKey: MessageKey;
+  hintKey: MessageKey;
   fields: ChannelField[];
   /** 群聊观察模式开关(未 @ 的群消息作为上下文交给 Router);仅支持该模式的通道填写。 */
   observe?: BooleanKey;
@@ -944,60 +955,60 @@ interface Channel {
 const CHANNELS: Channel[] = [
   {
     enabled: "feishuEnabled",
-    title: "飞书",
-    hint: "官方长连接,免公网;私聊直接触发,群聊需 @机器人",
+    titleKey: "settings.channels.feishu.title",
+    hintKey: "settings.channels.feishu.hint",
     observe: "feishuObserve",
     fields: [
       { name: "feishuAppId", label: "App ID", placeholder: "cli_..." },
       { name: "feishuAppSecret", label: "App Secret", secret: true },
-      { name: "feishuAllowUsers", label: "允许的发送者", hint: "open_id,逗号分隔", allowlist: true },
-      { name: "feishuAllowChats", label: "允许的会话", hint: "chat_id,逗号分隔", allowlist: true },
+      { name: "feishuAllowUsers", labelKey: "settings.channels.feishu.allowUsers.label", hintKey: "settings.channels.feishu.allowUsers.hint", allowlist: true },
+      { name: "feishuAllowChats", labelKey: "settings.channels.feishu.allowChats.label", hintKey: "settings.channels.feishu.allowChats.hint", allowlist: true },
     ],
   },
   {
     enabled: "qqEnabled",
-    title: "QQ",
-    hint: "OneBot 11(NapCat)正向 WebSocket;群里需 @机器人",
+    titleKey: "settings.channels.qq.title",
+    hintKey: "settings.channels.qq.hint",
     observe: "qqObserve",
     fields: [
-      { name: "qqEndpoint", label: "WebSocket 地址", placeholder: "ws://127.0.0.1:3001" },
-      { name: "qqToken", label: "Access Token", hint: "没有设置可留空", secret: true },
-      { name: "qqAllowUsers", label: "允许的 QQ 号", hint: "逗号分隔,私聊与群聊通用", allowlist: true },
-      { name: "qqAllowGroups", label: "允许的群号", hint: "逗号分隔", allowlist: true },
+      { name: "qqEndpoint", labelKey: "settings.channels.qq.endpoint.label", placeholder: "ws://127.0.0.1:3001" },
+      { name: "qqToken", label: "Access Token", hintKey: "settings.channels.qq.token.hint", secret: true },
+      { name: "qqAllowUsers", labelKey: "settings.channels.qq.allowUsers.label", hintKey: "settings.channels.qq.allowUsers.hint", allowlist: true },
+      { name: "qqAllowGroups", labelKey: "settings.channels.qq.allowGroups.label", hintKey: "settings.channels.qq.allowGroups.hint", allowlist: true },
     ],
   },
   {
     enabled: "dingtalkEnabled",
-    title: "钉钉",
-    hint: "Stream 模式长连接,免公网;群里被 @ 才会收到",
+    titleKey: "settings.channels.dingtalk.title",
+    hintKey: "settings.channels.dingtalk.hint",
     fields: [
       { name: "dingtalkClientId", label: "AppKey(ClientId)" },
       { name: "dingtalkClientSecret", label: "AppSecret(ClientSecret)", secret: true },
-      { name: "dingtalkAllowUsers", label: "允许的发送者", hint: "staffId,逗号分隔", allowlist: true },
-      { name: "dingtalkAllowChats", label: "允许的会话", hint: "conversationId,逗号分隔", allowlist: true },
+      { name: "dingtalkAllowUsers", labelKey: "settings.channels.dingtalk.allowUsers.label", hintKey: "settings.channels.dingtalk.allowUsers.hint", allowlist: true },
+      { name: "dingtalkAllowChats", labelKey: "settings.channels.dingtalk.allowChats.label", hintKey: "settings.channels.dingtalk.allowChats.hint", allowlist: true },
     ],
   },
   {
     enabled: "wecomEnabled",
-    title: "企业微信",
-    hint: "智能机器人长连接,免公网;群里需 @机器人",
+    titleKey: "settings.channels.wecom.title",
+    hintKey: "settings.channels.wecom.hint",
     fields: [
       { name: "wecomBotId", label: "Bot ID" },
       { name: "wecomSecret", label: "Secret", secret: true },
-      { name: "wecomAllowUsers", label: "允许的发送者", hint: "userid,逗号分隔", allowlist: true },
-      { name: "wecomAllowChats", label: "允许的群", hint: "chatid,逗号分隔", allowlist: true },
+      { name: "wecomAllowUsers", labelKey: "settings.channels.wecom.allowUsers.label", hintKey: "settings.channels.wecom.allowUsers.hint", allowlist: true },
+      { name: "wecomAllowChats", labelKey: "settings.channels.wecom.allowChats.label", hintKey: "settings.channels.wecom.allowChats.hint", allowlist: true },
     ],
   },
   {
     enabled: "weixinEnabled",
-    title: "微信",
-    hint: "腾讯官方 ClawBot(iLink)通道,扫码登录,免公网;仅私聊",
+    titleKey: "settings.channels.weixin.title",
+    hintKey: "settings.channels.weixin.hint",
     allowlistOptional: true,
     fields: [
       {
         name: "weixinAllowUsers",
-        label: "另外允许的用户",
-        hint: "扫码人自动允许;其他人填微信用户 ID(xxx@im.wechat),逗号分隔",
+        labelKey: "settings.channels.weixin.allowUsers.label",
+        hintKey: "settings.channels.weixin.allowUsers.hint",
         allowlist: true,
       },
     ],
@@ -1005,18 +1016,20 @@ const CHANNELS: Channel[] = [
 ];
 
 function ChannelCard({ channel, children, ...field }: FieldContext & { channel: Channel; children?: ReactNode }) {
+  const t = useT();
+  const tk = t as unknown as (key: MessageKey) => string;
   const enabled = field.form[channel.enabled];
   const allowlist = channel.fields.filter((f) => f.allowlist);
   const allowlistEmpty = !channel.allowlistOptional && allowlist.every((f) => parseAllowlist(field.form[f.name]).length === 0);
   return (
     <SettingsCard>
-      <SwitchField {...field} name={channel.enabled} label={channel.title} hint={channel.hint} />
+      <SwitchField {...field} name={channel.enabled} label={tk(channel.titleKey)} hint={tk(channel.hintKey)} />
       {enabled && channel.observe ? (
         <SwitchField
           {...field}
           name={channel.observe}
-          label="群聊观察模式"
-          hint="未 @ 机器人的群消息作为上下文交给 Router 判断,不再丢弃;关闭时记为已过滤留痕"
+          label={t("settings.channels.observe.label")}
+          hint={t("settings.channels.observe.hint")}
         />
       ) : null}
       {enabled ? children : null}
@@ -1026,12 +1039,12 @@ function ChannelCard({ channel, children, ...field }: FieldContext & { channel: 
               key={f.name}
               {...field}
               name={f.name}
-              label={f.label}
-              hint={f.hint}
+              label={f.labelKey ? tk(f.labelKey) : (f.label ?? "")}
+              hint={f.hintKey ? tk(f.hintKey) : undefined}
               placeholder={f.placeholder}
               secret={f.secret}
               errorOverride={
-                allowlistEmpty && f === allowlist[0] ? "白名单全空时该通道不会启动,至少填写一项" : null
+                allowlistEmpty && f === allowlist[0] ? t("settings.validation.allowlistEmpty") : null
               }
             />
           ))

@@ -1,4 +1,5 @@
 import type { Decision, Ticket, Trigger } from "./model";
+import type { MessageKey, Translate } from "./i18n";
 import { outcomeLabel, triggerKindLabel, triggerSenderLabel, type Tone } from "./labels";
 
 /**
@@ -53,18 +54,19 @@ const DECISION_ICONS: Record<Decision["outcome"], string> = {
   error: "CircleAlert",
 };
 
-const DECISION_LABELS: Partial<Record<Decision["outcome"], string>> = {
-  dispatch: "派发 Worker",
-  steer: "转向 Worker",
-  respond: "处理 Worker 请求",
-  cancel: "取消任务",
-  retry: "重试任务",
-  ignore: "Router 忽略了这条消息",
-  stop: "Router 结束了线程",
-  subscribe: "Worker 订阅了本对话",
-  watchdog: "看门狗介入",
-  unparsed: "Router 的裁决无法解析",
-  error: "Router 评估出错",
+/** 有专门说法的裁决行;其余(目前只有 reply,单独渲染为正文)回落为「Router + 动作」。 */
+const DECISION_LABELS: Partial<Record<Decision["outcome"], MessageKey>> = {
+  dispatch: "labels.chatEvent.dispatch",
+  steer: "labels.chatEvent.steer",
+  respond: "labels.chatEvent.respond",
+  cancel: "labels.chatEvent.cancel",
+  retry: "labels.chatEvent.retry",
+  ignore: "labels.chatEvent.ignore",
+  stop: "labels.chatEvent.stop",
+  subscribe: "labels.chatEvent.subscribe",
+  watchdog: "labels.chatEvent.watchdog",
+  unparsed: "labels.chatEvent.unparsed",
+  error: "labels.chatEvent.error",
 };
 
 const DECISION_TONES: Partial<Record<Decision["outcome"], Tone>> = {
@@ -81,29 +83,34 @@ function reportText(trigger: Trigger, ticket: Ticket | undefined): string {
   return trigger.text.replace(/^Worker report for "[^\n]*":\n/, "");
 }
 
-function userSource(trigger: Trigger): string | null {
+function userSource(trigger: Trigger, t: Translate): string | null {
   if (trigger.kind === "manual") return null;
   const sender = triggerSenderLabel(trigger);
-  if (trigger.kind === "agent") return sender ? `${sender} 委派` : "Agent 委派";
-  return [triggerKindLabel(trigger.kind), sender].filter(Boolean).join(" · ");
+  if (trigger.kind === "agent") return sender ? t("labels.chatEvent.delegatedBy", { sender }) : triggerKindLabel("agent", t);
+  return [triggerKindLabel(trigger.kind, t), sender].filter(Boolean).join(" · ");
 }
 
-export function buildChatEntries(triggers: readonly Trigger[], decisions: readonly Decision[], tickets: readonly Ticket[]): ChatEntry[] {
+export function buildChatEntries(
+  triggers: readonly Trigger[],
+  decisions: readonly Decision[],
+  tickets: readonly Ticket[],
+  t: Translate,
+): ChatEntry[] {
   const ticketById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
   const entries: ChatEntry[] = [];
   for (const trigger of triggers) {
     if (USER_KINDS.includes(trigger.kind)) {
       entries.push({ kind: "user", id: trigger.id, at: trigger.receivedAt, text: trigger.text,
-        source: userSource(trigger), status: trigger.status, note: trigger.note ?? null });
+        source: userSource(trigger, t), status: trigger.status, note: trigger.note ?? null });
     } else if (trigger.kind === "report") {
       const ticketId = trigger.sender.startsWith("worker:") ? trigger.sender.slice("worker:".length) : null;
       const ticket = ticketId ? ticketById.get(ticketId) : undefined;
       entries.push({ kind: "event", id: trigger.id, at: trigger.receivedAt, icon: "FileCheck", tone: "default",
-        label: "Worker 汇报", detail: ticket?.title ?? null, text: reportText(trigger, ticket), markdown: true,
+        label: triggerKindLabel("report", t), detail: ticket?.title ?? null, text: reportText(trigger, ticket), markdown: true,
         ticketId: ticket ? ticket.id : null, live: false });
     } else {
       entries.push({ kind: "event", id: trigger.id, at: trigger.receivedAt, icon: "Cog",
-        tone: trigger.status === "failed" ? "danger" : "warning", label: triggerKindLabel(trigger.kind),
+        tone: trigger.status === "failed" ? "danger" : "warning", label: triggerKindLabel(trigger.kind, t),
         detail: trigger.note ?? null, text: trigger.text, markdown: false, ticketId: null, live: false });
     }
   }
@@ -121,7 +128,7 @@ export function buildChatEntries(triggers: readonly Trigger[], decisions: readon
       at: decision.createdAt,
       icon: DECISION_ICONS[decision.outcome],
       tone: DECISION_TONES[decision.outcome] ?? "default",
-      label: DECISION_LABELS[decision.outcome] ?? `Router ${outcomeLabel(decision.outcome)}`,
+      label: labelFor(decision.outcome, t),
       detail: ticket ? `${ticket.title}${profile}` : null,
       text: text?.trim() ? text : null,
       markdown: false,
@@ -136,17 +143,22 @@ export function buildChatEntries(triggers: readonly Trigger[], decisions: readon
     .map(({ entry }) => entry);
 }
 
+function labelFor(outcome: Decision["outcome"], t: Translate): string {
+  const key = DECISION_LABELS[outcome];
+  return key ? t(key as "labels.chatEvent.dispatch") : t("labels.chatEvent.routerOutcome", { outcome: outcomeLabel(outcome, t) });
+}
+
 /** 气泡下方的投递状态;已评估是常态,不额外提示。 */
-export function userStatusLabel(entry: Extract<ChatEntry, { kind: "user" }>): { label: string; tone: Tone } | null {
+export function userStatusLabel(entry: Extract<ChatEntry, { kind: "user" }>, t: Translate): { label: string; tone: Tone } | null {
   switch (entry.status) {
     case "pending":
-      return { label: "等待 Router", tone: "warning" };
+      return { label: t("labels.userStatus.pending"), tone: "warning" };
     case "delivered":
-      return { label: "已直通 Worker", tone: "muted" };
+      return { label: t("labels.userStatus.delivered"), tone: "muted" };
     case "filtered":
-      return { label: entry.note ? `已过滤 · ${entry.note}` : "已过滤", tone: "muted" };
+      return { label: entry.note ? t("labels.userStatus.filteredWithNote", { note: entry.note }) : t("labels.userStatus.filtered"), tone: "muted" };
     case "failed":
-      return { label: entry.note ? `失败 · ${entry.note}` : "失败", tone: "danger" };
+      return { label: entry.note ? t("labels.userStatus.failedWithNote", { note: entry.note }) : t("labels.userStatus.failed"), tone: "danger" };
     default:
       return null;
   }

@@ -14,6 +14,10 @@ import {
 } from "../server/archive.ts";
 import { resolveImInboxDir } from "../server/im.ts";
 import { zipOf } from "./zip-fixture.mjs";
+import { setServerLanguage } from "../server/i18n.ts";
+
+// These assertions cover the Chinese daemon text; the English variants live in server-i18n.test.mjs.
+setServerLanguage("zh-CN");
 
 /** "发票" 的 GBK 字节:中文 Windows 打包、不带 UTF-8 标记的文件名。 */
 const GBK_FAPIAO = Buffer.from([0xb7, 0xa2, 0xc6, 0xb1]);

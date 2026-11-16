@@ -8,7 +8,13 @@ import { composePatrolPrompt, parseWatchdogVerdict } from "../server/watchdog.ts
 import { FeishuSource } from "../server/feishu.ts";
 import { QqSource } from "../server/qq.ts";
 import { directTickets, subscribesTo } from "../shared/execution.ts";
-import { patrolSummaryLabel, outcomeLabel } from "../shared/labels.ts";
+import * as labels from "../shared/labels.ts";
+import { translator } from "../shared/i18n.ts";
+
+// 既有断言按简体中文书写;英文见 i18n.test.mjs。
+const zh = translator("zh-CN");
+const patrolSummaryLabel = (summary) => labels.patrolSummaryLabel(summary, zh);
+const outcomeLabel = (outcome) => labels.outcomeLabel(outcome, zh);
 import { emptyState, MAX_SPECULATIVE_TICKETS, SuperagentStateSchema } from "../shared/model.ts";
 import { SETTINGS_DEFAULTS } from "../shared/settings.ts";
 

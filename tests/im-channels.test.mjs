@@ -4,6 +4,10 @@ import { FeishuSource } from "../server/feishu.ts";
 import { DingtalkSource } from "../server/dingtalk.ts";
 import { QqSource } from "../server/qq.ts";
 import { WecomSource } from "../server/wecom.ts";
+import { setServerLanguage } from "../server/i18n.ts";
+
+// These assertions cover the Chinese daemon text; the English variants live in server-i18n.test.mjs.
+setServerLanguage("zh-CN");
 
 const origin = { chatId: "chat", senderId: "user", messageId: "msg", replyRef: "https://invalid.test/webhook" };
 

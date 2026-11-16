@@ -32,6 +32,7 @@ import {
   superagentRetryTicketRpc,
   superagentRetryImDeliveryRpc,
   superagentSaveChatTabsRpc,
+  superagentSetLocaleRpc,
   superagentStateRpc,
   superagentStatFilesRpc,
   superagentUnsubscribeRpc,
@@ -39,6 +40,8 @@ import {
   superagentWeixinStatusRpc,
 } from "./shared/rpc";
 import type { WeixinStatus } from "./shared/weixin";
+import { resolveLanguage } from "./shared/i18n";
+import { setServerLanguage } from "./server/i18n";
 import {
   parseAllowlist,
   superagentSettings,
@@ -49,6 +52,12 @@ export default function contribute(server: PluginServerContext) {
   const store = new SuperagentStore();
   const settings = server.registerSettings(superagentSettings);
   const engine = new SuperagentEngine(store, settings);
+
+  // daemon 侧文字的语言:先用上次客户端上报并落盘的语言,之后随 set_locale 更新。
+  void store.ready.then(() => {
+    const saved = store.get().kv.language;
+    if (saved) setServerLanguage(saved);
+  });
 
   // SDK 只把 paseo 交给 handler 和 hook:每个入口都 prime 引擎,
   // 无头 daemon 重启后第一个 hook/RPC 就会把看门狗拉起来。
@@ -70,6 +79,17 @@ export default function contribute(server: PluginServerContext) {
   server.handle(superagentCloseThreadRpc, withPrime(createCloseThreadHandler(engine)));
   server.handle(superagentUnsubscribeRpc, withPrime(createUnsubscribeHandler(engine)));
   server.handle(superagentSaveChatTabsRpc, withPrime(createSaveChatTabsHandler(engine)));
+  server.handle(superagentSetLocaleRpc, withPrime(async ({ locale }) => {
+    const language = resolveLanguage(locale);
+    await store.ready;
+    setServerLanguage(language);
+    if (store.get().kv.language !== language) {
+      await store.update((next) => {
+        next.kv = { ...next.kv, language };
+      });
+    }
+    return { ok: true };
+  }));
   // 对话页文件预览:只读、限量,不经引擎。
   server.handle(superagentReadFileRpc, withPrime((input) => readFilePreview(input.path)));
   server.handle(superagentStatFilesRpc, withPrime(async (input) => ({ kinds: await statPaths(input.paths) })));

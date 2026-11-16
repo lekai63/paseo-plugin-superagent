@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import type { FileKind, FilePreview } from "../shared/file-preview";
 import { FILE_PREVIEW_LIMITS, IMAGE_MIME_TYPES } from "../shared/file-preview";
 import { extensionOf } from "../shared/file-links";
+import { t } from "./i18n";
 
 /**
  * 对话页文件预览的只读读取:任意绝对路径(`~` 展开为 daemon 用户的主目录)。
@@ -13,12 +14,12 @@ import { extensionOf } from "../shared/file-links";
 
 export async function readFilePreview(rawPath: string, limits = FILE_PREVIEW_LIMITS): Promise<FilePreview> {
   const path = expandPath(rawPath);
-  if (!path) return { kind: "error", path: rawPath, message: "只能预览绝对路径" };
+  if (!path) return { kind: "error", path: rawPath, message: t("server.filePreview.absoluteOnly") };
   try {
     const info = await stat(path);
     const modifiedAt = info.mtime.toISOString();
     if (info.isDirectory()) return await readDirectory(path, modifiedAt, limits.entries);
-    if (!info.isFile()) return { kind: "error", path, message: "不是普通文件,无法预览" };
+    if (!info.isFile()) return { kind: "error", path, message: t("server.filePreview.notRegular") };
 
     const mimeType = IMAGE_MIME_TYPES[extensionOf(path)];
     if (mimeType) {
@@ -108,8 +109,8 @@ function utf8Boundary(bytes: Buffer): number {
 
 function errorMessage(error: unknown): string {
   const code = (error as NodeJS.ErrnoException | null)?.code;
-  if (code === "ENOENT" || code === "ENOTDIR") return "文件不存在(可能已被删除或移动)";
-  if (code === "EACCES" || code === "EPERM") return "没有读取权限";
-  if (code === "ELOOP") return "符号链接层数过多";
+  if (code === "ENOENT" || code === "ENOTDIR") return t("server.filePreview.notFound");
+  if (code === "EACCES" || code === "EPERM") return t("server.filePreview.noPermission");
+  if (code === "ELOOP") return t("server.filePreview.tooManyLinks");
   return error instanceof Error ? error.message : String(error);
 }

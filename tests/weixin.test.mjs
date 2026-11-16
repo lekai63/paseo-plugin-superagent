@@ -11,6 +11,10 @@ import { parseWeixinAesKey, weixinMediaRefs } from "../server/weixin-media.ts";
 import { WeixinLogin, qrModules } from "../server/weixin-login.ts";
 import { zipOf } from "./zip-fixture.mjs";
 import { loadWeixinAccount, loadWeixinCursor, saveWeixinAccount, saveWeixinCursor } from "../server/weixin-store.ts";
+import { setServerLanguage } from "../server/i18n.ts";
+
+// These assertions cover the Chinese daemon text; the English variants live in server-i18n.test.mjs.
+setServerLanguage("zh-CN");
 
 const account = { botId: "bot1@im.bot", token: "secret-token", baseUrl: "https://ilink.test", userId: "owner@im.wechat", savedAt: "2026-11-06T00:00:00.000Z" };
 

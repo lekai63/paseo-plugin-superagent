@@ -3,6 +3,7 @@ import { AccessibilityInfo, Animated, Platform, View, type ViewStyle } from "rea
 import { STATUS_DOT, isDarkColor } from "../shared/design";
 import type { Theme } from "./theme-tokens";
 import { startWebPulse, startWebRotation, subscribeWebReducedMotion } from "./web";
+import { useT } from "./i18n";
 
 /**
  * 状态点颜色取宿主 theme.ts 的 statusDot* 色带:点要比同排的文字徽标更亮才压得住行,
@@ -71,9 +72,10 @@ export function RunningStatusRing({ color, size = 16 }: { color: string; size?: 
  * 减少动态效果时也保持静止。卸载即停止。
  */
 export function RunningDot({ color, size = 6, accessibilityLabel }: { color: string; size?: number; accessibilityLabel?: string }) {
+  const t = useT();
   const node = useRef<unknown>(null);
   const reduced = useReducedMotion();
   useEffect(() => (reduced ? undefined : startWebPulse(node.current)), [reduced]);
-  return <View ref={(value) => { node.current = value; }} accessibilityRole="progressbar" accessibilityLabel={accessibilityLabel ?? "进行中"}
+  return <View ref={(value) => { node.current = value; }} accessibilityRole="progressbar" accessibilityLabel={accessibilityLabel ?? t("sidebar.inProgress")}
     style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: color, flexShrink: 0 }} />;
 }

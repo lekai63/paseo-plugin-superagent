@@ -1,9 +1,10 @@
 import { Text, View } from "react-native";
 import { scaleFontSize } from "../shared/host-font";
-import { routerStatusLabels, type RouterStatusMark } from "../shared/sidebar-status";
+import { routerStatusLabel, type RouterStatusMark } from "../shared/sidebar-status";
 import { agentStatusColors, RunningStatusRing, statusMarkSize } from "./agent-status-icon";
 import { useHostUiFontSize } from "./host-font-scale";
 import { fontSize, space, type Theme } from "./ui";
+import { useT } from "./i18n";
 
 /**
  * 与 better-paseo「任务」行的计数同一套几何,两行上下对齐:
@@ -14,13 +15,13 @@ const STATUS_BOX = 14;
 const DONE_DOT = 6 * (statusMarkSize(STATUS_BOX) / 12);
 
 export function SidebarWorkerCounts({ counts, theme }: { counts: { running: number; done: number }; theme: Theme }) {
+  const t = useT();
   const colors = agentStatusColors(theme);
   const countSize = scaleFontSize(fontSize.sm, useHostUiFontSize(theme));
   return <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
     {(["running", "done"] as const).filter((kind) => counts[kind] > 0).map((kind) => {
-      const label = kind === "running" ? "运行中的 Worker" : "本轮完成、待命的 Worker";
       const color = kind === "running" ? colors.running : colors.success;
-      return <View key={kind} accessibilityLabel={`${label}：${counts[kind]}`}
+      return <View key={kind} accessibilityLabel={t(kind === "running" ? "sidebar.workers.runningA11y" : "sidebar.workers.doneA11y", { value: counts[kind] })}
         testID={`superagent-workers-${kind}`} style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
         {kind === "running" ? <RunningStatusRing color={color} size={STATUS_BOX} />
           : <View style={{ width: STATUS_BOX, height: STATUS_BOX, alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
@@ -40,6 +41,7 @@ export function SidebarWorkerCounts({ counts, theme }: { counts: { running: numb
  * Router 已关闭时不显示(空白)。仅 1 个 Router 时不带数字,多个并存才显示数量。
  */
 export function SidebarRouterMark({ mark, theme }: { mark: RouterStatusMark; theme: Theme }) {
+  const t = useT();
   const colors = agentStatusColors(theme);
   const countSize = scaleFontSize(fontSize.sm, useHostUiFontSize(theme));
   const color = mark.kind === "running" ? colors.running
@@ -47,7 +49,7 @@ export function SidebarRouterMark({ mark, theme }: { mark: RouterStatusMark; the
     : mark.kind === "permission" ? colors.warning
     : mark.kind === "error" ? colors.danger
     : theme.colors.border;
-  const label = `Router：${routerStatusLabels[mark.kind]}${mark.count > 1 ? ` ×${mark.count}` : ""}`;
+  const label = `${t("sidebar.workers.routerA11y", { status: routerStatusLabel(mark.kind, t) })}${mark.count > 1 ? ` ×${mark.count}` : ""}`;
   return <View accessibilityLabel={label} testID="superagent-router-mark"
     style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
     {mark.kind === "running" ? <RunningStatusRing color={color} size={STATUS_BOX} />

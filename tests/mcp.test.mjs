@@ -110,7 +110,7 @@ test("dispatch mcp endpoint serves initialize/list/call and routes replies", asy
   const listed = (await rpc(list))[0].result.tools;
   const tool = listed.find((entry) => entry.name === DISPATCH_TOOL_NAME);
   assert.ok(tool, "superagent_dispatch listed");
-  assert.equal(tool.title, "Superagent 委派");
+  assert.equal(tool.title, "Superagent Dispatch");
   assert.ok(tool.inputSchema.properties.task);
 
   const call = await post(url, {

@@ -52,7 +52,8 @@ import {
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
 import type { ToolOutcome } from "./mcp-server";
 import { matchWorkerProfile, resolveProviderSelection, validateProviderMode, validateProviderThinkingOption } from "./providers";
-import { BACKGROUND_WORKSPACE_TITLE, ensureSharedWorkspace, detachRoleChildren } from "./workspace";
+import { BACKGROUND_WORKSPACE_TITLE, ensureSharedWorkspace, detachRoleChildren, workspaceTitles } from "./workspace";
+import { t } from "./i18n";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 import { deliveryPreview, splitImReply } from "./im-replies";
 import {
@@ -834,7 +835,7 @@ export class SuperagentEngine {
         }
       });
       if (errors === MAX_EVAL_ERRORS) await this.notifyThread(next,
-        "Router 连续评估失败，已暂停自动重试。消息已保留，请检查模型或连接后点击「重新评估」。");
+        t("server.engine.evalFailed"));
     } finally {
       this.evalInFlight = false;
       this.currentEvalThread = null;
@@ -910,7 +911,7 @@ export class SuperagentEngine {
     if (legacyId) await preparing(() => detachRoleChildren(paseo, legacyId, () => { run.check(); prepare.check(); }));
     const router = await preparing(() => ensureRouter(
       paseo, thread, routerProvider,
-      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, BACKGROUND_WORKSPACE_TITLE, true),
+      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, workspaceTitles(BACKGROUND_WORKSPACE_TITLE), true),
       instructions, configHash, this.settingsValues.routerThinkingOptionId.trim(),
       () => { run.check(); prepare.check(); },
     ));
@@ -1001,7 +1002,7 @@ export class SuperagentEngine {
           );
         });
         run.check();
-        if (failures === 3) await this.notifyThread(threadId, "Router 连续三轮无法生成有效裁决，已暂停自动重试。消息已保留，请检查配置后点击「重新评估」。");
+        if (failures === 3) await this.notifyThread(threadId, t("server.engine.verdictFailed"));
       };
       if ("error" in parsed) {
         await recordUnparsed(parsed.error);
@@ -1265,17 +1266,17 @@ export class SuperagentEngine {
     await this.store.ready;
     const delivery = this.store.get().imDeliveries.find((item) => item.id === id);
     if (!delivery) throw new Error("IM delivery not found");
-    if (delivery.status !== "failed") throw new Error("只有发送失败的答复可以补发");
+    if (delivery.status !== "failed") throw new Error(t("server.engine.resendNotFailed"));
     await this.store.update((next) => {
       const target = next.imDeliveries.find((item) => item.id === id)!;
       target.status = "pending";
     });
     await this.sendImDelivery(id);
     if (this.store.get().imDeliveries.find((item) => item.id === id)?.status === "failed") {
-      throw new Error("补发失败,进度已保留。请检查 IM 连接或回复窗口是否过期");
+      throw new Error(t("server.engine.resendFailed"));
     }
     if (this.store.get().imDeliveries.find((item) => item.id === id)?.status !== "sent") {
-      throw new Error("答复尚未全部发送,进度已保留,请稍后查看运行状态");
+      throw new Error(t("server.engine.resendIncomplete"));
     }
   }
 
@@ -1326,7 +1327,7 @@ export class SuperagentEngine {
         const decision = next.decisions.find((d) => d.id === record.decisionId);
         if (decision) decision.rationale = `${decision.rationale ?? ""}\nAction timed out; delivery uncertain; automatic replay paused`.trim();
       });
-      await this.notifyThread(record.threadId, `Router 的 ${record.kind} 操作超时，执行结果待确认，已停止自动重发。请检查任务状态后处理。`);
+      await this.notifyThread(record.threadId, t("server.engine.actionTimedOut", { kind: record.kind }));
       return;
     } finally { deadline.cancel(); }
     if (outcome.ok) {
@@ -1553,7 +1554,7 @@ export class SuperagentEngine {
         instructionFiles: await this.instructionFilesFor(workingDir),
         sharedWorkspace:
           this.settingsValues.workerIsolation === "shared"
-            ? await this.sharedWorkspaceFor(workingDir, custom && current.profile ? current.profile : DEFAULT_WORKSPACE_TITLE)
+            ? await this.sharedWorkspaceFor(workingDir, custom && current.profile ? current.profile : workspaceTitles(DEFAULT_WORKSPACE_TITLE))
             : null,
       };
       const launch = await launchWorker(
@@ -1925,7 +1926,7 @@ export class SuperagentEngine {
     const since = ticket.requestWaitSince ?? ticket.updatedAt;
     if (this.now().getTime() - Date.parse(since) < 24 * 60 * 60_000) return;
     await this.store.update(() => { ticket.requestWaitNotifiedAt = this.now().toISOString(); });
-    await this.notifyThread(ticket.threadId, `任务「${ticket.title}」已等待审批或回答超过 24 小时。请处理 Worker 的待答问题，或取消任务；等待期间对话保留。`);
+    await this.notifyThread(ticket.threadId, t("server.engine.waitingTooLong", { title: ticket.title }));
   }
 
   // ------------------------------------------------------- LLM watchdog
@@ -1979,7 +1980,7 @@ export class SuperagentEngine {
       paseo,
       state,
       provider,
-      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, BACKGROUND_WORKSPACE_TITLE, true),
+      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, workspaceTitles(BACKGROUND_WORKSPACE_TITLE), true),
       instructions,
     );
     if (!watchdog.created) {
@@ -3093,7 +3094,7 @@ export class SuperagentEngine {
    * 后台与普通工作区分别登记(目录 → id)和缓存,避免角色混用;失效时按标题找回或重建。
    * 串行链防止并发启动的 Ticket 为同一目录重复建区。
    */
-  private sharedWorkspaceFor(dir: string, title: string, background = false): Promise<PaseoWorkspaceHandle> {
+  private sharedWorkspaceFor(dir: string, title: string | readonly string[], background = false): Promise<PaseoWorkspaceHandle> {
     const directory = resolve(dir);
     const key = `${background ? "background\u0000" : ""}${directory}`;
     const registry = background ? "backgroundWorkspaces" : "sharedWorkspaces";

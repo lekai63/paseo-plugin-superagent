@@ -1,5 +1,6 @@
 import { defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import type { MessageKey, Translate } from "./i18n";
 
 /** 数值设置的取值范围:schema 与设置页的输入校验共用这一份。 */
 export const NUMBER_LIMITS = {
@@ -30,14 +31,18 @@ export const DEFAULT_WORKER_PROFILE = "default";
 export const MAX_WORKER_PROFILES = 8;
 export const MAX_ROUTER_INSTRUCTIONS_CHARS = 12000;
 export const WORKER_PROFILE_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,23}$/;
-export const WORKER_PROFILE_NAME_HINT = "小写字母开头,只含小写字母、数字、- 和 _,最长 24 个字符";
+/**
+ * schema 的校验消息存消息键(daemon 与设置页共用同一份 schema,而语言只有界面知道);
+ * 设置页用 settingsIssueText 把键译成当前语言,带插值的键把值放在 issue.params 里。
+ */
+export const WORKER_PROFILE_NAME_HINT = "validation.profileNameFormat" satisfies MessageKey;
 
-/** 共享隔离下 Router 与默认 Worker 合用的持久工作区标题;按「标题 + 目录」找回或新建。 */
-export const DEFAULT_WORKSPACE_TITLE = "默认 workspace";
+/** 共享隔离下 Router 与默认 Worker 合用的持久工作区标题(消息键);按「标题 + 目录」找回或新建。 */
+export const DEFAULT_WORKSPACE_TITLE = "labels.workspace.default" satisfies MessageKey;
 
 /** thinking 档位 id(pi: low/medium/high/…);空串 = 不指定。 */
 export const THINKING_OPTION_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
-const THINKING_OPTION_HINT = "thinking 档位 id:小写字母开头,只含小写字母/数字/./_/-,留空用 provider 默认";
+const THINKING_OPTION_HINT = "validation.thinkingOption" satisfies MessageKey;
 const ThinkingOptionSchema = z
   .string()
   .trim()
@@ -51,15 +56,18 @@ export const WorkerProfileSchema = z.object({
     .string()
     .trim()
     .regex(WORKER_PROFILE_NAME_PATTERN, WORKER_PROFILE_NAME_HINT)
-    .refine((name) => name !== DEFAULT_WORKER_PROFILE, `"${DEFAULT_WORKER_PROFILE}" 留给默认 Worker`),
+    .refine((name) => name !== DEFAULT_WORKER_PROFILE, {
+      message: "validation.reservedProfileName" satisfies MessageKey,
+      params: { name: DEFAULT_WORKER_PROFILE },
+    }),
   /** `provider` 或 `provider/model`,与 workerProvider 同一格式。 */
-  provider: z.string().trim().min(1, "需要填写 provider").max(120),
+  provider: z.string().trim().min(1, "validation.providerRequired" satisfies MessageKey).max(120),
   /** provider 上报的模式 ID;留空不覆盖 Paseo 默认模式。 */
   modeId: z.string().trim().max(500).default(""),
   /** 该档位 Worker 的 thinking 档位;留空不指定(回落 provider 默认)。 */
   thinkingOptionId: ThinkingOptionSchema,
   /** 用途说明:原样写进 Router 提示词,是 Router 选档位的唯一依据。 */
-  description: z.string().trim().min(1, "需要写明用途,Router 靠它选择档位").max(300),
+  description: z.string().trim().min(1, "validation.descriptionRequired" satisfies MessageKey).max(300),
   /** 该档位 Worker 的专属基础目录(绝对路径);留空用全局 workingDir。 */
   workingDir: z.string().trim().max(1024).default(""),
 });
@@ -72,7 +80,12 @@ const WorkerProfilesSchema = z
     const seen = new Set<string>();
     profiles.forEach((profile, index) => {
       if (seen.has(profile.name)) {
-        ctx.addIssue({ code: "custom", path: [index, "name"], message: `档位名 "${profile.name}" 重复` });
+        ctx.addIssue({
+          code: "custom",
+          path: [index, "name"],
+          message: "validation.duplicateProfileName" satisfies MessageKey,
+          params: { name: profile.name },
+        });
       }
       seen.add(profile.name);
     });
@@ -239,4 +252,24 @@ export function parseAllowlist(input: string): string[] {
     .split(/[,，\s]+/)
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+const VALIDATION_KEYS = new Set<string>([
+  "validation.profileNameFormat",
+  "validation.thinkingOption",
+  "validation.reservedProfileName",
+  "validation.providerRequired",
+  "validation.descriptionRequired",
+  "validation.duplicateProfileName",
+] satisfies MessageKey[]);
+
+/**
+ * 设置校验 issue 的显示文字:schema 自己的消息键按当前语言翻译(插值取自 issue.params),
+ * 超长统一说「内容过长」,其余(zod 内置消息)原样显示。
+ */
+export function settingsIssueText(issue: { code: string; message: string; params?: Record<string, unknown> }, t: Translate): string {
+  if (issue.code === "too_big") return t("validation.tooLong");
+  if (!VALIDATION_KEYS.has(issue.message)) return issue.message;
+  const name = typeof issue.params?.name === "string" ? issue.params.name : "";
+  return (t as (key: string, vars?: Record<string, string>) => string)(issue.message, { name });
 }

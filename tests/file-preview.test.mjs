@@ -6,6 +6,10 @@ import { join } from "node:path";
 import { extractFileLinks, parseFileTarget } from "../shared/file-links.ts";
 import { codeLanguage, excerptLines, fenceCode, fileIconName, FilePreviewSchema } from "../shared/file-preview.ts";
 import { expandPath, readFilePreview, statPaths } from "../server/file-preview.ts";
+import { setServerLanguage } from "../server/i18n.ts";
+
+// These assertions cover the Chinese daemon text; the English variants live in server-i18n.test.mjs.
+setServerLanguage("zh-CN");
 
 test("Router file links become previewable targets with labels and line numbers", () => {
   const text = [

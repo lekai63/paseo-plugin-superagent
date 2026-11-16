@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test, { before } from "node:test";
+import { defineTranslations } from "@getpaseo/plugin/client";
 import { runInNewContext } from "node:vm";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -49,6 +50,8 @@ function fixture({ query = { data: entries }, modeId = "" } = {}) {
     "react-native": { View: "View", Text: "Text" },
     "@getpaseo/plugin": plugin,
     "@getpaseo/plugin/client": {
+      defineTranslations,
+      useTranslation: () => ({ locale: "zh-CN", t: (key) => key }),
       useSettings: () => settings,
       usePaseo: () => ({ providers: { snapshot: async () => ({ entries: [], compactSnapshot: { entries } }) } }),
     },

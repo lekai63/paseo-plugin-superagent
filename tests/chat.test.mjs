@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildChatEntries, userStatusLabel } from "../shared/chat.ts";
+import * as chat from "../shared/chat.ts";
+import { translator } from "../shared/i18n.ts";
+
+// 既有断言按简体中文书写;英文见 i18n.test.mjs。
+const zh = translator("zh-CN");
+const buildChatEntries = (triggers, decisions, tickets) => chat.buildChatEntries(triggers, decisions, tickets, zh);
+const userStatusLabel = (entry) => chat.userStatusLabel(entry, zh);
 
 const at = (second) => `2026-01-01T00:00:${String(second).padStart(2, "0")}.000Z`;
 

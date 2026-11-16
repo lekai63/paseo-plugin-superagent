@@ -4,6 +4,7 @@ import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { z } from "zod";
 import type { DispatchInput } from "./engine";
+import { t } from "./i18n";
 
 /**
  * 插件自持的编排 MCP 载体:进程内监听 127.0.0.1 的 Streamable HTTP endpoint。
@@ -88,7 +89,7 @@ function registerDispatchTool(mcp: McpServer, engine: DispatchMcpEngine, callerA
   mcp.registerTool(
     DISPATCH_TOOL_NAME,
     {
-      title: "Superagent 委派",
+      title: t("server.mcp.dispatchTitle"),
       description: DISPATCH_TOOL_DESCRIPTION,
       inputSchema: z.object({
         title: z.string().min(1).max(120).describe("Short task title"),
@@ -154,7 +155,7 @@ function registerRouterTools(mcp: McpServer, engine: DispatchMcpEngine, agentId:
   mcp.registerTool(
     READ_TOOL_NAME,
     {
-      title: "Superagent 回读",
+      title: t("server.mcp.readTitle"),
       description:
         "Recall the full untruncated record behind an id you have seen in the orchestration prompt: " +
         "trigger trg_…, ticket tkt_…, thread thr_… or decision dec_…. Use it whenever a trigger, worker " +
@@ -186,7 +187,7 @@ function registerRouterTools(mcp: McpServer, engine: DispatchMcpEngine, agentId:
   mcp.registerTool(
     LIST_TOOL_NAME,
     {
-      title: "Superagent 线程总览",
+      title: t("server.mcp.listTitle"),
       description:
         "List the orchestrator's active threads, newest first (up to 10) with their unfinished " +
         "tickets (up to 8 per thread): thread id/title/summary and ticket id/status/subscribed. " +
@@ -206,7 +207,7 @@ function registerRouterTools(mcp: McpServer, engine: DispatchMcpEngine, agentId:
   mcp.registerTool(
     SEARCH_TOOL_NAME,
     {
-      title: "Superagent 检索",
+      title: t("server.mcp.searchTitle"),
       description:
         "Keyword-search the orchestrator's records (trigger texts, tickets incl. mandates and " +
         "worker reports, thread titles/summaries, decision replies) and get matching ids with " +
@@ -239,7 +240,7 @@ function registerWorkerTools(mcp: McpServer, engine: DispatchMcpEngine, ticketId
   mcp.registerTool(
     UNSUBSCRIBE_TOOL_NAME,
     {
-      title: "Superagent 退订",
+      title: t("server.mcp.unsubscribeTitle"),
       description:
         "Stop delivering future follow-up messages directly into your session; the Router evaluates them " +
         "again instead. Call this once further messages are no longer yours to answer (for example a " +
@@ -265,7 +266,7 @@ function registerWorkerTools(mcp: McpServer, engine: DispatchMcpEngine, ticketId
   mcp.registerTool(
     HANDBACK_TOOL_NAME,
     {
-      title: "Superagent 转回",
+      title: t("server.mcp.handbackTitle"),
       description:
         "Return a message you received to the Router because it should not be handled by you: it is " +
         "off-topic for your ticket, belongs to a different worker, or needs a human-facing reply. Quote or " +

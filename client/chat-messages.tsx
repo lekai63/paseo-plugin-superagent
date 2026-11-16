@@ -22,6 +22,7 @@ import type { FileKind } from "../shared/file-preview";
 import { useHostAppearance } from "./host-font-scale";
 import { ROW, TOUCH, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
 import { CopyButton, TextButton, toneColor } from "./ui";
+import { useT } from "./i18n";
 
 /**
  * 对话消息流,版式取自 better-paseo 重绘的 agent 会话:
@@ -110,6 +111,7 @@ export function ChatMessages({
   /** 没有任何消息时代替消息列显示。 */
   empty?: ReactNode;
 }) {
+  const t = useT();
   const scrollRef = useRef<NativeScrollView>(null);
   // 停在底部附近时跟随新消息;用户往上翻阅时不打断。只有向上滚动才停止跟随:
   // 内容(如 Markdown)增高时也会触发滚动事件,那时离底部变远但并不是用户在翻阅。
@@ -166,7 +168,7 @@ export function ChatMessages({
             <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: space.xs + 2, marginBottom: space.lg }}>
               <Icon name="History" size={12} color={theme.colors.foregroundMuted} />
               <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight }}>
-                只显示最近的记录
+                {t("chat.messages.truncated")}
               </Text>
             </View>
           ) : null}
@@ -208,9 +210,10 @@ const LONG_MESSAGE_LINES = 14;
 const BUBBLE_MAX_WIDTH = 560;
 
 function UserBubble({ entry, theme, metrics, sending = false }: { entry: UserEntry; theme: Theme; metrics: ChatMetrics; sending?: boolean }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const long = entry.text.length > 900 || entry.text.split("\n").length > LONG_MESSAGE_LINES;
-  const status = sending ? { label: "发送中", tone: "muted" as Tone } : userStatusLabel(entry);
+  const status = sending ? { label: t("chat.messages.sending"), tone: "muted" as Tone } : userStatusLabel(entry, t);
   const caption = { fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight };
   return (
     <View style={{ alignSelf: "flex-end", alignItems: "flex-end", maxWidth: metrics.compact ? "86%" : BUBBLE_MAX_WIDTH }}>
@@ -230,16 +233,16 @@ function UserBubble({ entry, theme, metrics, sending = false }: { entry: UserEnt
         </Text>
         {long ? (
           <View style={{ marginTop: space.sm }}>
-            <TextButton theme={theme} label={open ? "收起" : "展开全部"} onPress={() => setOpen((value) => !value)} />
+            <TextButton theme={theme} label={open ? t("chat.collapse") : t("chat.expandAll")} onPress={() => setOpen((value) => !value)} />
           </View>
         ) : null}
       </View>
       {/* 从右到左:复制、时间、状态、来源;放不下时换行,不挤压气泡。 */}
       <View style={{ flexDirection: "row-reverse", flexWrap: "wrap", alignItems: "center", minHeight: 24, marginTop: space.xs, columnGap: space.sm }}>
-        {sending ? null : <CopyButton theme={theme} text={entry.text} label="复制消息" touch={metrics.touch} />}
+        {sending ? null : <CopyButton theme={theme} text={entry.text} label={t("chat.messages.copyMessage")} touch={metrics.touch} />}
         {entry.at ? (
           <Text accessibilityLabel={fullStamp(entry.at)}
-            style={{ ...caption, color: theme.colors.foregroundMuted, fontVariant: ["tabular-nums"] }}>{stampTime(entry.at)}</Text>
+            style={{ ...caption, color: theme.colors.foregroundMuted, fontVariant: ["tabular-nums"] }}>{stampTime(entry.at, t)}</Text>
         ) : null}
         {status ? <Text numberOfLines={1} style={{ ...caption, flexShrink: 1, color: toneColor(status.tone, theme) }}>{status.label}</Text> : null}
         {entry.source ? (
@@ -266,6 +269,7 @@ function ReplyMessage({ text, at, theme, metrics, files }: {
   metrics: ChatMetrics;
   files: FileRefs;
 }) {
+  const t = useT();
   const muted = theme.colors.foregroundMuted;
   const footerText = { fontSize: TYPE.button.size, lineHeight: TYPE.button.lineHeight, color: muted };
   return (
@@ -273,13 +277,13 @@ function ReplyMessage({ text, at, theme, metrics, files }: {
       <MarkdownWithFiles text={text} theme={theme} metrics={metrics} files={files} />
       <View style={{ flexDirection: "row", alignItems: "center", minHeight: 24, marginTop: space.sm, gap: space.sm }}>
         <View style={{ marginHorizontal: -space.xs }}>
-          <CopyButton theme={theme} text={text} label="复制答复" touch={metrics.touch} />
+          <CopyButton theme={theme} text={text} label={t("chat.messages.copyReply")} touch={metrics.touch} />
         </View>
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}>
           <Icon name="Route" size={13} color={muted} />
           <Text style={footerText}>Router</Text>
         </View>
-        <Text accessibilityLabel={fullStamp(at)} style={{ ...footerText, fontVariant: ["tabular-nums"] }}>{stampTime(at)}</Text>
+        <Text accessibilityLabel={fullStamp(at)} style={{ ...footerText, fontVariant: ["tabular-nums"] }}>{stampTime(at, t)}</Text>
       </View>
     </View>
   );
@@ -402,6 +406,7 @@ function EventRow({ entry, ticket, theme, navigation, metrics, files }: {
   metrics: ChatMetrics;
   files: FileRefs;
 }) {
+  const t = useT();
   const tokens = chatTokens(theme);
   const [open, setOpen] = useState(false);
   const [openHovered, setOpenHovered] = useState(false);
@@ -413,7 +418,7 @@ function EventRow({ entry, ticket, theme, navigation, metrics, files }: {
   const tone: RowTone = failed ? "loud" : running ? "active" : "quiet";
   const workerId = live?.workerAgentId ?? null;
   const preview = entry.markdown && entry.text && !open ? markdownPreview(entry.text).replace(/\s+/g, " ").trim() : "";
-  const statusLabel = live ? `${live.status === "completed" ? "✓ " : ""}${ticketStatusLabel(live.status)}` : null;
+  const statusLabel = live ? `${live.status === "completed" ? "✓ " : ""}${ticketStatusLabel(live.status, t)}` : null;
   const statusTint = (colors: ReturnType<typeof rowColors>) => {
     if (live?.status === "failed") return theme.colors.statusDanger;
     return running ? tokens.row.targetActive : colors.meta;
@@ -437,13 +442,13 @@ function EventRow({ entry, ticket, theme, navigation, metrics, files }: {
         meta={(colors) => (
           <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, flexShrink: 0 }}>
             {statusLabel ? <RowMeta color={statusTint(colors)}>{statusLabel}</RowMeta> : null}
-            <RowMeta color={colors.meta} label={fullStamp(entry.at)}>{stampTime(entry.at)}</RowMeta>
+            <RowMeta color={colors.meta} label={fullStamp(entry.at)}>{stampTime(entry.at, t)}</RowMeta>
           </View>
         )}
         trailing={workerId && navigation ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`打开 Worker 会话:${ticket?.title ?? ""}`}
+            accessibilityLabel={t("chat.messages.openWorkerSession", { title: ticket?.title ?? "" })}
             hitSlop={metrics.touch ? 10 : 4}
             onPress={() => navigation.openAgent({ agentId: workerId })}
             onHoverIn={() => setOpenHovered(true)}
@@ -474,7 +479,7 @@ function EventRow({ entry, ticket, theme, navigation, metrics, files }: {
         </View>
       ) : null}
       {preview ? (
-        <Pressable accessibilityRole="button" accessibilityLabel={`展开${entry.label}`} onPress={() => setOpen(true)}
+        <Pressable accessibilityRole="button" accessibilityLabel={t("chat.messages.expand", { label: entry.label })} onPress={() => setOpen(true)}
           style={{ marginLeft: ROW.textColumn, marginTop: 2, marginBottom: space.xs, marginRight: TRAILING_SLOT + space.xs }}>
           <Text numberOfLines={2} style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.labelRead.size, lineHeight: TYPE.labelRead.lineHeight }}>
             {preview}
@@ -526,6 +531,7 @@ function useNow(intervalMs: number): number {
 
 /** 底部的运行指示,与动作行同一几何:蓝色运行点 + 正在做什么 + 用时。 */
 function WorkingRow({ working, theme, metrics }: { working: WorkingState; theme: Theme; metrics: ChatMetrics }) {
+  const t = useT();
   const now = useNow(1000);
   const tokens = chatTokens(theme);
   return (
@@ -539,7 +545,7 @@ function WorkingRow({ working, theme, metrics }: { working: WorkingState; theme:
       {working.since ? (
         <Text numberOfLines={1} style={{ flexShrink: 0, color: theme.colors.foregroundMuted, fontSize: TYPE.meta.size, lineHeight: TYPE.meta.lineHeight,
           fontVariant: ["tabular-nums"] }}>
-          {elapsedTime(working.since, now)}
+          {elapsedTime(working.since, t, now)}
         </Text>
       ) : null}
     </View>

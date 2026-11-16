@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
+import { t } from "./i18n";
 
 /**
  * IM 收到的压缩包只列清单、不解压:文件数、文件名、解压后总大小与可疑条目,写进触发正文,
@@ -60,7 +61,7 @@ const S_IFMT = 0o170000;
 const S_IFLNK = 0o120000;
 
 function corrupt(): Error {
-  return new Error("zip 目录区损坏");
+  return new Error(t("server.archive.corrupt"));
 }
 
 function findEocd(data: Buffer): number {
@@ -95,7 +96,7 @@ function decodeZipName(raw: Buffer, utf8Flag: boolean): string {
 
 export function listZip(data: Buffer): ArchiveListing {
   const eocd = findEocd(data);
-  if (eocd < 0) throw new Error("不是有效的 zip 文件(找不到目录区)");
+  if (eocd < 0) throw new Error(t("server.archive.notZip"));
   let count = data.readUInt16LE(eocd + 10);
   let offset = data.readUInt32LE(eocd + 16);
   if (count === 0xffff || offset === 0xffffffff) {
@@ -186,11 +187,11 @@ function listWithSevenZip(file: string, format: ArchiveFormat): Promise<ArchiveL
       { timeout: SEVEN_ZIP_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: "C.UTF-8" } },
       (error, stdout, stderr) => {
         const output = `${stdout}\n${stderr}`;
-        if (/Wrong password|encrypted archive/i.test(output)) return reject(new Error("文件名列表也已加密,需要密码才能查看"));
+        if (/Wrong password|encrypted archive/i.test(output)) return reject(new Error(t("server.archive.headersEncrypted")));
         if (error) {
           const code = (error as NodeJS.ErrnoException).code;
-          if (code === "ENOENT") return reject(new Error("本机没有 7z,无法列出"));
-          return reject(new Error(error.killed ? "列清单超时" : "7z 无法读取(可能已损坏)"));
+          if (code === "ENOENT") return reject(new Error(t("server.archive.no7z")));
+          return reject(new Error(error.killed ? t("server.archive.listTimeout") : t("server.archive.unreadable")));
         }
         resolve(parseSevenZipSlt(stdout, format));
       },
@@ -217,8 +218,8 @@ function displayName(name: string): string {
 }
 
 function sample(names: string[]): string {
-  const shown = names.slice(0, LISTED_WARNINGS).map(displayName).join("、");
-  return names.length > LISTED_WARNINGS ? `${shown} 等 ${names.length} 项` : shown;
+  const shown = names.slice(0, LISTED_WARNINGS).map(displayName).join(t("server.archive.separator"));
+  return names.length > LISTED_WARNINGS ? t("server.archive.sampleMore", { shown, count: names.length }) : shown;
 }
 
 export function formatSize(bytes: number): string {
@@ -236,29 +237,37 @@ export function describeArchive(listing: ArchiveListing, archiveBytes: number): 
   const total = files.reduce((sum, entry) => sum + entry.size, 0);
   const label = FORMAT_LABEL[listing.format];
   if (files.length === 0) {
-    return [`  ${label} 压缩包里没有文件${listing.entries.length > 0 ? "(只有目录或系统元数据)" : ""}`];
+    return [t(listing.entries.length > 0 ? "server.archive.emptyMetadataOnly" : "server.archive.empty", { label })];
   }
 
-  const count = listing.truncated ? `至少 ${files.length}` : `${files.length}`;
-  const lines = [`  ${label} 压缩包内 ${count} 个文件,解压后共 ${formatSize(total)}:`];
-  for (const entry of files.slice(0, LISTED_FILES)) lines.push(`  - ${displayName(entry.name)}(${formatSize(entry.size)})`);
-  if (files.length > LISTED_FILES) lines.push(`  - …其余 ${files.length - LISTED_FILES} 个文件未列出`);
+  const size = formatSize(total);
+  const lines = [
+    listing.truncated
+      ? t("server.archive.headerTruncated", { label, count: files.length, size })
+      : t("server.archive.header", { label, count: files.length, size }),
+  ];
+  for (const entry of files.slice(0, LISTED_FILES)) lines.push(t("server.archive.entry", { name: displayName(entry.name), size: formatSize(entry.size) }));
+  if (files.length > LISTED_FILES) lines.push(t("server.archive.moreFiles", { count: files.length - LISTED_FILES }));
 
   const nested = files.filter((entry) => archiveFormat(entry.name) !== null);
-  if (nested.length > 0) lines.push(`  内含压缩包 ${nested.length} 个,需要再解一层:${sample(nested.map((entry) => entry.name))}`);
+  if (nested.length > 0) lines.push(t("server.archive.nested", { count: nested.length, names: sample(nested.map((entry) => entry.name)) }));
   const encrypted = files.filter((entry) => entry.encrypted);
   if (encrypted.length > 0) {
-    lines.push(`  ⚠ ${encrypted.length === files.length ? "全部" : `${encrypted.length} 个`}文件已加密,解压需要密码`);
+    lines.push(
+      encrypted.length === files.length
+        ? t("server.archive.encryptedAll")
+        : t("server.archive.encryptedSome", { count: encrypted.length }),
+    );
   }
   const escaping = real.filter((entry) => escapesRoot(entry.name)).map((entry) => entry.name);
-  if (escaping.length > 0) lines.push(`  ⚠ 路径会越出解压目录,解压时必须排除:${sample(escaping)}`);
+  if (escaping.length > 0) lines.push(t("server.archive.escaping", { names: sample(escaping) }));
   const links = real.filter((entry) => entry.symlink).map((entry) => entry.name);
-  if (links.length > 0) lines.push(`  ⚠ 含符号链接,解压时必须排除:${sample(links)}`);
+  if (links.length > 0) lines.push(t("server.archive.symlinks", { names: sample(links) }));
   const ratio = archiveBytes > 0 ? total / archiveBytes : 0;
   if (total > BOMB_ABSOLUTE_BYTES || (total > BOMB_MIN_BYTES && ratio > BOMB_RATIO)) {
-    lines.push(`  ⚠ 解压后 ${formatSize(total)},是压缩包的 ${Math.round(ratio)} 倍,疑似压缩炸弹,不要直接解压`);
+    lines.push(t("server.archive.bomb", { size: formatSize(total), ratio: Math.round(ratio) }));
   }
-  if (junk.length > 0) lines.push(`  (另有 ${junk.length} 项 macOS/Windows 打包元数据,可忽略)`);
+  if (junk.length > 0) lines.push(t("server.archive.junk", { count: junk.length }));
   return lines;
 }
 
@@ -269,6 +278,6 @@ export async function inspectArchive(file: string, data: Buffer, fileName: strin
   try {
     return describeArchive(await listArchive(file, data, format), data.length);
   } catch (error) {
-    return [`  ${FORMAT_LABEL[format]} 压缩包,未能列出内容:${error instanceof Error ? error.message : String(error)}`];
+    return [t("server.archive.unlisted", { label: FORMAT_LABEL[format], error: error instanceof Error ? error.message : String(error) })];
   }
 }

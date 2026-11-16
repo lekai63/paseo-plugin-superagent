@@ -9,9 +9,9 @@ import { superagentRetryImDeliveryRpc } from "../shared/rpc";
 import { STATE_QUERY_KEY } from "./query";
 import { TYPE } from "../shared/design";
 import { Button, Card, space, type Theme } from "./ui";
+import { useT } from "./i18n";
 
 type Delivery = SuperagentSnapshot["imDeliveries"][number];
-const CHANNELS = { feishu: "飞书", qq: "QQ", dingtalk: "钉钉", wecom: "企业微信", weixin: "微信" };
 
 /**
  * 还没送达的 IM 回复(发送中或中途失败)。已全部发出的回复在对话里就能看到,不在这里重复;
@@ -26,6 +26,7 @@ export function ImDeliveries({ deliveries, theme, hostId }: { deliveries: Delive
 }
 
 function DeliveryCard({ item, theme, hostId }: { item: Delivery; theme: Theme; hostId: string }) {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const retry = useRpc(superagentRetryImDeliveryRpc);
   const client = useQueryClient();
@@ -35,10 +36,10 @@ function DeliveryCard({ item, theme, hostId }: { item: Delivery; theme: Theme; h
     setBusy(true);
     try {
       const result = await retry({ deliveryId: item.id });
-      if (!result.ok) throw new Error(result.error || "补发失败");
-      toast.show("剩余回复已发送", { variant: "success" });
+      if (!result.ok) throw new Error(result.error || t("sidebar.im.resendFailed"));
+      toast.show(t("sidebar.im.resent"), { variant: "success" });
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "补发失败");
+      toast.error(error instanceof Error ? error.message : t("sidebar.im.resendFailed"));
     } finally {
       setBusy(false);
       void client.invalidateQueries({ queryKey: [...STATE_QUERY_KEY, hostId] });
@@ -46,24 +47,24 @@ function DeliveryCard({ item, theme, hostId }: { item: Delivery; theme: Theme; h
   };
   const failed = item.status === "failed";
   const status = failed
-    ? `第 ${item.nextPart + 1}/${item.totalParts} 条发送失败`
-    : `正在发送 ${item.nextPart}/${item.totalParts}`;
+    ? t("sidebar.im.partFailed", { current: item.nextPart + 1, total: item.totalParts })
+    : t("sidebar.im.sending", { current: item.nextPart, total: item.totalParts });
   const caption = { fontSize: TYPE.caption.size, lineHeight: TYPE.caption.lineHeight };
   return <Card theme={theme} state={failed ? "failed" : "rest"} style={{ paddingTop: space.sm + 2, paddingBottom: space.md, paddingHorizontal: space.md, gap: space.xs + 2 }}>
     <Text numberOfLines={2} style={{ color: theme.colors.foreground, fontSize: TYPE.body.size, lineHeight: TYPE.body.lineHeight, fontWeight: "500" }}>
       {item.preview || item.title}
     </Text>
     <Text style={{ ...caption, color: failed ? theme.colors.statusDanger : theme.colors.foregroundMuted }}>
-      {CHANNELS[item.channel]} · {relativeTime(item.updatedAt)} · {status}
+      {t(`sidebar.channel.${item.channel}`)} · {relativeTime(item.updatedAt, t)} · {status}
     </Text>
     {item.preview ? (
-      <Text numberOfLines={1} style={{ ...caption, color: theme.colors.foregroundMuted }}>对话:{item.title}</Text>
+      <Text numberOfLines={1} style={{ ...caption, color: theme.colors.foregroundMuted }}>{t("sidebar.im.conversation", { title: item.title })}</Text>
     ) : null}
     {failed ? <View style={{ alignItems: "flex-start", gap: space.sm, marginTop: space.xs }}>
       <Text style={{ color: theme.colors.foregroundMuted, fontSize: TYPE.captionRead.size, lineHeight: TYPE.captionRead.lineHeight }}>
-        已发出的部分不会重发。检查 IM 连接与回复窗口后,可接着发送剩余内容。
+        {t("sidebar.im.note")}
       </Text>
-      <Button theme={theme} variant="outline" size="xs" icon="RefreshCw" label={busy ? "补发中..." : `从第 ${item.nextPart + 1} 条补发`} disabled={busy} onPress={() => void send()} />
+      <Button theme={theme} variant="outline" size="xs" icon="RefreshCw" label={busy ? t("sidebar.im.resending") : t("sidebar.im.resendFrom", { part: item.nextPart + 1 })} disabled={busy} onPress={() => void send()} />
     </View> : null}
   </Card>;
 }

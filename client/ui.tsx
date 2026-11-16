@@ -4,6 +4,7 @@ import { Icon, Markdown, ScrollView, copyText, useToast } from "@getpaseo/plugin
 import { TYPE, mix } from "../shared/design";
 import { markdownPreview, type Tone } from "../shared/labels";
 import { HAIRLINE, WEB_TRANSITION, chatTokens, hueTokens, radius, space, type Theme } from "./theme-tokens";
+import { useT } from "./i18n";
 
 /**
  * 插件内复用的小型 UI 原语。宿主只向插件暴露 Settings* 系列与 Icon/Modal 等,按钮、药丸、
@@ -380,13 +381,14 @@ export function TextButton({ theme, label, onPress, accessibilityLabel }: {
  * 复制按钮(better-paseo 同款):24 的方框放 14 的图标,复制成功后 1.2 秒显示对勾并提示;
  * 失败只提示错误,不显示对勾。走宿主 copyText,各平台一致。
  */
-export function CopyButton({ theme, text, label = "复制", touch = false }: {
+export function CopyButton({ theme, text, label, touch = false }: {
   theme: Theme;
   text: string;
   /** 无障碍与提示里的说法,例如「复制消息」。 */
   label?: string;
   touch?: boolean;
 }) {
+  const t = useT();
   const toast = useToast();
   const tokens = chatTokens(theme);
   const [copied, setCopied] = useState(false);
@@ -400,13 +402,13 @@ export function CopyButton({ theme, text, label = "复制", touch = false }: {
     copyText(text).then(
       () => {
         setCopied(true);
-        toast.show("已复制", { variant: "success" });
+        toast.show(t("chat.copied"), { variant: "success" });
       },
-      (error: unknown) => toast.error(`复制失败:${error instanceof Error ? error.message : String(error)}`),
+      (error: unknown) => toast.error(t("chat.copyFailed", { error: error instanceof Error ? error.message : String(error) })),
     );
   };
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={copied ? "已复制" : label} hitSlop={touch ? 10 : 4} onPress={copy}
+    <Pressable accessibilityRole="button" accessibilityLabel={copied ? t("chat.copied") : label ?? t("chat.copy")} hitSlop={touch ? 10 : 4} onPress={copy}
       onHoverIn={() => setHovered(true)} onHoverOut={() => setHovered(false)}
       style={({ pressed }) => ({ width: 24, height: 24, alignItems: "center", justifyContent: "center", borderRadius: radius.chip,
         backgroundColor: pressed ? tokens.pressed : hovered ? tokens.hover : "transparent", ...WEB_TRANSITION })}>
@@ -433,12 +435,13 @@ export function ExpandableText({
   color?: string;
   markdown?: boolean;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const trimmed = text.trim();
   const long = trimmed.length > lines * 64 || trimmed.split("\n").length > lines;
   const toggle = long ? (
     <View style={{ marginTop: space.xs }}>
-      <TextButton theme={theme} label={open ? "收起" : "展开全部"} onPress={() => setOpen((value) => !value)} />
+      <TextButton theme={theme} label={open ? t("chat.collapse") : t("chat.expandAll")} onPress={() => setOpen((value) => !value)} />
     </View>
   ) : null;
 
@@ -482,12 +485,13 @@ export function Dialog({ theme, title, icon, open, onClose, maxWidth, children }
   maxWidth: number;
   children: ReactNode;
 }) {
+  const t = useT();
   const tokens = chatTokens(theme);
   const [closeHovered, setCloseHovered] = useState(false);
   return (
     <NativeModal transparent visible={open} animationType="fade" onRequestClose={onClose}>
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: space.xl + space.sm, backgroundColor: "rgba(0,0,0,0.55)" }}>
-        <Pressable accessibilityLabel="关闭" onPress={onClose} style={FILL} />
+        <Pressable accessibilityLabel={t("chat.close")} onPress={onClose} style={FILL} />
         <View role="dialog" aria-modal aria-label={title}
           style={{ width: "100%", maxWidth, maxHeight: "88%", flexShrink: 1, minHeight: 0, overflow: "hidden", backgroundColor: theme.colors.surface1,
             borderRadius: 12, borderWidth: 1, borderColor: theme.colors.surface2, ...tokens.card.shadowHover }}>
@@ -496,7 +500,7 @@ export function Dialog({ theme, title, icon, open, onClose, maxWidth, children }
             {icon ? <View style={{ alignItems: "center", justifyContent: "center" }}>{icon}</View> : null}
             <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontSize: TYPE.body.size,
               lineHeight: TYPE.body.lineHeight, fontWeight: "500" }}>{title}</Text>
-            <Pressable accessibilityRole="button" accessibilityLabel="关闭" hitSlop={8} onPress={onClose}
+            <Pressable accessibilityRole="button" accessibilityLabel={t("chat.close")} hitSlop={8} onPress={onClose}
               onHoverIn={() => setCloseHovered(true)} onHoverOut={() => setCloseHovered(false)}
               style={({ pressed }) => ({ padding: space.xs, borderRadius: radius.block,
                 backgroundColor: pressed ? tokens.pressed : closeHovered ? tokens.hover : "transparent", ...WEB_TRANSITION })}>

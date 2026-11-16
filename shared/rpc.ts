@@ -83,6 +83,16 @@ export const superagentUnsubscribeRpc = defineRpc({
   output: OkSchema,
 });
 
+/**
+ * 客户端上报 app 语言(宿主解析后的标签,如 `zh-CN`、`en`)。daemon 生成的文字
+ * (IM 消息描述、引擎通知、扫码状态等)随之切换;简体中文以外一律英文。
+ */
+export const superagentSetLocaleRpc = defineRpc({
+  name: "superagent.set_locale",
+  input: z.object({ locale: z.string().max(64) }),
+  output: OkSchema,
+});
+
 /** 对话页的标签列表与最后查看的对话;daemon 落盘,离开页面或重启 app 后恢复。 */
 export const superagentSaveChatTabsRpc = defineRpc({
   name: "superagent.save_chat_tabs",

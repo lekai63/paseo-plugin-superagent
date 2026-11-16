@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { agentStatus, currentTickets, directTickets, elapsedTime, ticketPriority } from "../shared/execution.ts";
+import * as execution from "../shared/execution.ts";
+import { translator } from "../shared/i18n.ts";
+
+// 既有断言按简体中文书写;英文见 i18n.test.mjs。
+const zh = translator("zh-CN");
+const { currentTickets, directTickets, ticketPriority } = execution;
+const agentStatus = (agent) => execution.agentStatus(agent, zh);
+const elapsedTime = (startedAt, now) => execution.elapsedTime(startedAt, zh, now);
 
 const ticket = (id, extra = {}) => ({ id, threadId: "thread", status: "running", subscribed: true, workerAgentId: `worker-${id}`, ...extra });
 

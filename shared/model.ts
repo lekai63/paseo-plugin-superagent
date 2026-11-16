@@ -443,6 +443,8 @@ export const SuperagentStateSchema = z.object({
     /** 对话页打开着的标签;从未保存过时为空,快照按界面发起的对话给出初始标签。 */
     chatTabs: ChatTabsSchema.nullish(),
     watchdog: WatchdogStateSchema.nullish(),
+    /** 最近一次客户端上报的界面语言;daemon 生成的文字用它,从未上报时为英文。 */
+    language: z.enum(["en", "zh-CN"]).nullish(),
   }),
   threads: z.array(ThreadSchema),
   triggers: z.array(TriggerSchema),

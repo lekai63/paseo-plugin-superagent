@@ -8,6 +8,7 @@ import type { ChatMetrics } from "./chat-messages";
 import { readWebSendShortcut } from "./web";
 import { HAIRLINE, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
 import { toneColor, withAlpha } from "./ui";
+import { useT } from "./i18n";
 
 const MAX_INPUT_HEIGHT = 200;
 /** 每个标签各自的未发送草稿;切换标签不会把一段对话里写了一半的话带到另一段。 */
@@ -57,6 +58,7 @@ export function ChatComposer({
   /** 返回 false 表示发送失败,输入内容会恢复。 */
   onSubmit(text: string): Promise<boolean>;
 }) {
+  const t = useT();
   const [text, setTextState] = useState(() => drafts.get(draftKey) ?? "");
   const setText = (next: string | ((current: string) => string)) => setTextState((current) => {
     const value = typeof next === "function" ? next(current) : next;
@@ -141,7 +143,7 @@ export function ChatComposer({
             onChangeText={setText}
             placeholder={placeholder}
             placeholderTextColor={withAlpha(theme.colors.foregroundMuted, 0.75)}
-            accessibilityLabel="发送给 Superagent 的消息"
+            accessibilityLabel={t("chat.composer.inputA11y")}
             multiline
             scrollEnabled={contentHeight > MAX_INPUT_HEIGHT}
             onFocus={() => setFocused(true)}
@@ -167,7 +169,7 @@ export function ChatComposer({
           </View>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="发送"
+            accessibilityLabel={t("chat.composer.send")}
             accessibilityState={{ disabled: !canSend }}
             disabled={!canSend}
             hitSlop={6}

@@ -6,6 +6,7 @@ import { clearTimeout, setTimeout } from "node:timers";
 import { beijingDate, type TriggerOrigin } from "../shared/model";
 import { formatSize, inspectArchive } from "./archive";
 import { resolveImInboxDir } from "./im";
+import { t } from "./i18n";
 
 /**
  * IM 附件的通用落盘:各通道只负责"怎么下载",这里负责命名、存放、压缩包清单和
@@ -26,8 +27,9 @@ const FILE_NAME_MAX_BYTES = 200;
 export type AttachmentKind = "image" | "file" | "video" | "audio";
 type Channel = TriggerOrigin["channel"];
 
-const KIND_LABEL: Record<AttachmentKind, string> = { image: "图片", file: "文件", video: "视频", audio: "语音" };
-export const CHANNEL_LABEL: Record<Channel, string> = { feishu: "飞书", qq: "QQ", dingtalk: "钉钉", wecom: "企微", weixin: "微信" };
+const kindLabel = (kind: AttachmentKind): string => t(`server.attachment.kind.${kind}`);
+/** 通道名随当前语言;调用时才取值。 */
+export const channelLabel = (channel: Channel): string => t(`server.attachment.channel.${channel}`);
 
 /** 待下载的附件:各通道给出下载方法,下载时可顺带给出服务端的文件名(响应头)。 */
 export interface PendingAttachment {
@@ -54,7 +56,7 @@ export interface SavedAttachment {
 class DownloadError extends Error {}
 
 function tooLarge(bytes: number): DownloadError {
-  return new DownloadError(`超过 ${formatSize(IM_ATTACHMENT_MAX_BYTES)} 上限(${formatSize(bytes)})`);
+  return new DownloadError(t("server.attachment.tooLarge", { limit: formatSize(IM_ATTACHMENT_MAX_BYTES), size: formatSize(bytes) }));
 }
 
 // ---- 下载 ----
@@ -95,7 +97,7 @@ export async function downloadBuffer(
   external?.addEventListener("abort", onAbort, { once: true });
   try {
     const response = await fetch(url, { ...options.init, signal: controller.signal });
-    if (!response.ok) throw new DownloadError(`${options.label ?? ""}下载失败:HTTP ${response.status}`);
+    if (!response.ok) throw new DownloadError(t("server.attachment.httpFailed", { label: options.label ?? "", status: response.status }));
     const headers = response.headers ?? null;
     const declared = Number(headers?.get("content-length"));
     if (declared > maxBytes) throw tooLarge(declared);
@@ -107,7 +109,7 @@ export async function downloadBuffer(
     return { data, headers };
   } catch (error) {
     if (error instanceof DownloadError) throw error;
-    if (controller.signal.aborted) throw new Error(external?.aborted ? "下载被取消" : `下载超时(${timeoutMs / 1000} 秒)`);
+    if (controller.signal.aborted) throw new Error(external?.aborted ? t("server.attachment.cancelled") : t("server.attachment.timeout", { seconds: timeoutMs / 1000 }));
     throw error;
   } finally {
     clearTimeout(timer);
@@ -138,9 +140,9 @@ export function readStream(
         resolve(Buffer.concat(chunks));
       }
     };
-    const timer = setTimeout(() => finish(new Error(`下载超时(${timeoutMs / 1000} 秒)`)), timeoutMs);
+    const timer = setTimeout(() => finish(new Error(t("server.attachment.timeout", { seconds: timeoutMs / 1000 }))), timeoutMs);
     timer.unref?.();
-    const onAbort = () => finish(new Error("下载被取消"));
+    const onAbort = () => finish(new Error(t("server.attachment.cancelled")));
     if (options.signal?.aborted) return onAbort();
     options.signal?.addEventListener("abort", onAbort, { once: true });
     stream.on("data", (chunk: Buffer | string) => {
@@ -158,7 +160,7 @@ export function readStream(
 export function withTimeout<T>(promise: Promise<T>, timeoutMs: number = IM_DOWNLOAD_TIMEOUT_MS): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`下载超时(${timeoutMs / 1000} 秒)`)), timeoutMs);
+    timer = setTimeout(() => reject(new Error(t("server.attachment.timeout", { seconds: timeoutMs / 1000 }))), timeoutMs);
     timer.unref?.();
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
@@ -268,18 +270,18 @@ export async function saveAttachments(
 // ---- 写进触发正文 ----
 
 function label(channel: Channel, kind: AttachmentKind, quoted: boolean): string {
-  return `[${quoted ? "引用的" : ""}${CHANNEL_LABEL[channel]}${KIND_LABEL[kind]}]`;
+  return t(quoted ? "server.attachment.quotedLabel" : "server.attachment.label", { channel: channelLabel(channel), kind: kindLabel(kind) });
 }
 
 /** 附件一行(压缩包再跟清单):Router 据此写 mandate,失败时知道要请用户重发。 */
 export function describeSavedAttachment(channel: Channel, attachment: SavedAttachment): string {
   const head = label(channel, attachment.kind, attachment.quoted);
   if (attachment.path) {
-    const line = `${head} ${attachment.name}(${formatSize(attachment.bytes ?? 0)})已保存到本机:${attachment.path}`;
+    const line = t("server.attachment.saved", { head, name: attachment.name ?? "", size: formatSize(attachment.bytes ?? 0), path: attachment.path });
     return [line, ...attachment.details].join("\n");
   }
   const name = attachment.name ? ` ${attachment.name}` : "";
-  return `${head}${name} 下载失败:${attachment.error},请让用户重新发送`;
+  return t("server.attachment.failed", { head, name, error: attachment.error ?? "" });
 }
 
 /** 不下载时的简短描述(群消息留痕、观察模式上下文、标题);文件名同样先清理。 */

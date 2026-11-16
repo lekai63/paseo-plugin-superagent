@@ -1,0 +1,284 @@
+import type { Translation } from "../../i18n";
+import type { settings as en } from "../en/settings";
+
+export const settings: Translation<typeof en> = {
+  unavailable: {
+    loading: "正在加载设置...",
+    title: "设置不可用",
+    readFailed: "读取设置失败",
+    reload: "重新加载",
+    restoreLabel: "恢复默认设置",
+    restoreHint: "已保存的设置无法解析,恢复后需要重新填写",
+    restoreAction: "恢复默认",
+  },
+  validation: {
+    intRange: "请输入 {{min}}–{{max}} 之间的整数",
+    absolutePath: "需要绝对路径,例如 /home/me/project",
+    absolutePathInbox: "需要绝对路径,留空使用默认目录",
+    absolutePathProfile: "需要绝对路径,留空使用上方的工作目录",
+    allowlistEmpty: "白名单全空时该通道不会启动,至少填写一项",
+    withMax: "{{error}},最多 {{max}} 字符。",
+  },
+  serverIssue: "Worker 无法启动:{{issue}}",
+  status: {
+    saved: "所有修改已保存",
+    errors_other: "有 {{count}} 处需要修正",
+    unsaved: "有未保存的修改",
+  },
+  workingDir: {
+    title: "工作目录",
+    info: "默认的基础目录:Router 与默认 Worker 共用它。共享目录隔离时,两者都住在按此目录创建的「默认 workspace」里;独立 worktree 隔离时,每个 Ticket 从它切出独立分支。Router 的自定义规则在下方直接填写。",
+    label: "工作目录",
+    hint: "主机上的绝对路径;选择独立 worktree 时必须位于 git 仓库内",
+  },
+  isolation: {
+    label: "Worker 隔离",
+    worktreeHint: "每个 Ticket 在独立分支的 worktree 里工作,互不干扰",
+    sharedHint: "直接在工作目录里工作,不需要 git;产出按 AGENTS.md 规则或放进 tasks/ 子目录",
+    worktree: "独立 worktree",
+    shared: "共享目录",
+  },
+  model: {
+    title: "模型",
+    info: "从 daemon 的 provider 快照中选取(与启动时校验同源),model id 由选项原样带入,不会出现反斜杠转义或笔误;清单读取失败时可退回手工填写 provider 或 provider/model。留空时按 claude → codex → opencode 的顺序自动选择。",
+    routerHint: "只做评估与分派,轻量模型即可",
+    auto: "自动选择",
+    routerThinking: "Router thinking 档位(可选)",
+    routerThinkingFallback: "用于新建或重建的 Router 会话,不影响运行中的会话",
+    defaultWorker: "默认 Worker",
+    worker: "Worker",
+    defaultWorkerHint: "Router 没有指定档位、或指定的档位不存在时使用",
+    workerHint: "负责真正干活,建议用最强的模型",
+    workerMode: "Worker 模式(可选)",
+    defaultWorkerThinking: "默认 Worker thinking 档位(可选)",
+    workerThinkingFallback: "随新建或重试的 Worker 传入,不修改运行中的会话",
+    workerDescriptionLabel: "默认 Worker 的用途",
+    workerDescriptionHint: "写进 Router 提示词,和下方各档位的用途一起供 Router 选择;留空时视为「其他档位都不合适的通用任务」",
+    workerDescriptionPlaceholder: "通用任务、调研、中文文档与报告",
+  },
+  routerRules: {
+    title: "Router 规则",
+    info: "设置答复语言、任务分派偏好和汇报格式。仅影响 Router;保存后从下一次评估开始使用,无需重建会话。",
+    custom: "自定义规则",
+    accessibility: "Router 自定义规则",
+    placeholder: "面向用户使用中文。\n独立任务分别派发给 Worker。\n汇报包含结论、产出路径、验证情况与未解决问题。",
+    emptyHint: "留空使用默认规则。内置的职责和输出约束始终保留。",
+  },
+  profiles: {
+    title: "Worker 档位",
+    info: "让不同类型的任务跑在不同模型上。Router 派发时按用途说明为每个任务选一个档位;没有选、或选了不存在的名字时用默认 Worker。每个档位可选择该 provider 提供的模式,留空沿用 Paseo 默认,也可另填专属工作目录。模式和模型的修改用于新建或重试的 Worker。",
+    configured_other: "已配置 {{count}} 个档位",
+    onlyDefault: "只使用默认 Worker",
+    max: "最多 {{max}} 个档位",
+    example: "例如:code → codex,负责写码、修 bug、跑测试",
+    add: "添加档位",
+    name: "档位名",
+    nameHint: "Router 在派发时填写的名字;{{hint}}",
+    providerHint: "从 daemon 的 provider 快照中选取;清单缺失时可手动填写 provider/model",
+    notSelected: "未选择",
+    mode: "模式(可选)",
+    thinking: "thinking 档位(可选)",
+    thinkingFallback: "留空不继承默认 Worker 的档位",
+    workingDir: "工作目录(可选)",
+    workingDirHint: "该档位 Worker 的专属基础目录,可与上方的工作目录不同;留空使用它。共享目录隔离时以其档位名单独建工作区",
+    workingDirPlaceholder: "留空使用上方的工作目录",
+    purpose: "用途",
+    purposeHint: "原样写进 Router 提示词:说清楚哪类任务该交给这个档位",
+    purposePlaceholder: "仓库内写码、修 bug、重构、跑测试",
+    removeLabel: "删除这个档位",
+    removeHint: "运行中的任务不受影响;尚未启动或之后重试的任务会改用默认 Worker",
+    removeAction: "删除",
+  },
+  execution: {
+    title: "执行",
+    workerTimeout: {
+      label: "Worker 超时(分钟)",
+      hint: "单轮运行超过这个时长会被中断并判为失败",
+    },
+    routerEvalTimeout: {
+      label: "Router 评估超时(分钟)",
+      hint: "准备和裁决共享的总时限；准备阶段最多 1 分钟",
+    },
+    routerIdleTimeout: {
+      label: "Router 空闲回收(分钟)",
+      hint: "归档空闲 Router，保留对话，下次评估自动重建",
+    },
+    threadIdleTimeout: {
+      label: "对话空闲过期(分钟)",
+      hint: "默认 1440 分钟；有运行任务、待处理消息或审批时暂缓关闭",
+    },
+    workerIdleTimeout: {
+      label: "Worker 待命回收(分钟)",
+      hint: "默认 1440 分钟；完成工作后长期待命的 Worker 自动完结并回收",
+    },
+    maxAttempts: {
+      label: "失败重试次数",
+      hint: "Ticket 失败后自动重试的上限,0 表示不重试",
+    },
+    evalBatch: {
+      label: "批处理窗口(毫秒)",
+      hint: "窗口内同一线程的多条消息合并成一次 Router 评估",
+    },
+    triggerMaxChars: {
+      label: "单条消息上限(字符)",
+      hint: "超出部分会被截断",
+    },
+  },
+  proactive: {
+    title: "主动与巡检",
+    info: "投机执行:Router 依据「Router 规则」里写明的主动策略(例如「群里有人反馈问题时,静默复现并尝试简单修复」),对没人明确提出的事项先在后台派 Worker 尝试,结果有价值才交付,否则静默丢弃。LLM 看门狗:独立的巡检会话按间隔检查每个 Worker 是否有实质进展、是否偏离任务,必要时提醒、打断、取消、重试,或交 Router 告诉你;也可以直接打开它的会话问诊。两者都会额外消耗模型调用,默认关闭。",
+    speculative: {
+      label: "投机执行",
+      hint: "需要在「Router 规则」里写明主动策略才会触发;同时最多 {{max}} 个投机任务",
+    },
+    watchdog: {
+      label: "LLM 看门狗",
+      hint: "独立巡检会话,判断 Worker 的进展与偏离",
+    },
+    watchdogModel: {
+      label: "看门狗模型",
+      hint: "留空沿用 Router 的模型",
+      empty: "同 Router",
+    },
+    interval: {
+      label: "巡检间隔(分钟)",
+      hint: "没有进行中的任务(无新动静的待命任务不算)、也没有异常时跳过,不调用模型",
+    },
+  },
+  delegation: {
+    title: "委派",
+    info: "向普通 agent 会话注入 superagent_dispatch 工具,让 agent 自己把工作委派给编排层。走插件自带的本地 MCP 通道,不受 Paseo tools 开关影响。",
+    inject: {
+      label: "向 agent 注入委派工具",
+      hint: "在任意会话里也可以直接输入 /superagent <任务>",
+    },
+    providers: {
+      label: "注入的 provider",
+      hint: "逗号分隔。不支持 MCP 的 provider(如 ACP 系)注入会导致会话启动失败;pi 走 pi 扩展通道,填 pi 前先安装扩展(见 README)",
+    },
+  },
+  im: {
+    title: "IM 触发源",
+    info: "从聊天软件接收指令,Router 的答复回到原聊天。白名单(发送者或会话至少填一项)是硬门槛:全空时该通道不会启动;微信的扫码人自动在白名单内。保存后自动重连,无需重启 daemon。",
+    replyMaxChars: {
+      label: "IM 单条消息上限(字符)",
+      hint: "包含分段序号;长答复自动分成多条依次发完",
+    },
+    inboxDir: {
+      label: "IM 附件收件目录",
+      hint: "daemon 主机上的绝对路径。聊天里收到的文件存到 <目录>/<通道>/<北京时间日期>/<消息 id>/ 下,压缩包附清单交给 Router;改后立即生效",
+      placeholder: "留空:$PASEO_HOME/plugin-data/superagent/inbox",
+    },
+  },
+  channels: {
+    observe: {
+      label: "群聊观察模式",
+      hint: "未 @ 机器人的群消息作为上下文交给 Router 判断,不再丢弃;关闭时记为已过滤留痕",
+    },
+    feishu: {
+      title: "飞书",
+      hint: "官方长连接,免公网;私聊直接触发,群聊需 @机器人",
+      allowUsers: {
+        label: "允许的发送者",
+        hint: "open_id,逗号分隔",
+      },
+      allowChats: {
+        label: "允许的会话",
+        hint: "chat_id,逗号分隔",
+      },
+    },
+    qq: {
+      title: "QQ",
+      hint: "OneBot 11(NapCat)正向 WebSocket;群里需 @机器人",
+      endpoint: {
+        label: "WebSocket 地址",
+      },
+      token: {
+        hint: "没有设置可留空",
+      },
+      allowUsers: {
+        label: "允许的 QQ 号",
+        hint: "逗号分隔,私聊与群聊通用",
+      },
+      allowGroups: {
+        label: "允许的群号",
+        hint: "逗号分隔",
+      },
+    },
+    dingtalk: {
+      title: "钉钉",
+      hint: "Stream 模式长连接,免公网;群里被 @ 才会收到",
+      allowUsers: {
+        label: "允许的发送者",
+        hint: "staffId,逗号分隔",
+      },
+      allowChats: {
+        label: "允许的会话",
+        hint: "conversationId,逗号分隔",
+      },
+    },
+    wecom: {
+      title: "企业微信",
+      hint: "智能机器人长连接,免公网;群里需 @机器人",
+      allowUsers: {
+        label: "允许的发送者",
+        hint: "userid,逗号分隔",
+      },
+      allowChats: {
+        label: "允许的群",
+        hint: "chatid,逗号分隔",
+      },
+    },
+    weixin: {
+      title: "微信",
+      hint: "腾讯官方 ClawBot(iLink)通道,扫码登录,免公网;仅私聊",
+      allowUsers: {
+        label: "另外允许的用户",
+        hint: "扫码人自动允许;其他人填微信用户 ID(xxx@im.wechat),逗号分隔",
+      },
+    },
+  },
+  save: {
+    title: "保存",
+    saving: "保存中...",
+    action: "保存",
+    discardLabel: "放弃修改",
+    discardHintConflict: "载入别处保存的最新设置,丢弃这里的草稿",
+    discardHint: "恢复为已保存的设置",
+    discardAction: "放弃",
+  },
+  modePicker: {
+    default: "Paseo 默认",
+    saved: "{{value}}(已保存,当前未上报)",
+    noProvider: "先选择 Worker 的 provider,即可查看其模式;留空沿用 Paseo 默认",
+    loading: "正在读取该 provider 的模式;留空沿用 Paseo 默认",
+    error: "无法读取模式列表,可稍后重新打开设置;已保存的选择会保留",
+    missing: "该 provider 当前未上报已保存的模式,请核对或选择 Paseo 默认",
+    none: "该 provider 未上报可选模式,留空沿用 Paseo 默认",
+    default_hint: "留空沿用 Paseo 默认;所选模式用于新建或重试的 Worker",
+  },
+  thinkingPicker: {
+    manualHint: "{{hint}};当前快照未上报 thinking 档位,可手工填写档位 id(如 high),留空使用 provider 默认",
+    manualPlaceholder: "留空使用 provider 默认",
+    default: "Provider 默认",
+    saved: "{{value}}(已保存,未在快照中)",
+    hint: "留空沿用 provider 默认档位;{{hint}}",
+  },
+  modelPicker: {
+    loading: "正在读取 daemon 的 provider 列表,也可先手动填写 provider 或 provider/model",
+    error: "无法读取 daemon 的 provider 列表(连接异常或版本过旧),请手动填写 provider 或 provider/model",
+    withHint: "{{hint}};{{state}}",
+    notProvided: "{{provider}}(本机未提供)",
+    defaultModel: "默认模型({{name}})",
+    notInList: "{{model}}(不在清单)",
+    modelHint: "选项 id 原样写入;「默认模型」只填 provider,由引擎按快照取默认",
+    manual: "Model(手动)",
+    manualNoModels: "该 provider 未上报模型清单,手动填写 provider 或 provider/model",
+    manualNotInList: "该 provider 不在 daemon 清单中,请手动核对",
+  },
+  providerOption: {
+    disabled: "{{label}}(已禁用)",
+    loading: "{{label}}(加载中)",
+    notReady: "{{label}}(未就绪)",
+  },
+};

@@ -1,4 +1,5 @@
 import type { ExecutionAgent } from "./execution";
+import type { Translate } from "./i18n";
 import type { Ticket } from "./model";
 
 /** 按当前 Worker 会话计数,已清理的会话不累计为历史完成数量。 */
@@ -27,13 +28,9 @@ export interface RouterStatusMark {
 }
 
 /** 状态点的无障碍/悬浮文案,与设计里的五态一一对应。 */
-export const routerStatusLabels: Record<RouterMarkKind, string> = {
-  running: "运行中",
-  finished: "运行完毕,等待查看",
-  permission: "等待权限输入",
-  error: "出错",
-  idle: "空闲",
-};
+export function routerStatusLabel(kind: RouterMarkKind, t: Translate): string {
+  return t(`labels.routerMark.${kind}`);
+}
 
 /** 多个 Router 会话并存(状态重置后残留)时取最需要关注的一种;优先级沿用宿主 agent 状态序。 */
 const ROUTER_MARK_PRIORITY: Record<RouterMarkKind, number> = { permission: 0, error: 1, running: 2, finished: 3, idle: 4 };

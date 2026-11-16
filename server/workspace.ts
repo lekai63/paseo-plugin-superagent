@@ -1,5 +1,7 @@
 import type { PaseoApi, PaseoAgent, PaseoWorkspaceHandle } from "@getpaseo/client";
 import { resolve } from "node:path";
+import { allTranslations, type MessageKey } from "../shared/i18n";
+import { t } from "./i18n";
 
 /**
  * 持久目录工作区:同一个基础目录分别保留普通与后台 workspace。Router/看门狗
@@ -10,7 +12,16 @@ import { resolve } from "node:path";
  * 打开的同名工作区;反过来,其他目录上的同名工作区也不会被抢占。
  */
 
-export const BACKGROUND_WORKSPACE_TITLE = "Superagent 后台";
+export const BACKGROUND_WORKSPACE_TITLE = "labels.workspace.background" satisfies MessageKey;
+
+/**
+ * 插件命名的工作区标题:当前语言的写法用于新建,任一语言的写法都能找回,
+ * 切换界面语言后不会为同一目录再建一个工作区。
+ */
+export function workspaceTitles(key: "labels.workspace.default" | "labels.workspace.background"): string[] {
+  const current = t(key);
+  return [current, ...allTranslations(key).filter((title) => title !== current)];
+}
 
 /** 后台属性只在创建工作区时指定;旧前台角色会话在下次使用时换建。 */
 export async function agentUsesBackgroundWorkspace(paseo: PaseoApi, agent: PaseoAgent): Promise<boolean> {
@@ -56,11 +67,12 @@ export async function ensureSharedWorkspace(
   paseo: PaseoApi,
   rememberedId: string | null | undefined,
   directory: string,
-  title: string,
+  title: string | readonly string[],
   background = false,
   check: () => void = () => {},
 ): Promise<SharedWorkspaceLookup> {
   const dir = resolve(directory);
+  const titles = typeof title === "string" ? [title] : title;
   if (rememberedId) {
     const handle = paseo.workspaces.ref(rememberedId);
     const descriptor = await handle.refresh().catch((error) => {
@@ -73,28 +85,28 @@ export async function ensureSharedWorkspace(
       return { handle, remembered: true };
     }
   }
-  const found = await findWorkspaceByTitle(paseo, title, dir, background, check);
+  const found = await findWorkspaceByTitle(paseo, titles, dir, background, check);
   check();
   if (found) return { handle: paseo.workspaces.ref(found.id), remembered: false };
   try {
     const handle = await paseo.workspaces.create({
-      title,
+      title: titles[0]!,
       background,
       source: { kind: "directory", path: dir },
     });
     return { handle, remembered: false };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`shared workspace creation failed (directory ${dir}, title "${title}"): ${message}`, {
+    throw new Error(`shared workspace creation failed (directory ${dir}, title "${titles[0]}"): ${message}`, {
       cause: error,
     });
   }
 }
 
-/** 在活跃工作区里按「已解析标题 + 目录」找回;archiving 中的不算。翻页扫完全部列表。 */
+/** 在活跃工作区里按「已解析标题(任一候选) + 目录」找回;archiving 中的不算。翻页扫完全部列表。 */
 async function findWorkspaceByTitle(
   paseo: PaseoApi,
-  title: string,
+  titles: readonly string[],
   dir: string,
   background: boolean,
   check: () => void,
@@ -109,7 +121,7 @@ async function findWorkspaceByTitle(
       });
       check();
       const match = result.entries.find(
-        (entry) => !entry.archivingAt && entry.name === title && resolve(entry.workspaceDirectory) === dir
+        (entry) => !entry.archivingAt && titles.includes(entry.name) && resolve(entry.workspaceDirectory) === dir
           && (entry.background === true) === background,
       );
       if (match) return match;

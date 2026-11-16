@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  markdownPreview,
-  relativeTime,
-  threadStatus,
-  triggerSenderLabel,
-  watchdogNoteLabel,
-} from "../shared/labels.ts";
+import * as labels from "../shared/labels.ts";
+import { translator } from "../shared/i18n.ts";
+
+// 既有断言按简体中文书写;英文见 i18n.test.mjs。
+const zh = translator("zh-CN");
+const { markdownPreview, triggerSenderLabel } = labels;
+const relativeTime = (iso, now) => labels.relativeTime(iso, zh, now);
+const threadStatus = (thread, tickets, decisions) => labels.threadStatus(thread, tickets, decisions, zh);
+const watchdogNoteLabel = (note) => labels.watchdogNoteLabel(note, zh);
 import { NUMBER_LIMITS, SETTINGS_DEFAULTS, superagentSettings } from "../shared/settings.ts";
 
 const active = { state: "active", pendingTriggers: 0 };
