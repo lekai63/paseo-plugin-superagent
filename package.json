@@ -1,21 +1,55 @@
 {
-  "name": "paseo-plugin-superagent",
-  "private": true,
+  "name": "@0_0/paseo-plugin-superagent",
   "version": "0.1.0",
-  "description": "Router/Worker super-agent orchestration for Paseo: per-thread router sessions, ticket workers, thread subscriptions, watchdog",
+  "description": "Event-driven Router/Worker orchestration for Paseo: a lightweight Router per thread triages events, isolated Workers execute tickets, with IM triggers (Feishu, DingTalk, WeCom, WeChat, QQ) and a watchdog",
+  "keywords": [
+    "paseo",
+    "paseo-plugin",
+    "agent",
+    "orchestration",
+    "router",
+    "worker",
+    "feishu",
+    "dingtalk",
+    "wecom",
+    "wechat",
+    "qq"
+  ],
+  "license": "MIT",
+  "homepage": "https://cnb.cool/0_0/paseo/paseo-plugin-superagent",
+  "bugs": {
+    "url": "https://cnb.cool/0_0/paseo/paseo-plugin-superagent/-/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://cnb.cool/0_0/paseo/paseo-plugin-superagent.git"
+  },
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "files": [
     "paseo-plugin.json",
     "README.md",
+    "README-EN.md",
+    "OVERVIEW.md",
+    "OVERVIEW.*.md",
+    "LICENSE",
+    "docs/",
     "index.client.tsx",
     "index.server.ts",
     "client/",
     "server/",
-    "shared/"
+    "shared/",
+    "pi-extension/"
   ],
+  "publishConfig": {
+    "registry": "https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/"
+  },
   "scripts": {
     "test": "node --import ./tests/register-typescript.mjs --test tests/*.test.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run --ignore-scripts"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.15.0",
@@ -29,19 +63,12 @@
   },
   "dependencies": {
     "@getpaseo/client": "0.15.0",
-    "@larksuiteoapi/node-sdk": "^1.76.0",
+    "@larksuiteoapi/node-sdk": "1.76.0",
     "@modelcontextprotocol/node": "2.1.2",
     "@modelcontextprotocol/server": "2.4.0",
-    "@openclaw-china/dingtalk": "^2026.4.24",
-    "@openclaw-china/qqbot": "^2026.4.24",
-    "@openclaw-china/shared": "^2026.4.24",
-    "@openclaw-china/wechat-mp": "^2026.4.24",
-    "@openclaw-china/wecom": "^2026.4.24",
-    "@openclaw-china/wecom-app": "^2026.4.24",
-    "@openclaw-china/wecom-kf": "^2026.4.24",
-    "@wecom/aibot-node-sdk": "^1.0.7",
-    "dingtalk-stream": "^2.1.6-beta.1",
-    "qrcode-generator": "^2.0.4",
-    "zod": "^4.4.3"
+    "@wecom/aibot-node-sdk": "1.0.7",
+    "dingtalk-stream": "2.1.6-beta.1",
+    "qrcode-generator": "2.0.4",
+    "zod": "4.6.7"
   }
 }
