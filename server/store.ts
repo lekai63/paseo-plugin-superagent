@@ -38,11 +38,28 @@ export class SuperagentStore {
   private state: SuperagentState = emptyState();
   private writeChain: Promise<void> = Promise.resolve();
   private loaded = false;
+  private listeners = new Set<() => void>();
   /** 首次加载 promise:所有读状态的引擎路径都必须先 await 它,避免与磁盘加载竞态。 */
   readonly ready: Promise<void>;
 
   constructor() {
-    this.ready = this.load();
+    this.ready = this.load().then(() => this.changed());
+  }
+
+  /** 内存状态每次替换后同步回调(落盘之前);返回取消函数。 */
+  onChange(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private changed(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.error("[superagent] state change listener failed", error);
+      }
+    }
   }
 
   async load(): Promise<void> {
@@ -78,6 +95,7 @@ export class SuperagentStore {
     mutator(next);
     trim(next);
     this.state = next;
+    this.changed();
     const write = this.writeChain.then(() => persist(next));
     this.writeChain = write.catch((error) => {
       console.error("[superagent] state persist failed", error);
@@ -91,6 +109,7 @@ export class SuperagentStore {
     const next = { ...this.state };
     mutator(next);
     this.state = next;
+    this.changed();
   }
 
   async flush(): Promise<void> {

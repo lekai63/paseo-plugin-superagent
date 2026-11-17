@@ -8,7 +8,7 @@
     }
   },
   "requirements": {
-    "paseo": ">=0.15.0"
+    "paseo": ">=0.16.0"
   },
   "build": [
     [

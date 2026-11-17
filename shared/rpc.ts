@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { defineRpc } from "@getpaseo/plugin";
+import { defineRpc, defineSubscription } from "@getpaseo/plugin";
 import { SuperagentSnapshotSchema } from "./model";
 import { ChatTabsSchema } from "./chat-tabs";
 import { WeixinStatusSchema } from "./weixin";
@@ -51,6 +51,20 @@ export const superagentStateRpc = defineRpc({
     omitRecords: z.boolean().optional(),
   }),
   output: SuperagentSnapshotSchema,
+});
+
+/**
+ * 状态变化推送(Paseo 0.16 插件订阅):引擎状态(落盘记录、评估/巡检进行中、设置)一变,
+ * 合并一小段时间后推一次新版本号;订阅建立(含断线重连后重新订阅)时先推一次当前版本。
+ * 事件只带版本号,界面据此让 superagent.state 的缓存失效、按需重读,不再每 3 秒轮询。
+ */
+export const superagentStateEventsSubscription = defineSubscription({
+  name: "superagent.state_events",
+  input: z.object({
+    /** 客户端重新订阅用的序号(订阅被关闭后换个值再订一次);插件不读取。 */
+    attempt: z.number().int().nonnegative().optional(),
+  }),
+  event: z.object({ revision: z.string() }),
 });
 
 export const superagentForceEvalRpc = defineRpc({

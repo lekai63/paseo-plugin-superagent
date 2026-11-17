@@ -37,6 +37,10 @@ export const settings = {
     worktree: "Per-ticket worktree",
     shared: "Shared directory",
   },
+  workerBackground: {
+    label: "Run Workers in the background",
+    hint: "Workers stay out of Paseo's tabs, default lists and notifications; open them from the Superagent conversation. A per-ticket worktree workspace becomes a background workspace too. Applies to new and retried Workers",
+  },
   model: {
     title: "Model",
     info: "Pick from the daemon's provider snapshot (the same source used for startup validation). The model id is carried over from the option as-is, so there are no backslash-escaping mistakes or typos. If the list can't be loaded, you can enter provider or provider/model by hand. When left empty, the choice is automatic in the order claude → codex → opencode.",

@@ -471,6 +471,11 @@ export function emptyState(): SuperagentState {
 
 /** 面向 UI 的状态快照(RPC 出参),带计数与裁剪。 */
 export const SuperagentSnapshotSchema = z.object({
+  /**
+   * 引擎状态版本(进程启动标识 + 自增序号),与 superagent.state_events 推送的版本对照:
+   * 推送的版本与缓存快照相同就不必重新读取。旧 daemon 不带。
+   */
+  revision: z.string().nullish(),
   configured: z.boolean(),
   workingDir: z.string(),
   /** Worker 基础目录的问题(如 worktree 隔离但不是 git 仓库);可用时为空。 */

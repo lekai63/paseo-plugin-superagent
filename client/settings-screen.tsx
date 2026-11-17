@@ -279,6 +279,12 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             onValueChange={(value) => set("workerIsolation", value)}
             disabled={disabled}
           />
+          <SwitchField
+            {...field}
+            name="workerBackground"
+            label={t("settings.workerBackground.label")}
+            hint={t("settings.workerBackground.hint")}
+          />
         </SettingsCard>
       </SettingsSection>
 

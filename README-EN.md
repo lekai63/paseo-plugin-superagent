@@ -20,7 +20,7 @@ For the full feature description and design trade-offs, see [Architecture and de
 
 ## Requirements
 
-- Paseo daemon and all clients **0.15.0** or later, with plugins enabled on the daemon (**Settings → Plugins → Enable plugins**).
+- Paseo daemon and all clients **0.16.0** or later, with plugins enabled on the daemon (**Settings → Plugins → Enable plugins**).
 - Daemon host: Node.js 20 or later with `npm` on the `PATH` (used to install dependencies).
 - At least one working agent provider (for example claude, codex, opencode or pi). A lightweight model for the Router and a strong model for Workers works best.
 - `worktree` isolation requires the working directory to be inside a git repository; `shared` isolation does not need git.

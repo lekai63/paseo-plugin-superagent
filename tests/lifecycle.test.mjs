@@ -204,6 +204,7 @@ function fixture(t, status = "running", subscribed = true) {
   const store = {
     ready: Promise.resolve(), get: () => state,
     update: async (mutate) => { mutate(state); return state; }, flush: async () => {},
+    onChange: () => () => {},
   };
   const values = {
     ...SETTINGS_DEFAULTS, workingDir: "/mock/repo", routerProvider: "codex/test", workerProvider: "codex/test",
@@ -1285,6 +1286,27 @@ test("a renamed worktree branch is read back from the created workspace", async 
   f.controls.workspaceBranch = "superagent/test-ticket-2";
   await f.engine.startTicket("ticket");
   assert.equal(f.ticket.branchName, "superagent/test-ticket-2");
+});
+
+test("Workers always pass an explicit background flag that follows the setting", async (t) => {
+  // Omitted, Paseo 0.16 lets a child inherit its parent Router's own background flag.
+  const visible = fixture(t, "pending");
+  await visible.engine.startTicket("ticket");
+  assert.equal(visible.calls.workerCreates[0].background, false);
+  assert.equal(visible.calls.workspaceCreateOptions[0].background, false);
+
+  const hidden = fixture(t, "pending");
+  hidden.values.workerBackground = true;
+  await hidden.engine.startTicket("ticket");
+  assert.equal(hidden.calls.workerCreates[0].background, true);
+  assert.equal(hidden.calls.workspaceCreateOptions[0].background, true, "the ticket's own worktree workspace is hidden too");
+
+  const shared = fixture(t, "pending");
+  shared.values.workerBackground = true;
+  shared.values.workerIsolation = "shared";
+  await shared.engine.startTicket("ticket");
+  assert.equal(shared.calls.workerCreates[0].background, true);
+  assert.equal(shared.calls.workspaceCreateOptions[0].background, false, "the persistent shared workspace stays an ordinary workspace");
 });
 
 test("steering a ticket that has no worker yet keeps the steer as a pending action", async (t) => {
@@ -2986,6 +3008,45 @@ test("waiting Worker retirement protects cross-thread messages, live runs and re
     assert.equal(f.ticket.status, "waiting");
     assert.equal(f.calls.archives.length, 0);
   }
+});
+
+test("a waiting Worker that left background work running is not retired until the work stops", async t => {
+  const f = fixture(t, "waiting");
+  f.ticket.ownsWorkspace = false;
+  let count = 2;
+  f.ref("worker").refresh = async () => ({
+    agent: { status: "idle", archivedAt: null, updatedAt: oldTime, pendingPermissions: [], backgroundWork: { count } },
+  });
+  await f.engine.expireIdleWorker("ticket");
+  assert.equal(f.ticket.status, "waiting");
+  assert.equal(f.ticket.workerAgentId, "worker");
+  assert.deepEqual(f.calls.archives, []);
+
+  count = 0;
+  await f.engine.expireIdleWorker("ticket");
+  assert.equal(f.ticket.status, "completed");
+  assert.equal(f.ticket.workerAgentId, null);
+  assert.deepEqual(f.calls.archives, ["worker"]);
+});
+
+test("state changes reach listeners once per burst, carrying the revision the snapshot reports", async t => {
+  const f = fixture(t, "running");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const before = f.engine.snapshot().revision;
+  const pushed = [];
+  const off = f.engine.onStateChange((revision) => pushed.push(revision));
+  f.engine.markChanged();
+  f.engine.markChanged();
+  assert.deepEqual(pushed, []);
+  t.mock.timers.tick(150);
+  assert.equal(pushed.length, 1);
+  assert.notEqual(pushed[0], before);
+  assert.equal(pushed[0], f.engine.snapshot().revision);
+
+  off();
+  f.engine.markChanged();
+  t.mock.timers.tick(150);
+  assert.equal(pushed.length, 1, "a removed listener is not called");
 });
 
 test("ordinary idle threads close automatically and new intake reactivates retained history", async t => {

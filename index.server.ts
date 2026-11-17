@@ -33,6 +33,7 @@ import {
   superagentRetryImDeliveryRpc,
   superagentSaveChatTabsRpc,
   superagentSetLocaleRpc,
+  superagentStateEventsSubscription,
   superagentStateRpc,
   superagentStatFilesRpc,
   superagentUnsubscribeRpc,
@@ -72,6 +73,19 @@ export default function contribute(server: PluginServerContext) {
 
   server.handle(superagentDispatchRpc, withPrime(createDispatchHandler(engine)));
   server.handle(superagentStateRpc, withPrime(createStateHandler(engine)));
+  // 状态变化推送(Paseo 0.16 插件订阅):先推当前版本(新订阅与断线重订都据此补读),
+  // 之后每次变化推新版本。handler 必须同步返回——返回 promise 时它一结束订阅就会关闭。
+  server.handle(superagentStateEventsSubscription, (_input, { paseo, push, signal }) => {
+    engine.prime(paseo);
+    const send = (revision: string) => {
+      push({ revision }).catch((error: unknown) => {
+        if (!signal.aborted) console.error("[superagent] state event push failed", error);
+      });
+    };
+    const off = engine.onStateChange(send);
+    signal.addEventListener("abort", off, { once: true });
+    send(engine.revision);
+  });
   server.handle(superagentForceEvalRpc, withPrime(createForceEvalHandler(engine)));
   server.handle(superagentCancelTicketRpc, withPrime(createCancelTicketHandler(engine)));
   server.handle(superagentRetryTicketRpc, withPrime(createRetryTicketHandler(engine)));

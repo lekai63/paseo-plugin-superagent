@@ -104,7 +104,7 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 14,
+  version: 15,
   schema: z.object({
     /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
     routerProvider: z.string().trim().max(120).default(""),
@@ -126,6 +126,12 @@ export const superagentSettings = defineSettings({
     workingDir: z.string().trim().max(1024).default(""),
     /** Worker 隔离方式:worktree 独立工作区,或共享 workingDir 的目录工作区。 */
     workerIsolation: z.enum(["worktree", "shared"]).default("worktree"),
+    /**
+     * Worker 建成后台 agent(Paseo 0.16):不进 Paseo 的标签页、默认列表与通知,
+     * 在本插件对话页按 Ticket 打开;worktree 隔离时 Ticket 独占的工作区也建成后台工作区。
+     * 只影响新建(含重试)的 Worker,已有会话不变。
+     */
+    workerBackground: z.boolean().default(false),
     /** 触发积攒窗口:窗口内同线程触发合并进一次 Router 评估(批处理)。 */
     evalBatchMs: boundedInt("evalBatchMs", 1500),
     /** Worker 单轮运行上限,超时看门狗中断并判失败。 */
@@ -237,7 +243,8 @@ export const superagentSettings = defineSettings({
    * v11 → v12:新增 routerThinkingOptionId/workerThinkingOptionId 与档位 thinkingOptionId
    * (留空不传,回落 provider 默认,行为与旧版一致);
    * v12 → v13:新增 imInboxDir(留空 = 默认收件目录,行为与旧版一致);
-   * v13 → v14:新增 Router 评估/空闲、Thread 空闲与 Worker 待命超时。
+   * v13 → v14:新增 Router 评估/空闲、Thread 空闲与 Worker 待命超时;
+   * v14 → v15:新增 workerBackground(默认关闭,Worker 照旧显示在 Paseo 中)。
    */
   migrate: (values) => values,
 });

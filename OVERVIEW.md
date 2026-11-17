@@ -12,7 +12,7 @@ Superagent turns Paseo into an event-driven orchestrator. Each active conversati
 
 ## Setup
 
-- Requires Paseo 0.15.0 or later on the daemon and every client, and Node.js 20 or later with npm on the daemon host.
+- Requires Paseo 0.16.0 or later on the daemon and every client, and Node.js 20 or later with npm on the daemon host.
 - Open **Settings → Plugins → Superagent** and set the working directory, an absolute path on the daemon host. `worktree` isolation needs it to be inside a git repository; `shared` isolation does not.
 - Pick providers and models for the Router and the default Worker, or leave them empty to use the first available one (claude, then codex, then opencode, then any other).
 - Each IM channel is off by default. Enabling one needs that platform's bot credentials and an allowlist of senders or chats; a channel with an empty allowlist does not start. WeChat logs in by scanning a QR code shown in settings.

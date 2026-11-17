@@ -12,7 +12,7 @@ Superagent 让 Paseo 成为事件驱动的编排器。每个活跃对话有一�
 
 ## 配置
 
-- daemon 与各端客户端需要 Paseo 0.15.0 或更新版本;daemon 主机需要 Node.js 20 或更新版本及 npm。
+- daemon 与各端客户端需要 Paseo 0.16.0 或更新版本;daemon 主机需要 Node.js 20 或更新版本及 npm。
 - 打开 **Settings → Plugins → Superagent**,填写工作目录(daemon 主机上的绝对路径)。`worktree` 隔离要求它位于 git 仓库内,`shared` 隔离不需要。
 - 为 Router 与默认 Worker 选择 provider 与模型;留空时按 claude → codex → opencode → 其他的顺序自动选用可用的 provider。
 - 各 IM 通道默认关闭。开启时需要对应平台的机器人凭据,以及发送者或会话白名单;白名单为空的通道不会启动。微信通过扫描设置页里的二维码登录。

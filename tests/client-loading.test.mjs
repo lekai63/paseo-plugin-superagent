@@ -36,7 +36,7 @@ before(async () => {
   ]);
 });
 
-function load(code, platform, { turbo = null, legacy = null, storage = null, paseo = null } = {}) {
+function load(code, platform, { turbo = null, legacy = null, storage = null, paseo = null, modules: overrides = {} } = {}) {
   const reads = [];
   const native = { Platform: { OS: platform } };
   Object.defineProperties(native, {
@@ -69,6 +69,7 @@ function load(code, platform, { turbo = null, legacy = null, storage = null, pas
     "@tanstack/react-query": { useQuery: (options) => options },
     zod,
   };
+  for (const [name, value] of Object.entries(overrides)) modules[name] = { ...modules[name], ...value };
   const sandbox = {
     module: { exports: {} },
     require(name) { assert.ok(name in modules, `Unexpected runtime dependency: ${name}`); return modules[name]; },
@@ -102,6 +103,70 @@ test("plugin Router status includes background sessions, filters archived sessio
   const query = exports.useRouterAgents("host", "remembered", true);
   const agents = await query.queryFn();
   assert.deepEqual(Array.from(agents, (agent) => agent.id), ["hidden", "remembered"]);
+});
+
+// Exported constants are not read back from the bundle: the Hermes pass above evaluates entry
+// exports before module-level constants are initialized. Only functions survive it.
+
+/** useSuperagentState 的运行环境:可选的宿主 useSubscription,记录缓存失效。 */
+function stateHook({ subscription = null, cachedRevision = null } = {}) {
+  const invalidated = [];
+  const subscribed = [];
+  let onEvent = null;
+  const client = { useRpc: () => async () => ({}) };
+  if (subscription) {
+    client.useSubscription = (contract, input, handler) => {
+      subscribed.push({ name: contract.name, input });
+      onEvent = handler;
+      return { status: subscription };
+    };
+  }
+  const { exports } = load(queryBundle, "web", {
+    modules: {
+      react: { useRef: (value) => ({ current: value }), useState: (value) => [value, () => {}] },
+      "@tanstack/react-query": {
+        useQueryClient: () => ({
+          getQueryData: () => (cachedRevision ? { revision: cachedRevision } : undefined),
+          invalidateQueries: async (options) => { invalidated.push(options); },
+        }),
+      },
+      "@getpaseo/plugin/client": client,
+    },
+  });
+  // The bundle runs in another realm: compare plain JSON copies of what it hands back.
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  return {
+    exports, push: (revision) => onEvent({ revision }),
+    get invalidated() { return plain(invalidated); },
+    get subscribed() { return plain(subscribed); },
+  };
+}
+
+test("without the 0.16 subscription hook (older app) the state keeps polling every 3 seconds", () => {
+  const { exports } = stateHook();
+  assert.equal(exports.useSuperagentState("host").refetchInterval, 3000);
+});
+
+test("a live state subscription refetches only for a newer revision and slows polling to a fallback", () => {
+  const harness = stateHook({ subscription: "live", cachedRevision: "boot.4" });
+  const query = harness.exports.useSuperagentState("host", { threadId: "t1" });
+  assert.equal(query.refetchInterval, 30_000);
+  assert.deepEqual(harness.subscribed, [{ name: "superagent.state_events", input: { attempt: 0 } }]);
+  harness.push("boot.4");
+  assert.deepEqual(harness.invalidated, [], "the cache already holds that revision");
+  harness.push("boot.5");
+  assert.deepEqual(harness.invalidated, [{ queryKey: ["superagent", "state", "host", { threadId: "t1" }], exact: true }]);
+});
+
+test("a closed or failed state subscription falls back to 3-second polling, and a disabled query ignores pushes", () => {
+  for (const status of ["connecting", "closed", "error"]) {
+    const harness = stateHook({ subscription: status });
+    assert.equal(harness.exports.useSuperagentState("host").refetchInterval, 3000);
+  }
+  const disabled = stateHook({ subscription: "live" });
+  disabled.exports.useSuperagentState("host", {}, false);
+  disabled.push("boot.9");
+  assert.deepEqual(disabled.invalidated, []);
 });
 
 for (const platform of ["ios", "android", "web"]) {

@@ -1,21 +1,75 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { usePaseo, useRpc } from "@getpaseo/plugin/client";
+import { usePaseo, useRpc, useSubscription } from "@getpaseo/plugin/client";
 import type { PaseoAgent } from "@getpaseo/client";
 import type { RpcInput } from "@getpaseo/plugin";
-import { superagentStateRpc } from "../shared/rpc";
-import { ROUTER_AGENT_LABEL, ROUTER_AGENT_LABEL_VALUE } from "../shared/model";
+import { superagentStateEventsSubscription, superagentStateRpc } from "../shared/rpc";
+import { ROUTER_AGENT_LABEL, ROUTER_AGENT_LABEL_VALUE, type SuperagentSnapshot } from "../shared/model";
 import type { ExecutionAgent } from "../shared/execution";
 
 /** 操作后按此前缀失效;具体快照再按宿主隔离。 */
 export const STATE_QUERY_KEY = ["superagent", "state"] as const;
 
+/** 没有实时推送时(旧版 app、订阅断开)的轮询间隔。 */
+export const STATE_POLL_MS = 3000;
+/** 推送在线时的兜底轮询:只刷新不推送的字段(如程序看门狗时间)。 */
+export const STATE_LIVE_POLL_MS = 30_000;
+/** 订阅被关闭(插件重载、daemon 重启)后隔多久重新订阅;期间按 STATE_POLL_MS 轮询。 */
+export const STATE_RESUBSCRIBE_MS = 5000;
+
+type StateRevisionListener = (revision: string) => void;
+
+/**
+ * 订阅 superagent.state_events,返回推送是否在线。宿主的 useSubscription 在订阅关闭后
+ * 不会自动重订(只在输入变化时重订),这里换一个 attempt 值重新订阅。
+ */
+function useLiveStateEvents(onRevision: StateRevisionListener): boolean {
+  const [attempt, setAttempt] = useState(0);
+  const state = useSubscription(superagentStateEventsSubscription, { attempt }, (event) => onRevision(event.revision));
+  const ended = state.status === "closed" || state.status === "error";
+  useEffect(() => {
+    if (!ended) return;
+    const timer = setTimeout(() => setAttempt((value) => value + 1), STATE_RESUBSCRIBE_MS);
+    return () => clearTimeout(timer);
+  }, [ended, attempt]);
+  return state.status === "live";
+}
+
+function usePolledStateEvents(): boolean {
+  return false;
+}
+
+/**
+ * 0.16 之前的 app 没有 useSubscription(宿主提供的 SDK 模块里取不到):退回轮询。
+ * 模块加载时就定下用哪个实现,同一组件每次渲染调用的 hook 不变。
+ */
+const useStateEvents: (onRevision: StateRevisionListener) => boolean =
+  typeof useSubscription === "function" ? useLiveStateEvents : usePolledStateEvents;
+
 export function useSuperagentState(hostId: string, input: RpcInput<typeof superagentStateRpc> = {}, enabled = true) {
   const fetchState = useRpc(superagentStateRpc);
+  const queryClient = useQueryClient();
+  const queryKey = [...STATE_QUERY_KEY, hostId, input] as const;
+  const keyRef = useRef(queryKey);
+  keyRef.current = queryKey;
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+  const live = useStateEvents((revision) => {
+    try {
+      if (!enabledRef.current) return;
+      const key = keyRef.current;
+      // 缓存已是推送的版本(刚读过)就不重读;旧 daemon 的快照不带版本,一律重读。
+      if (queryClient.getQueryData<SuperagentSnapshot>(key)?.revision === revision) return;
+      void queryClient.invalidateQueries({ queryKey: key, exact: true });
+    } catch (error) {
+      // 推送回调在宿主的消息分发里运行,抛错会被当作未捕获异常;宁可丢一次刷新(下次轮询补上)。
+      console.warn("[superagent] state event handler failed", error);
+    }
+  });
   return useQuery({
-    queryKey: [...STATE_QUERY_KEY, hostId, input],
+    queryKey,
     queryFn: () => fetchState(input),
-    refetchInterval: 3000,
+    refetchInterval: live ? STATE_LIVE_POLL_MS : STATE_POLL_MS,
     enabled,
   });
 }

@@ -148,6 +148,12 @@ export interface WorkerLaunchEnv {
   instructionFiles: string[];
   /** shared 隔离时 Worker 落座的持久共享工作区;worktree 隔离为 null。 */
   sharedWorkspace: PaseoWorkspaceHandle | null;
+  /**
+   * 建成后台 agent(Paseo 0.16):不进标签页、默认列表、父会话的 Subagents 轨道与通知,
+   * 仍可按 id 打开;worktree 隔离时 Ticket 独占的工作区一并建成后台工作区。
+   * 总是显式传给 daemon:省略时子 agent 会继承父会话(Router)自身的后台标志。
+   */
+  background: boolean;
 }
 
 type WorkspaceHandle = Awaited<ReturnType<PaseoApi["workspaces"]["create"]>>;
@@ -191,7 +197,7 @@ export async function launchWorker(
     if (env.isolation === "worktree" && branchName) {
       workspace = await paseo.workspaces.create({
         title: ticket.title,
-        background: false,
+        background: env.background,
         source: {
           kind: "worktree",
           cwd: env.workingDir,
@@ -226,6 +232,7 @@ export async function launchWorker(
       title: ticket.title,
       prompt: composeWorkerPrompt(ticket, env.workingDir, env.isolation, env.instructionFiles),
       labels: { [TICKET_LABEL]: ticket.id },
+      background: env.background,
       ...(routerAgentId ? { parent: routerAgentId } : {}),
     });
     const actualBranch = branchName ? await resolveActualBranch(workspace, branchName) : null;

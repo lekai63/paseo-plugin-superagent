@@ -20,7 +20,7 @@ Superagent 在 [Paseo](https://paseo.sh) 之上实现事件驱动的「超级 ag
 
 ## 运行要求
 
-- Paseo daemon 与各端客户端 **0.15.0** 或更新版本,并已在 daemon 上开启插件(**Settings → Plugins → Enable plugins**)。
+- Paseo daemon 与各端客户端 **0.16.0** 或更新版本,并已在 daemon 上开启插件(**Settings → Plugins → Enable plugins**)。
 - daemon 主机:Node.js 20 或更新版本,`npm` 在 PATH 上(安装依赖用)。
 - 至少一个可用的 agent provider(如 claude、codex、opencode、pi)。Router 配轻量模型、Worker 配强模型最划算。
 - `worktree` 隔离要求工作目录位于 git 仓库内;`shared` 隔离不需要 git。

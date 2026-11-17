@@ -102,6 +102,8 @@ const CHATTER_CONTEXT = 5;
 /** 引擎启动前到达(IM 先连上)的触发备注;引擎启动后据此补直通。 */
 const QUEUED_BEFORE_START = "queued before the engine started";
 const PREFERRED_PROVIDERS = ["claude", "codex", "opencode"];
+/** 状态变化推送的合并窗口:一次评估里的多次落盘只推一个版本。 */
+const STATE_EVENT_COALESCE_MS = 150;
 
 function clearWorkerRequests(state: SuperagentState, ticket: Ticket): void {
   ticket.pendingRequests = [];
@@ -238,6 +240,11 @@ export class SuperagentEngine {
   private replySink: ReplySink | null = null;
   private settingsValues: SuperagentSettingsValues = SETTINGS_DEFAULTS;
   private settingsReady: Promise<void>;
+  /** 状态版本:进程启动标识区分插件重启前后的序号。 */
+  private readonly bootId = newId("rev");
+  private revisionSeq = 0;
+  private stateListeners = new Set<(revision: string) => void>();
+  private stateEventTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** IM 触发源的答复外发通道,由 index.server 在启动 source 时注入。 */
   setReplySink(sink: ReplySink | null): void {
@@ -255,16 +262,49 @@ export class SuperagentEngine {
     private readonly store: SuperagentStore,
     settings: PluginSettings<typeof superagentSettings.schema>,
   ) {
+    store.onChange(() => this.markChanged());
     settings.subscribe((state) => {
       if (state.status !== "ready") return;
       this.settingsValues = state.values;
+      this.markChanged();
       void this.refreshWorkingDirIssue();
     });
     this.settingsReady = settings.read().then((state) => {
       if (state.status !== "ready") return;
       this.settingsValues = state.values;
+      this.markChanged();
       void this.refreshWorkingDirIssue();
     }).catch((error) => { console.error("[superagent] initial settings read failed", error); });
+  }
+
+  /** 当前状态版本;snapshot 带同一个值,界面据此判断缓存是否已是最新。 */
+  get revision(): string {
+    return `${this.bootId}.${this.revisionSeq}`;
+  }
+
+  /**
+   * 订阅状态变化(superagent.state_events 的来源):落盘记录、评估/巡检进行中与设置一变,
+   * 合并 STATE_EVENT_COALESCE_MS 后回调一次最新版本。返回取消函数。
+   */
+  onStateChange(listener: (revision: string) => void): () => void {
+    this.stateListeners.add(listener);
+    return () => this.stateListeners.delete(listener);
+  }
+
+  private markChanged(): void {
+    this.revisionSeq += 1;
+    if (this.stateEventTimer || this.stateListeners.size === 0) return;
+    this.stateEventTimer = setTimeout(() => {
+      this.stateEventTimer = null;
+      const revision = this.revision;
+      for (const listener of this.stateListeners) {
+        try {
+          listener(revision);
+        } catch (error) {
+          console.error("[superagent] state listener failed", error);
+        }
+      }
+    }, STATE_EVENT_COALESCE_MS);
   }
 
   /** 重新检查 Worker 基础目录并缓存结果(snapshot 同步读取缓存)。 */
@@ -277,8 +317,10 @@ export class SuperagentEngine {
     });
     // 检查期间设置可能已变化:只认与当前设置一致的结果。
     if (key === this.workingDirKey()) {
+      const changed = this.workingDirIssue !== issue;
       this.workingDirIssue = issue;
       this.workingDirCheck = { key, at: Date.now() };
+      if (changed) this.markChanged();
     }
     return issue;
   }
@@ -288,6 +330,7 @@ export class SuperagentEngine {
     this.paseo = paseo;
     if (this.primed) return;
     this.primed = true;
+    this.markChanged();
     console.log("[superagent] engine primed, starting watchdog");
     void this.recover();
     this.watchdogTimer = setInterval(() => {
@@ -305,6 +348,9 @@ export class SuperagentEngine {
   async stop(): Promise<void> {
     if (this.watchdogTimer) clearInterval(this.watchdogTimer);
     this.watchdogTimer = null;
+    if (this.stateEventTimer) clearTimeout(this.stateEventTimer);
+    this.stateEventTimer = null;
+    this.stateListeners.clear();
     for (const timer of this.batchTimers.values()) clearTimeout(timer);
     this.batchTimers.clear();
     this.watchedTickets.clear();
@@ -811,6 +857,7 @@ export class SuperagentEngine {
     this.evalInFlight = true;
     this.currentEvalThread = next;
     this.evalQueued.delete(next);
+    this.markChanged();
     try {
       await this.runEval(next);
     } catch (error) {
@@ -839,6 +886,7 @@ export class SuperagentEngine {
     } finally {
       this.evalInFlight = false;
       this.currentEvalThread = null;
+      this.markChanged();
       if (this.evalQueued.size > 0) void this.drainEvalQueue();
     }
   }
@@ -1556,6 +1604,7 @@ export class SuperagentEngine {
           this.settingsValues.workerIsolation === "shared"
             ? await this.sharedWorkspaceFor(workingDir, custom && current.profile ? current.profile : workspaceTitles(DEFAULT_WORKSPACE_TITLE))
             : null,
+        background: this.settingsValues.workerBackground,
       };
       const launch = await launchWorker(
         paseo,
@@ -1897,6 +1946,9 @@ export class SuperagentEngine {
       }
       if (!eligible() || ticket.workerAgentId !== agentId) return;
       if (live && !live.agent.archivedAt && (live.agent.status === "running" || live.agent.status === "initializing" || live.agent.pendingPermissions?.length)) return;
+      // Paseo 0.16 reports shells and monitors a Worker left running after its turn: it is not idle
+      // yet, so expiry waits. A retirement already recorded before a restart still finishes.
+      if (live && !live.agent.archivedAt && !ticket.retireRequested && (live.agent.backgroundWork?.count ?? 0) > 0) return;
       // The retirement intent survives reloads. No future intake may revive this Worker.
       await this.store.update(() => {
         ticket.status = "completed";
@@ -1939,6 +1991,7 @@ export class SuperagentEngine {
     const due = !last || Date.now() - Date.parse(last) >= this.settingsValues.watchdogIntervalMin * 60_000;
     if (!force && !due) return;
     this.patrolInFlight = true;
+    this.markChanged();
     try {
       await this.runPatrol();
     } catch (error) {
@@ -1947,6 +2000,7 @@ export class SuperagentEngine {
       throw error;
     } finally {
       this.patrolInFlight = false;
+      this.markChanged();
     }
   }
 
@@ -2995,6 +3049,7 @@ export class SuperagentEngine {
         };
       });
     return {
+      revision: this.revision,
       configured: Boolean(settings.workingDir),
       workingDir: settings.workingDir,
       workingDirIssue: this.cachedWorkingDirIssue(),

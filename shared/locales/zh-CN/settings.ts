@@ -38,6 +38,10 @@ export const settings: Translation<typeof en> = {
     worktree: "独立 worktree",
     shared: "共享目录",
   },
+  workerBackground: {
+    label: "Worker 后台运行",
+    hint: "Worker 不进 Paseo 的标签页、默认列表与通知,在 Superagent 对话页里打开;独立 worktree 的工作区也建成后台工作区。只影响新建与重试的 Worker",
+  },
   model: {
     title: "模型",
     info: "从 daemon 的 provider 快照中选取(与启动时校验同源),model id 由选项原样带入,不会出现反斜杠转义或笔误;清单读取失败时可退回手工填写 provider 或 provider/model。留空时按 claude → codex → opencode 的顺序自动选择。",
