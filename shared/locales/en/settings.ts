@@ -69,7 +69,7 @@ export const settings = {
   },
   profiles: {
     title: "Worker profiles",
-    info: "Run different kinds of tasks on different models. When dispatching, the Router picks a profile for each task based on its purpose description; if none is chosen, or a name that doesn't exist, the default Worker is used. Each profile can pick a mode offered by its provider (leave empty to keep the Paseo default) and can have its own working directory. Mode and model changes apply to new or retried Workers.",
+    info: "Run different kinds of tasks on different models. When dispatching, the Router picks a profile for each task based on its purpose description; if none is chosen, or a name that doesn't exist, the default Worker is used. Each profile can pick a mode offered by its provider (for pi the modes come from the pi-permission-modes extension; leave empty to keep the Paseo default) and can have its own working directory. Mode and model changes apply to new or retried Workers.",
     configured_one: "{{count}} profile configured",
     configured_other: "{{count}} profiles configured",
     onlyDefault: "Using only the default Worker",
@@ -260,6 +260,11 @@ export const settings = {
     missing: "This provider doesn't currently report the saved mode; check it or choose the Paseo default",
     none: "This provider reports no selectable modes; leave empty to keep the Paseo default",
     default_hint: "Leave empty to keep the Paseo default; the selected mode applies to new or retried Workers",
+    piLoading: "Reading pi's permission modes (pi-permission-modes); leave empty to use pi's own default mode",
+    piError: "Couldn't read pi's permission modes; only the Paseo default is available",
+    piMissing: "pi doesn't have pi-permission-modes installed, so Workers start on the Paseo default; install the extension to pick permission modes here",
+    piSaved: "{{value}} (saved, but pi-permission-modes doesn't define it right now; Workers start on pi's default mode)",
+    piHint: "Comes from pi-permission-modes; leave empty to use pi's default mode ({{defaultMode}}). The selected mode reaches new or retried Workers through PI_PERMISSION_MODE",
   },
   thinkingPicker: {
     manualHint: "{{hint}}; the current snapshot doesn't report thinking levels, so enter a level id by hand (such as high), or leave empty to use the provider default",

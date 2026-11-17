@@ -25,8 +25,9 @@ import {
   type WorkerProfile,
 } from "../shared/settings";
 import type { MessageKey, Translate } from "../shared/i18n";
+import { isPiProviderSelection, type PiPermissionModes } from "../shared/pi-modes";
 import { useT } from "./i18n";
-import { STATE_QUERY_KEY, useProviderSnapshot, type ProviderSnapshotEntry } from "./query";
+import { STATE_QUERY_KEY, usePiPermissionModes, useProviderSnapshot, type ProviderSnapshotEntry } from "./query";
 import { fontSize, radius, space } from "./ui";
 import { WeixinAccountPanel } from "./weixin-account";
 
@@ -55,6 +56,8 @@ const NUMBER_KEYS = Object.keys(NUMBER_LIMITS) as NumberSettingKey[];
 
 /** 模型选择的候选来源:daemon provider 快照的加载状态。 */
 type SnapshotState = { entries?: ProviderSnapshotEntry[]; status: "loading" | "ready" | "error" };
+/** pi 权限模式的候选来源:daemon 主机上 pi-permission-modes 扩展的读取状态。 */
+type PiModesState = { modes?: PiPermissionModes; status: "loading" | "ready" | "error" };
 
 function toForm(values: Values): FormValues {
   const form = { ...values } as Record<string, unknown>;
@@ -243,8 +246,16 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
       ? { status: "ready", entries: providers.data }
       : { status: "loading" };
 
+  // pi 的权限模式候选来自 daemon 主机的 pi-permission-modes(pi 本身不向 Paseo 上报模式)。
+  const piModesQuery = usePiPermissionModes(hostId);
+  const piModes: PiModesState = piModesQuery.isError
+    ? { status: "error" }
+    : piModesQuery.data
+      ? { status: "ready", modes: piModesQuery.data }
+      : { status: "loading" };
+
   const disabled = settings.saving;
-  const field = { form, errors, set, disabled, snapshot };
+  const field = { form, errors, set, disabled, snapshot, piModes };
 
   let saveLabel = t("settings.status.saved");
   if (dirty) saveLabel = errorCount > 0 ? t("settings.status.errors", { count: errorCount }) : t("settings.status.unsaved");
@@ -329,6 +340,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             disabled={disabled}
             error={errors.workerModeId ?? null}
             snapshot={snapshot}
+            piModes={piModes}
           />
           <ThinkingPicker
             label={t("settings.model.defaultWorkerThinking")}
@@ -395,6 +407,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             errors={profileErrors[index] ?? {}}
             disabled={disabled}
             snapshot={snapshot}
+            piModes={piModes}
             onChange={setProfile}
             onRemove={removeProfile}
           />
@@ -525,6 +538,7 @@ function ProfileCard({
   errors,
   disabled,
   snapshot,
+  piModes,
   onChange,
   onRemove,
 }: {
@@ -532,6 +546,7 @@ function ProfileCard({
   errors: ProfileErrors[number];
   disabled: boolean;
   snapshot: SnapshotState;
+  piModes: PiModesState;
   onChange(key: string, field: ProfileField, value: string): void;
   onRemove(key: string): void;
 }) {
@@ -566,6 +581,7 @@ function ProfileCard({
         disabled={disabled}
         error={errors.modeId ?? null}
         snapshot={snapshot}
+        piModes={piModes}
       />
       <ThinkingPicker
         label={t("settings.profiles.thinking")}
@@ -612,6 +628,7 @@ interface FieldContext {
   set<K extends keyof FormValues>(key: K, value: FormValues[K]): void;
   disabled: boolean;
   snapshot: SnapshotState;
+  piModes: PiModesState;
 }
 
 type TextFieldName = StringKey | NumberSettingKey;
@@ -683,9 +700,12 @@ function providerOptionLabel(entry: ProviderSnapshotEntry, t: Translate): string
   return label;
 }
 
-/** 模式来自 provider 快照(含 ACP 动态发现),空值始终表示不传 modeId。 */
+/**
+ * 模式来源:一般 provider 用快照里的 modes(含 ACP 动态发现);pi 家族改用
+ * pi-permission-modes 的清单(Paseo 的 pi provider 不上报模式)。空值始终表示不覆盖默认。
+ */
 function ModePicker({
-  label, providerSelection, value, onChange, disabled, error, snapshot,
+  label, providerSelection, value, onChange, disabled, error, snapshot, piModes,
 }: {
   label: string;
   providerSelection: string;
@@ -694,33 +714,51 @@ function ModePicker({
   disabled: boolean;
   error: string | null;
   snapshot: SnapshotState;
+  piModes: PiModesState;
 }) {
   const t = useT();
   const { provider } = splitProviderModel(providerSelection);
+  const isPi = isPiProviderSelection(providerSelection);
   const entry = snapshot.entries?.find((candidate) => candidate.provider === provider);
-  const modes = entry?.modes ?? [];
+  const piReady = piModes.status === "ready" ? piModes.modes : undefined;
+  const piAvailable = piReady?.available === true;
+  const modes = isPi ? (piReady?.available ? piReady.modes : []) : entry?.modes ?? [];
   const selected = modes.find((mode) => mode.id === value);
+  // 扩展未安装(或状态未知)时 pi 没有可选模式:显示「Paseo 默认」,Worker 也按默认启动。
+  const shownValue = isPi && (piReady ? !piAvailable : false) ? "" : value;
   const options = [
     { label: t("settings.modePicker.default"), value: "" },
     ...modes.map((mode) => ({ label: mode.label || mode.id, value: mode.id })),
-    ...(value && !selected ? [{ label: t("settings.modePicker.saved", { value }), value }] : []),
+    ...(shownValue && !selected ? [{ label: t("settings.modePicker.saved", { value: shownValue }), value: shownValue }] : []),
   ];
+  const piDefaultLabel =
+    piReady?.modes.find((mode) => mode.id === piReady.defaultModeId)?.label ?? piReady?.defaultModeId ?? "";
   const hint = !provider
     ? t("settings.modePicker.noProvider")
-    : snapshot.status === "loading" || entry?.status === "loading"
-      ? t("settings.modePicker.loading")
-      : snapshot.status === "error"
-        ? t("settings.modePicker.error")
-        : value && !selected
-          ? t("settings.modePicker.missing")
-          : modes.length === 0
-            ? t("settings.modePicker.none")
-            : selected?.description ?? t("settings.modePicker.default_hint");
+    : isPi
+      ? piModes.status === "loading"
+        ? t("settings.modePicker.piLoading")
+        : piModes.status === "error"
+          ? t("settings.modePicker.piError")
+          : !piAvailable
+            ? t("settings.modePicker.piMissing")
+            : shownValue && !selected
+              ? t("settings.modePicker.piSaved", { value: shownValue })
+              : t("settings.modePicker.piHint", { defaultMode: piDefaultLabel })
+      : snapshot.status === "loading" || entry?.status === "loading"
+        ? t("settings.modePicker.loading")
+        : snapshot.status === "error"
+          ? t("settings.modePicker.error")
+          : value && !selected
+            ? t("settings.modePicker.missing")
+            : modes.length === 0
+              ? t("settings.modePicker.none")
+              : (selected && "description" in selected ? selected.description : null) ?? t("settings.modePicker.default_hint");
   return (
     <SettingsSelect
       label={label}
       hint={hint}
-      value={value}
+      value={shownValue}
       options={options}
       onValueChange={onChange}
       disabled={disabled}

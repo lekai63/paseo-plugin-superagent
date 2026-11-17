@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import test from "node:test";
 import { SuperagentEngine } from "../server/engine.ts";
@@ -19,7 +22,31 @@ const PROVIDER_ENTRIES = [
     models: [{ id: "builtin:plan\\GLM-Flash", isDefault: false }, { id: "builtin:plan\\GLM", isDefault: true }],
     modes: [{ id: "ask" }, { id: "agent" }],
   },
+  { provider: "pi", enabled: true, status: "ready", models: [{ id: "sonnet", isDefault: true }], modes: [] },
 ];
+
+function installPiPermissionModes(dir, config) {
+  const packageDir = join(dir, "npm", "node_modules", "pi-permission-modes");
+  mkdirSync(packageDir, { recursive: true });
+  writeFileSync(join(packageDir, "package.json"), JSON.stringify({ name: "pi-permission-modes" }));
+  if (!config) return;
+  mkdirSync(join(dir, "permission-mode"), { recursive: true });
+  writeFileSync(join(dir, "permission-mode", "permission-mode.json"), JSON.stringify(config));
+}
+
+/** 临时 pi agent 目录:Paseo 与插件都按 PI_CODING_AGENT_DIR 解析,测试后恢复。 */
+function withPiAgentDir(t, setup) {
+  const dir = mkdtempSync(join(tmpdir(), "superagent-pi-"));
+  setup(dir);
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return dir;
+}
 
 function deferred() {
   let resolve, reject;
@@ -1634,6 +1661,45 @@ test("named profiles use only their own mode and retry picks up mode changes", a
   await f.engine.retryTicket("ticket");
   assert.equal(f.calls.workerCreates[3].config.provider, "codex/test");
   assert.equal(f.calls.workerCreates[3].config.modeId, "full-access");
+});
+
+test("pi worker modes are passed as PI_PERMISSION_MODE instead of modeId", async (t) => {
+  withPiAgentDir(t, (dir) => installPiPermissionModes(dir, {
+    defaultMode: "build",
+    cycleOrder: ["build", "yolo"],
+    modes: { build: { label: "Build" }, yolo: { label: "YOLO" } },
+  }));
+  const f = fixture(t, "pending");
+  f.values.workerProvider = "pi/sonnet";
+  f.values.workerModeId = "yolo";
+  await f.engine.startTicket("ticket");
+  const options = f.calls.workerCreates[0];
+  assert.equal(options.config.provider, "pi/sonnet");
+  assert.equal(Object.hasOwn(options.config, "modeId"), false, "pi providers reject modeId");
+  assert.deepEqual(options.env, { PI_PERMISSION_MODE: "yolo" });
+});
+
+test("pi workers fall back to Paseo defaults when pi-permission-modes is missing", async (t) => {
+  withPiAgentDir(t, () => {});
+  const f = fixture(t, "pending");
+  f.values.workerProvider = "pi/sonnet";
+  f.values.workerModeId = "yolo";
+  await f.engine.startTicket("ticket");
+  const options = f.calls.workerCreates[0];
+  assert.equal(Object.hasOwn(options.config, "modeId"), false);
+  assert.equal(Object.hasOwn(options, "env"), false);
+});
+
+test("a pi mode the extension no longer defines falls back to pi's default", async (t) => {
+  withPiAgentDir(t, (dir) => installPiPermissionModes(dir, {
+    defaultMode: "build",
+    modes: { build: { label: "Build" } },
+  }));
+  const f = fixture(t, "pending");
+  f.values.workerProvider = "pi/sonnet";
+  f.values.workerModeId = "review-only-in-old-config";
+  await f.engine.startTicket("ticket");
+  assert.equal(Object.hasOwn(f.calls.workerCreates[0], "env"), false);
 });
 
 test("unsupported worker modes remain pending with a useful error and create no workspace", async (t) => {

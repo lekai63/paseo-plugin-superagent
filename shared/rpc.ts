@@ -4,6 +4,7 @@ import { SuperagentSnapshotSchema } from "./model";
 import { ChatTabsSchema } from "./chat-tabs";
 import { WeixinStatusSchema } from "./weixin";
 import { FileKindSchema, FilePreviewSchema, MAX_STAT_PATHS } from "./file-preview";
+import { PiPermissionModesSchema } from "./pi-modes";
 
 /**
  * 插件 RPC 契约。客户端经 `useRpc` 调用;server/handlers.ts 实现同名 handler。
@@ -129,6 +130,16 @@ export const superagentStatFilesRpc = defineRpc({
   name: "superagent.stat_files",
   input: z.object({ paths: z.array(z.string().min(1).max(4096)).max(MAX_STAT_PATHS) }),
   output: z.object({ kinds: z.record(z.string(), FileKindSchema) }),
+});
+
+/**
+ * pi 的权限模式候选(pi-permission-modes 扩展)。设置页在 provider 选 pi 时用它
+ * 替代 provider 快照里的模式清单;未安装扩展时 available=false,回退 Paseo 默认。
+ */
+export const superagentPiModesRpc = defineRpc({
+  name: "superagent.pi_modes",
+  input: z.object({}),
+  output: PiPermissionModesSchema,
 });
 
 /** 微信通道状态:已保存的 bot 账号、扫码登录进度与长轮询状态。 */

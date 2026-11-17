@@ -7,6 +7,7 @@ import { Deadline, DeadlineError, bounded } from "./deadline";
 import type { PluginSettings } from "@getpaseo/plugin/server";
 import type { SuperagentStore } from "./store";
 import { followsOf, subscribesTo } from "../shared/execution";
+import { isPiProviderSelection } from "../shared/pi-modes";
 import { recentResults, threadResult } from "../shared/results";
 import { defaultChatTabs, pruneChatTabs, type ChatTabs } from "../shared/chat-tabs";
 import {
@@ -52,6 +53,7 @@ import {
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
 import type { ToolOutcome } from "./mcp-server";
 import { matchWorkerProfile, resolveProviderSelection, validateProviderMode, validateProviderThinkingOption } from "./providers";
+import { readPiPermissionModes } from "./pi-modes";
 import { BACKGROUND_WORKSPACE_TITLE, ensureSharedWorkspace, detachRoleChildren, workspaceTitles } from "./workspace";
 import { t } from "./i18n";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
@@ -3227,6 +3229,18 @@ export class SuperagentEngine {
   private async validateWorkerMode(role: string, provider: string, configured: string | undefined): Promise<string> {
     const modeId = configured?.trim() ?? "";
     if (!modeId) return "";
+    // pi provider 不上报模式:模式来自 pi-permission-modes 扩展,启动时经
+    // PI_PERMISSION_MODE 传入。扩展未安装(或模式已被删掉)时回退 Paseo 默认。
+    if (isPiProviderSelection(provider)) {
+      const pi = readPiPermissionModes();
+      if (!pi.available) return "";
+      if (pi.modes.some((mode) => mode.id === modeId)) return modeId;
+      console.warn(
+        `[superagent] ${role} mode "${modeId}" is not defined by pi-permission-modes; ` +
+          `using pi's default mode${pi.defaultModeId ? ` ("${pi.defaultModeId}")` : ""}`,
+      );
+      return "";
+    }
     let entries;
     try {
       const paseo = this.requirePaseo();

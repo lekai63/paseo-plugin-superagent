@@ -123,6 +123,7 @@ test("compact snapshot: queryFn expands thinkingSets and ThinkingPicker offers t
   };
 
   let queryOptions;
+  const piModesQuery = { data: { available: false, modes: [], defaultModeId: null } };
   const settings = {
     status: "ready", revision: 1, saving: false,
     values: superagentSettings.schema.parse({
@@ -151,11 +152,19 @@ test("compact snapshot: queryFn expands thinkingSets and ThinkingPicker offers t
       useTranslation: () => ({ locale: "zh-CN", t: (key) => key }),
       useSettings: () => settings,
       usePaseo: () => ({ providers: { snapshot: async () => compactPayload } }),
+      useRpc: () => async () => piModesQuery.data,
     },
     "@getpaseo/plugin/client/ui": Object.fromEntries(
       ["SettingsAction", "SettingsCard", "SettingsInput", "SettingsSection", "SettingsSelect", "SettingsSwitch", "TextInput"].map((n) => [n, n]),
     ),
-    "@tanstack/react-query": { useQueryClient: () => ({ getQueryData() {} }), useQuery: (options) => { queryOptions = options; return { data: undefined }; } },
+    "@tanstack/react-query": {
+      useQueryClient: () => ({ getQueryData() {} }),
+      useQuery: (options) => {
+        if (options.queryKey?.[1] === "pi-modes") return piModesQuery;
+        queryOptions = options;
+        return { data: undefined };
+      },
+    },
     zod: await import("zod"),
   };
   const sandbox = { module: { exports: {} }, require: (name) => modules[name] };
@@ -189,7 +198,7 @@ test("compact snapshot: queryFn expands thinkingSets and ThinkingPicker offers t
   // 设置屏在求值时解构了 useQuery,故原地改写同一模块对象而不是替换。
   const reactQuery = modules["@tanstack/react-query"];
   let query = { data: undefined };
-  reactQuery.useQuery = () => query;
+  reactQuery.useQuery = (options) => options.queryKey?.[1] === "pi-modes" ? piModesQuery : query;
   query = { data: expanded };
   const leaves = render();
   const selects = leaves.filter((node) => node.type === "SettingsSelect" && /thinking/i.test(String(node.props.label ?? "")));
@@ -245,11 +254,22 @@ test("ThinkingPicker falls back to free-text input when no catalog is reported",
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": { View: "View", Text: "Text" },
     "@getpaseo/plugin": await import("@getpaseo/plugin"),
-    "@getpaseo/plugin/client": { defineTranslations, useTranslation: () => ({ locale: "zh-CN", t: (key) => key }), useSettings: () => settings, usePaseo: () => ({}) },
+    "@getpaseo/plugin/client": {
+      defineTranslations,
+      useTranslation: () => ({ locale: "zh-CN", t: (key) => key }),
+      useSettings: () => settings,
+      usePaseo: () => ({}),
+      useRpc: () => async () => ({ available: false, modes: [], defaultModeId: null }),
+    },
     "@getpaseo/plugin/client/ui": Object.fromEntries(
       ["SettingsAction", "SettingsCard", "SettingsInput", "SettingsSection", "SettingsSelect", "SettingsSwitch", "TextInput"].map((n) => [n, n]),
     ),
-    "@tanstack/react-query": { useQueryClient: () => ({ getQueryData() {} }), useQuery: () => ({ data: entries }) },
+    "@tanstack/react-query": {
+      useQueryClient: () => ({ getQueryData() {} }),
+      useQuery: (options) => options.queryKey?.[1] === "pi-modes"
+        ? { data: { available: false, modes: [], defaultModeId: null } }
+        : { data: entries },
+    },
     zod: await import("zod"),
   };
   const sandbox = { module: { exports: {} }, require: (name) => modules[name] };

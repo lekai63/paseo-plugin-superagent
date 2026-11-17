@@ -22,17 +22,18 @@ before(async () => {
 const entries = [
   { provider: "codex", status: "ready", models: [{ id: "gpt", label: "GPT" }], modes: [{ id: "full-access", label: "Full Access" }] },
   { provider: "custom-acp", status: "ready", models: [{ id: "m", label: "M" }, { id: "n", label: "N" }], modes: [{ id: "ask", label: "Ask" }, { id: "agent", label: "Agent" }] },
+  { provider: "pi", status: "ready", models: [{ id: "sonnet", label: "Sonnet" }], modes: [] },
 ];
 
 // Render the real settings draft and callbacks with host UI components as leaves.
-function fixture({ query = { data: entries }, modeId = "" } = {}) {
+function fixture({ query = { data: entries }, modeId = "", piModes = { data: { available: false, modes: [], defaultModeId: null } }, values = null } = {}) {
   const saved = [];
   const slots = [];
   let cursor = 0;
   let queryOptions;
   const settings = {
     status: "ready", revision: 7, saving: false,
-    values: superagentSettings.schema.parse({
+    values: superagentSettings.schema.parse(values ?? {
       workerProvider: "codex/gpt", workerModeId: "full-access",
       workerProfiles: [{ name: "research", provider: "custom-acp/m", modeId, description: "research" }],
     }),
@@ -54,11 +55,19 @@ function fixture({ query = { data: entries }, modeId = "" } = {}) {
       useTranslation: () => ({ locale: "zh-CN", t: (key) => key }),
       useSettings: () => settings,
       usePaseo: () => ({ providers: { snapshot: async () => ({ entries: [], compactSnapshot: { entries } }) } }),
+      useRpc: () => async () => piModes.data,
     },
     "@getpaseo/plugin/client/ui": Object.fromEntries([
       "SettingsAction", "SettingsCard", "SettingsInput", "SettingsSection", "SettingsSelect", "SettingsSwitch", "TextInput",
     ].map((name) => [name, name])),
-    "@tanstack/react-query": { useQueryClient: () => ({ getQueryData() {} }), useQuery: (options) => { queryOptions = options; return query; } },
+    "@tanstack/react-query": {
+      useQueryClient: () => ({ getQueryData() {} }),
+      useQuery: (options) => {
+        if (options.queryKey?.[1] === "pi-modes") return piModes;
+        queryOptions = options;
+        return query;
+      },
+    },
     zod,
   };
   const sandbox = { module: { exports: {} }, require: (name) => { assert.ok(name in modules, name); return modules[name]; } };
@@ -115,4 +124,36 @@ test("discovery failures preserve a saved mode and let users reset to Paseo defa
   assert.ok(mode.options.some((option) => option.value === "agent"));
   mode.onValueChange("");
   assert.equal(f.field("模式(可选)").value, "");
+});
+
+test("a pi worker's modes come from pi-permission-modes instead of the empty provider snapshot", () => {
+  const f = fixture({
+    values: { workerProvider: "pi/sonnet" },
+    piModes: {
+      data: {
+        available: true,
+        modes: [{ id: "build", label: "Build" }, { id: "yolo", label: "YOLO" }],
+        defaultModeId: "build",
+      },
+    },
+  });
+  const mode = f.field("Worker 模式(可选)");
+  assert.deepEqual(Array.from(mode.options.map((option) => option.value)), ["", "build", "yolo"]);
+  assert.deepEqual(Array.from(mode.options.map((option) => option.label)), ["Paseo 默认", "Build", "YOLO"]);
+  assert.equal(mode.value, "");
+  assert.match(mode.hint, /来自 pi-permission-modes/);
+  mode.onValueChange("yolo");
+  f.render().find((node) => node.type === "SettingsAction" && node.props.actionLabel === "保存").props.onPress();
+  assert.equal(f.saved[0].values.workerModeId, "yolo");
+});
+
+test("pi falls back to the Paseo default when pi-permission-modes is not installed", () => {
+  const f = fixture({
+    values: { workerProvider: "pi/sonnet", workerModeId: "yolo" },
+    piModes: { data: { available: false, modes: [], defaultModeId: null } },
+  });
+  const mode = f.field("Worker 模式(可选)");
+  assert.deepEqual(Array.from(mode.options.map((option) => option.value)), [""]);
+  assert.equal(mode.value, "");
+  assert.match(mode.hint, /未安装 pi-permission-modes/);
 });

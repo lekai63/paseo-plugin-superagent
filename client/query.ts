@@ -3,7 +3,7 @@ import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { usePaseo, useRpc, useSubscription } from "@getpaseo/plugin/client";
 import type { PaseoAgent } from "@getpaseo/client";
 import type { RpcInput } from "@getpaseo/plugin";
-import { superagentStateEventsSubscription, superagentStateRpc } from "../shared/rpc";
+import { superagentPiModesRpc, superagentStateEventsSubscription, superagentStateRpc } from "../shared/rpc";
 import { ROUTER_AGENT_LABEL, ROUTER_AGENT_LABEL_VALUE, type SuperagentSnapshot } from "../shared/model";
 import type { ExecutionAgent } from "../shared/execution";
 
@@ -158,6 +158,21 @@ export function useProviderSnapshot(hostId: string) {
       }
       return entries;
     },
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
+/**
+ * pi 的权限模式候选:来自 daemon 主机上的 pi-permission-modes 扩展。
+ * provider 选 pi 时设置页用它替代 provider 快照(pi 上报的模式清单恒为空);
+ * 读不到时调用方回退「Paseo 默认」。
+ */
+export function usePiPermissionModes(hostId: string) {
+  const fetchModes = useRpc(superagentPiModesRpc);
+  return useQuery({
+    queryKey: ["superagent", "pi-modes", hostId],
+    queryFn: () => fetchModes({}),
     staleTime: 60_000,
     retry: 1,
   });

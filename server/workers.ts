@@ -3,6 +3,7 @@ import { bounded } from "./deadline";
 import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { Ticket } from "../shared/model";
 import { beijingDate, slugify, WATCHDOG_AGENT_LABEL_VALUE } from "../shared/model";
+import { isPiProviderSelection, PI_PERMISSION_MODE_ENV } from "../shared/pi-modes";
 import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 
 /**
@@ -137,7 +138,10 @@ export interface WorkerLaunch {
 
 /** Ticket 的执行环境:引擎按档位解析基础目录后传入,launchWorker 不再读全局设置。 */
 export interface WorkerLaunchEnv {
-  /** 显式选择的 provider 模式;省略时由 Paseo 决定。 */
+  /**
+   * 显式选择的模式;省略时由 Paseo 决定。其它 provider 走创建参数的 `modeId`;
+   * pi 家族走 pi-permission-modes 的 `PI_PERMISSION_MODE` 环境变量。
+   */
   modeId?: string;
   /** 显式选择的 thinking 档位;省略时回落 provider 默认(如 pi 的 defaultThinkingLevel)。 */
   thinkingOptionId?: string;
@@ -222,13 +226,18 @@ export async function launchWorker(
   }
 
   try {
+    // pi 的可选模式来自 pi-permission-modes 扩展,不是 Paseo 的 modeId(pi provider
+    // 不上报模式,传 modeId 会被创建参数校验直接拒绝):经扩展自己读取的
+    // PI_PERMISSION_MODE 环境变量传入,随 launchEnv 在恢复会话时沿用。
+    const piMode = isPiProviderSelection(provider) ? env.modeId : undefined;
     const agent = await workspace.agents.create({
       config: {
         provider,
-        ...(env.modeId ? { modeId: env.modeId } : {}),
+        ...(env.modeId && !piMode ? { modeId: env.modeId } : {}),
         ...(env.thinkingOptionId ? { thinkingOptionId: env.thinkingOptionId } : {}),
         systemPrompt: WORKER_SYSTEM_PROMPT,
       },
+      ...(piMode ? { env: { [PI_PERMISSION_MODE_ENV]: piMode } } : {}),
       title: ticket.title,
       prompt: composeWorkerPrompt(ticket, env.workingDir, env.isolation, env.instructionFiles),
       labels: { [TICKET_LABEL]: ticket.id },

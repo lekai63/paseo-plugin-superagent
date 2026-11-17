@@ -70,7 +70,7 @@ export const settings: Translation<typeof en> = {
   },
   profiles: {
     title: "Worker 档位",
-    info: "让不同类型的任务跑在不同模型上。Router 派发时按用途说明为每个任务选一个档位;没有选、或选了不存在的名字时用默认 Worker。每个档位可选择该 provider 提供的模式,留空沿用 Paseo 默认,也可另填专属工作目录。模式和模型的修改用于新建或重试的 Worker。",
+    info: "让不同类型的任务跑在不同模型上。Router 派发时按用途说明为每个任务选一个档位;没有选、或选了不存在的名字时用默认 Worker。每个档位可选择该 provider 提供的模式(pi 的模式来自 pi-permission-modes 扩展),留空沿用 Paseo 默认,也可另填专属工作目录。模式和模型的修改用于新建或重试的 Worker。",
     configured_other: "已配置 {{count}} 个档位",
     onlyDefault: "只使用默认 Worker",
     max: "最多 {{max}} 个档位",
@@ -260,6 +260,11 @@ export const settings: Translation<typeof en> = {
     missing: "该 provider 当前未上报已保存的模式,请核对或选择 Paseo 默认",
     none: "该 provider 未上报可选模式,留空沿用 Paseo 默认",
     default_hint: "留空沿用 Paseo 默认;所选模式用于新建或重试的 Worker",
+    piLoading: "正在读取 pi 的权限模式(pi-permission-modes);留空沿用 pi 自身的默认模式",
+    piError: "无法读取 pi 的权限模式清单,仅可使用 Paseo 默认",
+    piMissing: "pi 未安装 pi-permission-modes,Worker 按 Paseo 默认启动;安装该扩展后可在这里选择权限模式",
+    piSaved: "{{value}}(已保存,但 pi-permission-modes 当前没有该模式;Worker 按 pi 默认模式启动)",
+    piHint: "来自 pi-permission-modes;留空沿用 pi 的默认模式({{defaultMode}}),所选模式经 PI_PERMISSION_MODE 传给新建或重试的 Worker",
   },
   thinkingPicker: {
     manualHint: "{{hint}};当前快照未上报 thinking 档位,可手工填写档位 id(如 high),留空使用 provider 默认",
