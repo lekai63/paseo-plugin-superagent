@@ -24,6 +24,13 @@ export const settings = {
     errors_other: "{{count}} issues to fix",
     unsaved: "Unsaved changes",
   },
+  tabs: {
+    general: "Basics",
+    models: "Models",
+    rules: "Rules",
+    execution: "Execution",
+    im: "IM triggers",
+  },
   workingDir: {
     title: "Working directory",
     info: "The default base directory, shared by the Router and the default Worker. With shared-directory isolation, both live in a \"Default workspace\" created from this directory; with per-ticket worktree isolation, each Ticket gets its own branch cut from it. Custom Router rules are entered below.",

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSettings, type PluginSurfaceProps, type SettingsState } from "@getpaseo/plugin/client";
@@ -10,6 +10,7 @@ import {
   SettingsSelect,
   SettingsSwitch,
   TextInput,
+  type SettingsSectionProps,
 } from "@getpaseo/plugin/client/ui";
 import { MAX_SPECULATIVE_TICKETS, type SuperagentSnapshot } from "../shared/model";
 import {
@@ -32,12 +33,15 @@ import { fontSize, radius, space } from "./ui";
 import { WeixinAccountPanel } from "./weixin-account";
 
 /**
- * Settings → Plugins → Superagent。宿主负责标题栏、返回、滚动与居中栏宽;
- * 这里只按主题分节:工作目录 → 模型 → Router 规则 → Worker 档位 → 执行 → 主动与巡检 → 委派 → IM 触发源 → 保存。
+ * Settings → Plugins → Superagent。宿主负责标题栏、返回、滚动与居中栏宽,并按注册顺序把
+ * 多个设置页渲染成标签页:基础 → 模型 → 规则 → 执行 → IM 触发源。
  *
- * 所有修改先进草稿,统一保存(规则用于下一次评估,IM 配置变更会重连)。
- * 数值字段在草稿里是字符串,便于边输入边校验。
+ * 所有修改进同一份模块级草稿(切换标签页不会丢),统一保存(规则用于下一次评估,
+ * IM 配置变更会重连)。数值字段在草稿里是字符串,便于边输入边校验。
  */
+
+/** 宿主为每个 addSettingsScreen 渲染一个标签页;这里是本插件的标签页 id。 */
+export type SettingsTab = "general" | "models" | "rules" | "execution" | "im";
 
 type Values = SuperagentSettingsValues;
 type Ready = Extract<SettingsState<typeof superagentSettings.schema>, { status: "ready" }>;
@@ -128,7 +132,58 @@ function countProfileErrors(profileErrors: ProfileErrors): number {
   return profileErrors.reduce((total, row) => total + Object.keys(row).length, 0);
 }
 
-export function SuperagentSettingsScreen({ theme, host }: PluginSurfaceProps) {
+interface Draft {
+  base: { values: Values; revision: Ready["revision"] };
+  form: FormValues;
+}
+
+/** 草稿按 host 存放:宿主切换标签页会卸载界面组件,草稿必须活在组件之外。 */
+const drafts = new Map<string, Draft>();
+
+/** 档位行的本地 key 在标签页切换后仍要唯一,所以计数器也放在组件外。 */
+let profileKeySeed = 0;
+function newProfileKey(): string {
+  profileKeySeed += 1;
+  return `new-${profileKeySeed}`;
+}
+
+function draftFor(hostId: string, settings: Ready): Draft {
+  let draft = drafts.get(hostId);
+  if (!draft) {
+    draft = {
+      base: { values: settings.values, revision: settings.revision },
+      form: toForm(settings.values),
+    };
+    drafts.set(hostId, draft);
+  }
+  return draft;
+}
+
+function isDraftDirty(draft: Draft): boolean {
+  return comparable(draft.form) !== comparable(toForm(draft.base.values));
+}
+
+export function SuperagentGeneralSettingsScreen(props: PluginSurfaceProps) {
+  return <SettingsScreen {...props} tab="general" />;
+}
+
+export function SuperagentModelSettingsScreen(props: PluginSurfaceProps) {
+  return <SettingsScreen {...props} tab="models" />;
+}
+
+export function SuperagentRuleSettingsScreen(props: PluginSurfaceProps) {
+  return <SettingsScreen {...props} tab="rules" />;
+}
+
+export function SuperagentExecutionSettingsScreen(props: PluginSurfaceProps) {
+  return <SettingsScreen {...props} tab="execution" />;
+}
+
+export function SuperagentImSettingsScreen(props: PluginSurfaceProps) {
+  return <SettingsScreen {...props} tab="im" />;
+}
+
+function SettingsScreen({ tab, theme, host }: PluginSurfaceProps & { tab: SettingsTab }) {
   const settings = useSettings(superagentSettings);
   const t = useT();
 
@@ -157,79 +212,91 @@ export function SuperagentSettingsScreen({ theme, host }: PluginSurfaceProps) {
       </SettingsSection>
     );
   }
-  return <SettingsForm settings={settings} hostId={host.id} theme={theme} />;
+  return <SettingsForm settings={settings} hostId={host.id} theme={theme} tab={tab} />;
 }
 
-function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: string; theme: PluginSurfaceProps["theme"] }) {
+/** 只属于某个标签页的分组;不在当前标签页时整段不渲染。 */
+function TabSection({ tab, active, ...props }: SettingsSectionProps & { tab: SettingsTab; active: SettingsTab }) {
+  if (tab !== active) return null;
+  return <SettingsSection {...props} />;
+}
+
+function SettingsForm({ settings, hostId, theme, tab }: { settings: Ready; hostId: string; theme: PluginSurfaceProps["theme"]; tab: SettingsTab }) {
   const t = useT();
   // 草稿与它基于的 revision 一起保存:别的客户端先保存时,这里的保存会冲突而不是静默覆盖。
-  const [base, setBase] = useState({ values: settings.values, revision: settings.revision });
-  const [form, setForm] = useState<FormValues>(() => toForm(settings.values));
+  const draft = draftFor(hostId, settings);
+  const [, setVersion] = useState(0);
+  const rerender = useCallback(() => setVersion((value) => value + 1), []);
   // SettingsInput 只在挂载时读 initialValue;整体重置草稿时换 key 让输入框重新挂载。
   const [formKey, setFormKey] = useState(0);
 
-  const baseForm = useMemo(() => comparable(toForm(base.values)), [base.values]);
-  const dirty = comparable(form) !== baseForm;
+  const form = draft.form;
+  const dirty = isDraftDirty(draft);
   const { values: parsedValues, errors, profileErrors } = useMemo(() => parseForm(form, t), [form, t]);
   const errorCount = Object.keys(errors).length + countProfileErrors(profileErrors);
 
   useEffect(() => {
-    if (settings.revision === base.revision) return;
+    if (settings.revision === draft.base.revision) return;
     const latest = comparable(toForm(settings.values));
-    if (latest === comparable(form)) {
+    if (latest === comparable(draft.form)) {
       // 自己刚保存成功:草稿已等于新值,只推进 revision。
-      setBase({ values: settings.values, revision: settings.revision });
-    } else if (!dirty) {
+      draft.base = { values: settings.values, revision: settings.revision };
+      rerender();
+    } else if (!isDraftDirty(draft)) {
       // 别处改了设置,本地没有未保存修改:直接跟上。
-      setBase({ values: settings.values, revision: settings.revision });
-      setForm(toForm(settings.values));
+      draft.base = { values: settings.values, revision: settings.revision };
+      draft.form = toForm(settings.values);
       setFormKey((key) => key + 1);
+      rerender();
     }
     // 有未保存修改时保留草稿;保存会因 revision 过期而失败,并提示载入最新。
-  }, [base.revision, dirty, form, settings.revision, settings.values]);
+  }, [draft, rerender, settings.revision, settings.values]);
 
   const set = useCallback(<K extends keyof FormValues>(key: K, value: FormValues[K]) => {
-    setForm((current) => ({
+    const current = draft.form;
+    draft.form = {
       ...current,
       [key]: value,
       ...(key === "workerProvider" && splitProviderModel(current.workerProvider).provider !== splitProviderModel(String(value)).provider
         ? { workerModeId: "" } : {}),
-    }));
-  }, []);
+    };
+    rerender();
+  }, [draft, rerender]);
 
-  const nextProfileKey = useRef(0);
-  const setProfile = useCallback((key: string, field: ProfileField, value: string) => {
-    setForm((current) => ({
-      ...current,
-      workerProfiles: current.workerProfiles.map((row) => (row.key === key ? {
-        ...row, [field]: value,
-        ...(field === "provider" && splitProviderModel(row.provider).provider !== splitProviderModel(value).provider
+  const setProfile = useCallback((key: string, profileField: ProfileField, value: string) => {
+    draft.form = {
+      ...draft.form,
+      workerProfiles: draft.form.workerProfiles.map((row) => (row.key === key ? {
+        ...row, [profileField]: value,
+        ...(profileField === "provider" && splitProviderModel(row.provider).provider !== splitProviderModel(value).provider
           ? { modeId: "" } : {}),
       } : row)),
-    }));
-  }, []);
+    };
+    rerender();
+  }, [draft, rerender]);
   const addProfile = useCallback(() => {
-    nextProfileKey.current += 1;
-    const key = `new-${nextProfileKey.current}`;
-    setForm((current) => ({
-      ...current,
-      workerProfiles: [...current.workerProfiles, { key, name: "", provider: "", modeId: "", thinkingOptionId: "", description: "", workingDir: "" }],
-    }));
-  }, []);
+    draft.form = {
+      ...draft.form,
+      workerProfiles: [...draft.form.workerProfiles, { key: newProfileKey(), name: "", provider: "", modeId: "", thinkingOptionId: "", description: "", workingDir: "" }],
+    };
+    rerender();
+  }, [draft, rerender]);
   const removeProfile = useCallback((key: string) => {
-    setForm((current) => ({ ...current, workerProfiles: current.workerProfiles.filter((row) => row.key !== key) }));
-  }, []);
+    draft.form = { ...draft.form, workerProfiles: draft.form.workerProfiles.filter((row) => row.key !== key) };
+    rerender();
+  }, [draft, rerender]);
 
   const save = useCallback(async () => {
     if (!parsedValues) return;
-    await settings.save(parsedValues, base.revision);
-  }, [base.revision, parsedValues, settings]);
+    await settings.save(parsedValues, draft.base.revision);
+  }, [draft, parsedValues, settings]);
 
   const discard = useCallback(() => {
-    setBase({ values: settings.values, revision: settings.revision });
-    setForm(toForm(settings.values));
+    draft.base = { values: settings.values, revision: settings.revision };
+    draft.form = toForm(settings.values);
     setFormKey((key) => key + 1);
-  }, [settings.revision, settings.values]);
+    rerender();
+  }, [draft, rerender, settings.revision, settings.values]);
 
   // 主界面已拉取过状态时,把服务端检出的工作目录问题标在对应输入行上(只读缓存,不发请求)。
   const cached = useQueryClient().getQueryData<SuperagentSnapshot>([...STATE_QUERY_KEY, hostId, {}]);
@@ -262,7 +329,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
 
   return (
     <View key={formKey}>
-      <SettingsSection
+      <TabSection tab="general" active={tab}
         title={t("settings.workingDir.title")}
         info={t("settings.workingDir.info")}
       >
@@ -297,9 +364,9 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             hint={t("settings.workerBackground.hint")}
           />
         </SettingsCard>
-      </SettingsSection>
+      </TabSection>
 
-      <SettingsSection
+      <TabSection tab="models" active={tab}
         title={t("settings.model.title")}
         info={t("settings.model.info")}
       >
@@ -362,9 +429,9 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             />
           ) : null}
         </SettingsCard>
-      </SettingsSection>
+      </TabSection>
 
-      <SettingsSection
+      <TabSection tab="rules" active={tab}
         title={t("settings.routerRules.title")}
         info={t("settings.routerRules.info")}
       >
@@ -394,9 +461,9 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             </Text>
           </View>
         </SettingsCard>
-      </SettingsSection>
+      </TabSection>
 
-      <SettingsSection
+      <TabSection tab="models" active={tab}
         title={t("settings.profiles.title")}
         info={t("settings.profiles.info")}
       >
@@ -425,9 +492,9 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             onPress={addProfile}
           />
         </SettingsCard>
-      </SettingsSection>
+      </TabSection>
 
-      <SettingsSection title={t("settings.execution.title")}>
+      <TabSection tab="execution" active={tab} title={t("settings.execution.title")}>
         <SettingsCard>
           <TextField {...field} name="workerTimeoutMin" label={t("settings.execution.workerTimeout.label")} hint={t("settings.execution.workerTimeout.hint")} />
           <TextField {...field} name="routerEvalTimeoutMin" label={t("settings.execution.routerEvalTimeout.label")} hint={t("settings.execution.routerEvalTimeout.hint")} />
@@ -438,9 +505,9 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
           <TextField {...field} name="evalBatchMs" label={t("settings.execution.evalBatch.label")} hint={t("settings.execution.evalBatch.hint")} />
           <TextField {...field} name="triggerMaxChars" label={t("settings.execution.triggerMaxChars.label")} hint={t("settings.execution.triggerMaxChars.hint")} />
         </SettingsCard>
-      </SettingsSection>
+      </TabSection>
 
-      <SettingsSection
+      <TabSection tab="rules" active={tab}
         title={t("settings.proactive.title")}
         info={t("settings.proactive.info")}
       >
@@ -459,9 +526,9 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             </>
           ) : null}
         </SettingsCard>
-      </SettingsSection>
+      </TabSection>
 
-      <SettingsSection
+      <TabSection tab="general" active={tab}
         title={t("settings.delegation.title")}
         info={t("settings.delegation.info")}
       >
@@ -482,9 +549,9 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             />
           ) : null}
         </SettingsCard>
-      </SettingsSection>
+      </TabSection>
 
-      <SettingsSection
+      <TabSection tab="im" active={tab}
         title={t("settings.im.title")}
         info={t("settings.im.info")}
       >
@@ -505,7 +572,7 @@ function SettingsForm({ settings, hostId, theme }: { settings: Ready; hostId: st
             placeholder={t("settings.im.inboxDir.placeholder")}
           />
         </SettingsCard>
-      </SettingsSection>
+      </TabSection>
 
       <SettingsSection title={t("settings.save.title")}>
         <SettingsCard>

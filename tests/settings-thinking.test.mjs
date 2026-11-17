@@ -182,7 +182,7 @@ test("compact snapshot: queryFn expands thinkingSets and ThinkingPicker offers t
       leaves.push(node);
       visit(node.props?.children);
     };
-    visit(sandbox.module.exports.SuperagentSettingsScreen({ host: { id: "host" }, theme: { colors: {} } }));
+    visit(sandbox.module.exports.SuperagentModelSettingsScreen({ host: { id: "host" }, theme: { colors: {} } }));
     return leaves;
   };
   render();
@@ -284,7 +284,7 @@ test("ThinkingPicker falls back to free-text input when no catalog is reported",
     leaves.push(node);
     visit(node.props?.children);
   };
-  visit(sandbox.module.exports.SuperagentSettingsScreen({ host: { id: "host" }, theme: { colors: {} } }));
+  visit(sandbox.module.exports.SuperagentModelSettingsScreen({ host: { id: "host" }, theme: { colors: {} } }));
   const routerThinking = leaves.find((node) => node.type === "SettingsInput" && node.props.label === "Router thinking 档位(可选)");
   assert.ok(routerThinking, "无清单时 Router thinking 退化为手工输入");
   assert.equal(routerThinking.props.initialValue, "turbo");

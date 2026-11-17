@@ -83,7 +83,7 @@ function fixture({ query = { data: entries }, modeId = "", piModes = { data: { a
       leaves.push(node);
       visit(node.props?.children);
     }
-    visit(sandbox.module.exports.SuperagentSettingsScreen({ host: { id: "host" }, theme: { colors: {} } }));
+    visit(sandbox.module.exports.SuperagentModelSettingsScreen({ host: { id: "host" }, theme: { colors: {} } }));
     return leaves;
   }
   const field = (label, type = "SettingsSelect") => {

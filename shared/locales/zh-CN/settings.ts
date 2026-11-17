@@ -25,6 +25,13 @@ export const settings: Translation<typeof en> = {
     errors_other: "有 {{count}} 处需要修正",
     unsaved: "有未保存的修改",
   },
+  tabs: {
+    general: "基础",
+    models: "模型",
+    rules: "规则",
+    execution: "执行",
+    im: "IM 触发源",
+  },
   workingDir: {
     title: "工作目录",
     info: "默认的基础目录:Router 与默认 Worker 共用它。共享目录隔离时,两者都住在按此目录创建的「默认 workspace」里;独立 worktree 隔离时,每个 Ticket 从它切出独立分支。Router 的自定义规则在下方直接填写。",

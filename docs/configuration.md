@@ -2,7 +2,7 @@
 
 [← 返回 README](../README.md) · [English](configuration-EN.md)
 
-安装后侧栏出现 **Superagent** 入口。配置在 **Settings → Plugins → Superagent**(对话页未配置时会提示并一键跳转;Command Center 搜「Superagent 设置」也能打开)。所有修改先进草稿,点「保存」统一生效,输入有误会在对应行标红:
+安装后侧栏出现 **Superagent** 入口。配置在 **Settings → Plugins → Superagent**(对话页未配置时会提示并一键跳转;Command Center 搜「Superagent 设置」也能打开)。设置按**基础 / 模型 / 规则 / 执行 / IM 触发源**分成五个标签页;所有修改进同一份草稿,切换标签页不会丢,点「保存」统一生效,输入有误会在对应行标红:
 
 | 设置 | 说明 |
 |---|---|

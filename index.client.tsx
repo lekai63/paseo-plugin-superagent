@@ -2,7 +2,13 @@ import type { PluginClientContext, PluginScreenProps, PluginSidebarItemProps } f
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { ChatScreen } from "./client/chat-screen";
 import type { SidebarTab } from "./client/chat-sidebar";
-import { SuperagentSettingsScreen } from "./client/settings-screen";
+import {
+  SuperagentExecutionSettingsScreen,
+  SuperagentGeneralSettingsScreen,
+  SuperagentImSettingsScreen,
+  SuperagentModelSettingsScreen,
+  SuperagentRuleSettingsScreen,
+} from "./client/settings-screen";
 import { superagentDispatchRpc } from "./shared/rpc";
 import { useExecutionAgents, useSuperagentState, useRouterAgents } from "./client/query";
 import { routerStatusMark, sidebarWorkerCounts } from "./shared/sidebar-status";
@@ -84,13 +90,22 @@ export default function contribute(client: PluginClientContext) {
     context: "global",
     onSelect: () => openChat({ panel: "status" }),
   });
-  // 配置放在 Settings → Plugins → Superagent,对话页只保留对话、操作与监控。
-  client.addSettingsScreen({
-    id: SETTINGS_SCREEN_ID,
-    title: "Superagent",
-    icon: "Network",
-    Component: SuperagentSettingsScreen,
-  });
+  // 配置放在 Settings → Plugins → Superagent;注册多个设置页时宿主会按此顺序渲染成标签页。
+  const settingsScreens = [
+    { id: SETTINGS_SCREEN_ID, title: "settings.tabs.general", icon: "Settings", Component: SuperagentGeneralSettingsScreen },
+    { id: "models", title: "settings.tabs.models", icon: "Cpu", Component: SuperagentModelSettingsScreen },
+    { id: "rules", title: "settings.tabs.rules", icon: "ListChecks", Component: SuperagentRuleSettingsScreen },
+    { id: "execution", title: "settings.tabs.execution", icon: "Timer", Component: SuperagentExecutionSettingsScreen },
+    { id: "im", title: "settings.tabs.im", icon: "MessagesSquare", Component: SuperagentImSettingsScreen },
+  ] as const;
+  for (const screen of settingsScreens) {
+    client.addSettingsScreen({
+      id: screen.id,
+      title: messages.message(screen.title),
+      icon: screen.icon,
+      Component: screen.Component,
+    });
+  }
   client.addCommandCenterItem({
     id: "open-settings",
     title: messages.message("host.commandSettings"),

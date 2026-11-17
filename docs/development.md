@@ -14,7 +14,7 @@ paseo plugin reload superagent                                    # 改代码后
 
 若 daemon 尚未开启插件,先在 `$PASEO_HOME/config.json` 打开 `pluginsEnabled` 再 `paseo reload`。
 
-目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用;`shared/locales/` 是中英文界面文字,`shared/i18n.ts` 是翻译函数;execution 提供直通判定与会话状态推导)、`server/`(store/router/workers/engine)、`client/`(对话页 chat-screen、顶部标签 chat-tab-bar 与其本机副本 chat-tabs-store、消息流 chat-messages、输入框 chat-composer、右侧栏 chat-sidebar、设置页 settings-screen,以及 ui.tsx 里的按钮/徽标/提示条等小型原语;`shared/chat.ts` 把线程的触发与裁决排成对话)。引擎细节见 `server/engine.ts` 头注。
+目录:`shared/`(领域模型 + RPC 契约 + 设置,两端共用;`shared/locales/` 是中英文界面文字,`shared/i18n.ts` 是翻译函数;execution 提供直通判定与会话状态推导)、`server/`(store/router/workers/engine)、`client/`(对话页 chat-screen、顶部标签 chat-tab-bar 与其本机副本 chat-tabs-store、消息流 chat-messages、输入框 chat-composer、右侧栏 chat-sidebar、设置页 settings-screen(基础/模型/规则/执行/IM 五个标签页共享一份模块级草稿),以及 ui.tsx 里的按钮/徽标/提示条等小型原语;`shared/chat.ts` 把线程的触发与裁决排成对话)。引擎细节见 `server/engine.ts` 头注。
 
 `npm test` 使用 Node.js 24+ 的内置测试运行器与现有 TypeScript 依赖,验证 Worker 续跑、投递失败回退、取消竞态、重启恢复与飞书连接清理;不连接真实 provider 或 IM 服务。
 
