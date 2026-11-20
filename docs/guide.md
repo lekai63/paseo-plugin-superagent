@@ -83,6 +83,19 @@ paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 - **运行指示**:有任务在跑时,消息流底部有一行显示已用时。
 - **跟随滚动**:停在底部时自动跟随新消息;向上翻阅时不打断你。
 
+## 批准 Worker 的请求
+
+Worker 请求运行工具、退出计划模式或切换模式时会暂停,Superagent 把请求发到对话里(以及任务来源的 IM 聊天或 agent 会话)。消息引用请求原文,末尾附一个六位批准码:
+
+```text
+发送 /approve 3fa9c1 允许这一次,或发送 /deny 3fa9c1 [原因] 拒绝
+```
+
+- 回复 `/approve <批准码>` 只放行这一个请求、这一次;回复 `/deny <批准码> 不要动 main` 拒绝并说明原因。也可以在 Paseo 里打开 Worker 会话直接处理。
+- 只有你能批准。即使你用自然语言对 Router 说「可以」,Router 也不能批准,它会提示你发送命令。Router 仍可以依据对话内容回答 Worker 的提问,或转问你。
+- 在 IM 里,命令必须来自白名单发送者、发在请求所在的聊天里,群聊里还要 @ 机器人。经 `superagent_dispatch` 工具发来的命令只当普通消息,不会批准任何请求。
+- 只发 `/approve` 不带批准码时,会列出等待你决定的请求。
+
 ## 任务、对话与状态
 
 右侧栏有三个标签。

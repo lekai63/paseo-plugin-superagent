@@ -3,6 +3,7 @@ import type { SuperagentState, Thread, Ticket, Trigger, Decision } from "../shar
 import { followsOf } from "../shared/execution";
 import { agentUsesBackgroundWorkspace, detachRoleChildren } from "./workspace";
 import { bounded } from "./deadline";
+import { approvalCode, needsHumanApproval } from "./approvals";
 import { DECISION_REPEAT_LIMIT, DECISION_TOOL_LIMIT } from "./decision-budget";
 import {
   newId,
@@ -108,11 +109,15 @@ const ROUTER_RULES = [
   "  thread the messages that still reach you are context-only, handed back, or failed deliveries.",
   "  Exception: while any Worker on this thread has a pending permission/question, human messages",
   "  come to you for interpretation and are never broadcast to Workers as ordinary instructions.",
-  "- respond: resolve one pending Worker permission/question using its exact ticketId and requestId.",
-  '  For a permission, use "response":{"behavior":"allow"} or {"behavior":"deny","message":"reason"}.',
-  "  Approve only when the human's existing authorization covers the specific operation; do not",
-  "  invent consent or override a denial. If authorization is unclear, immediately reply to the",
-  "  human with the concrete operation and the decision needed. Do not silently ignore a request.",
+  "- respond: resolve one pending Worker question, or decline one permission request, using its",
+  "  exact ticketId and requestId. You can NEVER approve a permission request (any request whose",
+  '  kind is not "question": tool, plan, mode or other). Only the human approves those, by sending',
+  "  /approve <code> (or /deny <code>) with the code listed for the request, or in the Worker's own",
+  "  session in Paseo. The engine shows the human each such request and its code directly and",
+  "  refuses any allow you send for one. If the human agrees in plain words, reply with the exact",
+  "  /approve <code> command they must send; never say it is approved. Decline with",
+  '  "response":{"behavior":"deny","message":"reason"} only when the human declines it or it clearly',
+  "  falls outside the ticket's mandate.",
   "  For a question, answer from established context when possible; otherwise reply with the",
   "  question and its options, then wait for the human's answer. Never invent personal preferences.",
   '  Answer with "response":{"behavior":"allow","updatedInput":{"answers":{"<header>":"answer"}}}.',
@@ -329,7 +334,7 @@ export function composeRouterInstructions(
   lines.push("", `Reply with exactly one fenced \`\`\`json block: {"actions":[...]} (1-${ROUTER_ACTION_LIMIT} actions, executed in order). Examples:`);
   lines.push('{"actions":[{"action":"dispatch","title":"...","mandate":"...","unsubscribe":false}]}');
   lines.push('{"actions":[{"action":"steer","ticketId":"tkt_...","text":"...","mode":"steer or interrupt"}]}');
-  lines.push('{"actions":[{"action":"respond","ticketId":"tkt_...","requestId":"...","response":{"behavior":"allow"}}]}');
+  lines.push('{"actions":[{"action":"respond","ticketId":"tkt_...","requestId":"...","response":{"behavior":"allow","updatedInput":{"answers":{"<header>":"answer"}}}}]}');
   lines.push('{"actions":[{"action":"cancel","ticketId":"tkt_...","rationale":"..."}]}');
   lines.push('{"actions":[{"action":"retry","ticketId":"tkt_..."}]}');
   lines.push('{"actions":[{"action":"subscribe","ticketId":"tkt_..."}]}');
@@ -405,9 +410,15 @@ export function composeEvalPrompt({
   }
   const pendingRequests = [...activeTickets, ...followers].filter((ticket) => ticket.pendingRequests?.length);
   if (pendingRequests.length) {
-    lines.push("## Pending Worker permissions/questions (current; resolve with respond or ask the human with reply)");
+    lines.push("## Pending Worker permissions/questions (current; answer questions with respond or reply;");
+    lines.push("permission requests wait for the human's /approve <code> — you may only decline them)");
     for (const ticket of pendingRequests) {
       lines.push(`ticketId: ${ticket.id} workerAgentId: ${ticket.workerAgentId}`);
+      for (const request of ticket.pendingRequests ?? []) {
+        lines.push(needsHumanApproval(request)
+          ? `- requestId ${request.id} kind=${request.kind}: human approval only — /approve ${approvalCode(ticket.id, request.id)} or /deny ${approvalCode(ticket.id, request.id)}`
+          : `- requestId ${request.id} kind=question: answer with respond`);
+      }
       lines.push("```json", truncate(JSON.stringify(ticket.pendingRequests), 8000), "```");
       lines.push(`Full request details: superagent_read ${ticket.id}`);
     }

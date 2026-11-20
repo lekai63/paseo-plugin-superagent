@@ -83,6 +83,19 @@ Sending a message to a closed conversation reopens it. `/superagent <task>` type
 - **Running indicator.** While something is running, a line at the bottom of the stream shows elapsed time.
 - **Scroll.** The stream follows new messages while you are at the bottom and does not interrupt you while you scroll up.
 
+## Approving Worker requests
+
+When a Worker asks to run a tool, leave plan mode or change mode, it pauses and Superagent posts the request to the conversation (and to the IM chat or agent session the task came from). The message quotes the request and ends with a six-character code:
+
+```text
+Send /approve 3fa9c1 to allow it once, or /deny 3fa9c1 [reason] to refuse.
+```
+
+- Reply `/approve <code>` to allow that one request once, or `/deny <code> not on main` to refuse it with a reason. You can also open the Worker session in Paseo and answer there.
+- Only you can approve. The Router cannot approve a request, even if you tell it "yes" in plain words; it will point you to the command instead. It can still answer a Worker's question from the conversation, or ask you.
+- In IM, the command must come from an allowlisted sender in the chat where the request was posted, and in a group it must address the bot. Commands sent through the `superagent_dispatch` tool are treated as ordinary messages and approve nothing.
+- `/approve` without a code lists the requests waiting for you.
+
 ## Tasks, conversations and status
 
 The right sidebar has three tabs.

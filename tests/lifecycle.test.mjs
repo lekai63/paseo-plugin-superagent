@@ -12,6 +12,7 @@ import { SETTINGS_DEFAULTS } from "../shared/settings.ts";
 import { imDay, imConversationKey, dailyImThreadKey } from "../shared/im-threads.ts";
 import { RECALL_EXHAUSTED_MARKER, ROUTER_CONTEXT_LIMIT, ROUTER_EVALUATION_LIMIT } from "../server/router.ts";
 import { BACKGROUND_WORKSPACE_TITLE, workspaceTitles } from "../server/workspace.ts";
+import { approvalCode } from "../server/approvals.ts";
 
 const oldTime = "2020-01-01T00:00:00.000Z";
 
@@ -273,22 +274,35 @@ const questionRequest = {
   input: { questions: [{ header: "Color", question: "Which color?", options: [{ label: "Blue" }, { label: "Green" }] }] },
 };
 
-test("Worker permissions are notified once with full details and the original reply destination", async t => {
+const toolCode = approvalCode("ticket", toolRequest.id);
+
+test("Worker permissions are announced to the human once and questions go to the Router", async t => {
   const f = fixture(t);
   const origin = { channel: "qq", chatId: "chat", senderId: "user" };
   f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user", text: "original task", origin, status: "delivered", receivedAt: oldTime });
+  const sent = [];
+  f.engine.setReplySink({ send: async (target, text) => { sent.push({ target, text }); } });
   f.controls.pendingPermissions.set("worker", [toolRequest, questionRequest]);
   await Promise.all([f.engine.syncWorkerPermissions("worker"), f.engine.syncWorkerPermissions("worker")]);
-  const notifications = f.state.triggers.filter(trigger => trigger.workerRequest);
-  assert.equal(notifications.length, 2);
   assert.deepEqual(f.ticket.pendingRequests, [toolRequest, questionRequest]);
+  // 提问照旧交 Router;授权请求不经 Router,由引擎原样告诉人并附批准码。
+  const notifications = f.state.triggers.filter(trigger => trigger.workerRequest);
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].workerRequest.requestId, questionRequest.id);
   assert.deepEqual(notifications[0].origin, origin);
-  assert.match(notifications[0].text, /git status/);
-  assert.match(notifications[1].text, /Which color\?[\s\S]*Green/);
+  assert.match(notifications[0].text, /Which color\?[\s\S]*Green/);
+  const notices = f.state.decisions.filter(decision => decision.outcome === "reply" && decision.ticketId === "ticket");
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].reply, /git status/);
+  assert.match(notices[0].reply, new RegExp(`/approve ${toolCode}`));
+  assert.match(notices[0].reply, /Router cannot approve/);
+  await until(() => sent.length === 1);
+  assert.deepEqual(sent[0].target, origin);
+  assert.match(sent[0].text, new RegExp(`/deny ${toolCode}`));
   assert.deepEqual(f.calls.evals, ["thread"]);
 });
 
-test("a permission wait releases its watcher and a formal response reattaches it", async t => {
+test("a permission wait releases its watcher and the human's approval reattaches it", async t => {
   const f = fixture(t);
   f.engine.watchTicket("ticket");
   f.controls.pendingPermissions.set("worker", [toolRequest]);
@@ -296,15 +310,116 @@ test("a permission wait releases its watcher and a formal response reattaches it
   await until(() => f.ticket.pendingRequests?.length === 1);
   assert.equal(f.engine.watchedTickets.has("ticket"), false);
   assert.equal(f.ticket.status, "running");
-  f.controls.verdict = { actions: [{ action: "respond", ticketId: "ticket", requestId: toolRequest.id, response: { behavior: "allow" } }] };
-  await f.engine.runEval("thread");
+  const result = await f.engine.dispatch({ threadId: "thread", task: `/approve ${toolCode.toUpperCase()}` });
   assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "allow" } }]);
   assert.equal(f.calls.sends.length, 0);
   assert.equal(f.state.pendingActions.length, 0);
+  assert.deepEqual(f.calls.evals, [], "the Router is not involved in the approval");
+  const command = f.state.triggers.find(trigger => trigger.id === result.triggerId);
+  assert.equal(command.status, "delivered");
+  assert.match(command.note, /approved request permission-shell/);
+  assert.match(f.state.decisions.at(-1).reply, /Approved once for Worker "test": shell/);
   assert.equal(f.calls.watches.length, 2);
   f.finishes[1].resolve({ status: "idle" });
   await until(() => f.state.triggers.some(trigger => trigger.kind === "report"));
   assert.equal(f.ticket.report, "work completed");
+});
+
+test("the Router can never approve a permission request; the engine asks the human instead", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  f.controls.verdict = { actions: [
+    { action: "respond", ticketId: "ticket", requestId: toolRequest.id, response: { behavior: "allow" } },
+    { action: "reply", reply: "Approved." },
+  ] };
+  const prompt = await evaluateRouter(f, "yes, go ahead");
+  assert.match(prompt, new RegExp(`requestId permission-shell kind=tool: human approval only — /approve ${toolCode}`));
+  assert.equal(f.calls.permissionResponses.length, 0);
+  assert.equal(f.state.pendingActions.length, 0);
+  assert.deepEqual(f.ticket.pendingRequests, [toolRequest]);
+  const blocked = f.state.decisions.find(decision => /blocked Router approval/.test(decision.rationale ?? ""));
+  assert.equal(blocked.outcome, "reply");
+  assert.match(blocked.reply, new RegExp(`/approve ${toolCode}`));
+});
+
+test("a persisted Router approval from before the policy is dropped and the human is asked", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  f.state.pendingActions.push({ id: "respond-old", threadId: "thread", decisionId: "old", kind: "respond", ticketId: "ticket",
+    workerAgentId: "worker", requestId: toolRequest.id, response: { behavior: "allow" }, attempts: 0, createdAt: oldTime });
+  await f.engine.runPendingAction("respond-old");
+  assert.equal(f.calls.permissionResponses.length, 0);
+  assert.equal(f.state.pendingActions.length, 0);
+  assert.equal(f.ticket.pendingRequests.length, 1);
+  assert.match(f.state.decisions.at(-1).reply, new RegExp(`/approve ${toolCode}`));
+});
+
+test("/deny sends the human's reason to the exact request", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  await f.engine.dispatch({ threadId: "thread", task: `/deny ${toolCode} not on main` });
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "deny", message: "not on main" } }]);
+  assert.match(f.state.decisions.at(-1).reply, /Denied for Worker "test": shell/);
+});
+
+test("approval commands need a matching code and never come from agents", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  await f.engine.dispatch({ threadId: "thread", task: "/approve" });
+  assert.match(f.state.decisions.at(-1).reply, new RegExp(`Send /approve <code>[\\s\\S]*${toolCode} \\(test: tool · shell\\)`));
+  await f.engine.dispatch({ threadId: "thread", task: "/approve abcdef" });
+  assert.match(f.state.decisions.at(-1).reply, /No request waiting for your approval has the code abcdef/);
+  assert.equal(f.calls.permissionResponses.length, 0);
+  assert.deepEqual(f.calls.evals, []);
+  // agent 委派(superagent_dispatch)里的命令只是普通消息:交 Router,Router 也批不了。
+  const delegated = await f.engine.dispatch({ threadId: "thread", task: `/approve ${toolCode}`, kind: "agent", sender: "agent:other" });
+  assert.equal(f.calls.permissionResponses.length, 0);
+  assert.equal(f.state.triggers.find(trigger => trigger.id === delegated.triggerId).status, "pending");
+  assert.deepEqual(f.calls.evals, ["thread"]);
+});
+
+test("IM approvals only resolve requests announced in the same chat and ignore overheard messages", async t => {
+  const f = fixture(t);
+  const origin = { channel: "feishu", chatId: "chat", senderId: "user" };
+  f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "feishu", sender: "user", text: "original task", origin, status: "delivered", receivedAt: oldTime });
+  Object.assign(f.state.threads[0], { imDay: imDay(new Date()), imConversationKey: imConversationKey(origin) });
+  f.engine.setReplySink({ send: async () => {} });
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  const otherChat = { ...origin, chatId: "other-chat" };
+  await f.engine.dispatch({ task: `/approve ${toolCode}`, origin: otherChat });
+  assert.equal(f.calls.permissionResponses.length, 0);
+  assert.match(f.state.decisions.at(-1).reply, /No request waiting/);
+  const overheard = await f.engine.dispatch({ task: `/approve ${toolCode}`, origin, context: true });
+  assert.equal(f.calls.permissionResponses.length, 0);
+  assert.equal(f.state.triggers.find(trigger => trigger.id === overheard.triggerId).status, "pending");
+  await f.engine.dispatch({ task: `@bot /approve ${toolCode}`, origin });
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "allow" } }]);
+});
+
+test("an approval that arrived before the engine started is executed by the engine, not the Router", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  f.state.triggers.push({ id: "queued", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
+    text: `/approve ${toolCode}`, status: "pending", context: false, note: "queued before the engine started", receivedAt: new Date().toISOString() });
+  await f.engine.recover();
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "allow" } }]);
+  assert.equal(f.state.triggers.find(trigger => trigger.id === "queued").status, "delivered");
+  assert.deepEqual(f.calls.evals, []);
+});
+
+test("an approval for a request that was already resolved does not answer anything", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  f.controls.pendingPermissions.set("worker", []);
+  await f.engine.dispatch({ threadId: "thread", task: `/approve ${toolCode}` });
+  assert.equal(f.calls.permissionResponses.length, 0);
+  assert.match(f.state.decisions.at(-1).reply, /no longer pending/);
 });
 
 test("question clarification goes to IM and the human answer is filled through respond", async t => {
@@ -372,7 +487,7 @@ test("an idle session with a pending async question is neither completed nor tim
 
 test("manual resolution removes stale notifications, resets the deadline, and resumes observation", async t => {
   const f = fixture(t);
-  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
   await f.engine.syncWorkerPermissions("worker");
   f.controls.pendingPermissions.set("worker", []);
   await f.engine.workerPermissionResolved("worker");
@@ -419,8 +534,8 @@ test("exhausted permission responses return an error to the Router with the orig
   f.controls.pendingPermissions.set("worker", [toolRequest]);
   await f.engine.syncWorkerPermissions("worker");
   f.controls.respond = async () => { throw new Error("response rejected"); };
-  f.controls.verdict = { actions: [{ action: "respond", ticketId: "ticket", requestId: toolRequest.id, response: { behavior: "allow" } }] };
-  await f.engine.runEval("thread");
+  f.controls.verdict = { actions: [{ action: "respond", ticketId: "ticket", requestId: toolRequest.id, response: { behavior: "deny", message: "out of scope" } }] };
+  await evaluateRouter(f, "no, do not run it");
   const actionId = f.state.pendingActions[0].id;
   await f.engine.runPendingAction(actionId);
   await f.engine.runPendingAction(actionId);
@@ -505,7 +620,7 @@ test("a malformed answer or selected action is held for correction without dismi
 
 test("canceling a blocked Worker clears its pending input and cannot answer a future Worker", async t => {
   const f = fixture(t);
-  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
   await f.engine.syncWorkerPermissions("worker");
   await f.engine.cancelTicket("ticket");
   assert.equal(f.ticket.pendingRequests.length, 0);

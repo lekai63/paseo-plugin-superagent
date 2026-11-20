@@ -4,7 +4,7 @@ Superagent 让 Paseo 成为事件驱动的编排器。每个活跃对话有一�
 
 ## 工作方式
 
-- **Router**:每个对话一个 Router 会话,适合用轻量模型。它以 JSON 动作作答:派发 Worker、转向或取消 Worker、重试、回答 Worker 的权限请求或提问、让 Worker 订阅本对话、答复、忽略或结束。除插件自身的只读回读与检索工具外,Router 调用的其他工具都会被权限钩子拒绝。
+- **Router**:每个对话一个 Router 会话,适合用轻量模型。它以 JSON 动作作答:派发 Worker、转向或取消 Worker、重试、回答 Worker 的提问或拒绝其权限请求、让 Worker 订阅本对话、答复、忽略或结束。它不能批准权限请求。除插件自身的只读回读与检索工具外,Router 调用的其他工具都会被权限钩子拒绝。
 - **Worker**:每个 Ticket 启动一个 Worker 会话,适合用更强的模型,挂在 Router 名下。Worker 在 app 里可见,可随时人工接管。具名 Worker 档位让 Router 按任务选择不同的 provider、模型、模式、thinking 档位或工作目录。
 - **直通**:Worker 订阅了某个对话时,后续消息不经模型直接送达它。
 - **看门狗**:内置检查每 15 秒运行一次,找回错过的完成、卡住的启动、超时与待执行动作,daemon 重启后同样生效。可选的 LLM 看门狗按间隔检查任务进展。
@@ -27,7 +27,11 @@ Superagent 让 Paseo 成为事件驱动的编排器。每个活跃对话有一�
 - 开启的 IM 通道会连接飞书开放平台、钉钉 Stream、企业微信机器人服务或 `ilinkai.weixin.qq.com`,或你指定的 NapCat WebSocket。附件下载到 daemon 主机上的收件目录(单个文件上限 100 MB)。压缩包只列清单、不解压;列出 `.7z`/`.rar` 时调用本机已安装的 `7z`。
 - 插件在 `127.0.0.1` 的随机端口与随机路径上运行本地 MCP server,为自身的会话提供工具。
 - 对话页可经 daemon 只读、限量地预览答复里链接的任意绝对路径。
-- Worker 按其 provider 与模式的权限行事;权限请求由 Router 回答或转告给你。
+- Worker 按其 provider 与模式的权限行事。
+- Worker 的工具、计划与模式请求只能由你批准。Superagent 把每个请求按 provider 原文、附一个短批准码,发到发起任务的对话(对话页,或来源的 IM 聊天、agent 会话)。在你发送 `/approve <批准码>` 或 `/deny <批准码> [原因]`,或在 Paseo 里打开该 Worker 会话处理之前,Worker 保持暂停。一次批准只放行这一个请求、这一次。
+- 批准命令只在以下来源有效:对话页、`/superagent` 斜杠命令,以及白名单 IM 发送者在请求所在聊天里发出的消息。agent 发来的消息(包括 `superagent_dispatch` 工具)和群里没有 @ 机器人的消息都不能批准任何请求。
+- Router 从不批准。它尝试的批准会被 Superagent 拒绝执行,并改为把请求发给你。Router 可以拒绝请求,也可以依据对话内容回答 Worker 的提问(`question` 类请求),或转问你。
+- Worker 调用插件自身的 Superagent 工具(如退订、转回)自动放行。
 
 ## 限制
 

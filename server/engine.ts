@@ -27,9 +27,12 @@ import {
   type Trigger,
   type TriggerOrigin,
   type WatchdogState,
+  type WorkerRequest,
+  type WorkerResponse,
   WorkerRequestSchema,
 } from "../shared/model";
 import { orchestrationPermission } from "./agent-mcp";
+import { approvalCode, describeRequest, needsHumanApproval, parseApprovalCommand, routerMayRespond, type ApprovalCommand } from "./approvals";
 import {
   DEFAULT_WORKER_PROFILE,
   DEFAULT_WORKSPACE_TITLE,
@@ -106,6 +109,16 @@ const QUEUED_BEFORE_START = "queued before the engine started";
 const PREFERRED_PROVIDERS = ["claude", "codex", "opencode"];
 /** 状态变化推送的合并窗口:一次评估里的多次落盘只推一个版本。 */
 const STATE_EVENT_COALESCE_MS = 150;
+
+/** 人发出的触发:对话页与斜杠命令(manual)、白名单 IM 发送者;agent 委派、汇报与引擎消息不算。 */
+const HUMAN_TRIGGER_KINDS: readonly Trigger["kind"][] = ["manual", "feishu", "qq", "dingtalk", "wecom", "weixin"];
+/** 列出待批请求时的条数上限。 */
+const APPROVAL_LIST_LIMIT = 5;
+
+/** 只有人直接发出、且指名机器人(非旁听)的消息才能成为批准/拒绝命令。 */
+function humanApprovalCommand(trigger: Pick<Trigger, "kind" | "context" | "text">): ApprovalCommand | null {
+  return HUMAN_TRIGGER_KINDS.includes(trigger.kind) && !trigger.context ? parseApprovalCommand(trigger.text) : null;
+}
 
 function clearWorkerRequests(state: SuperagentState, ticket: Ticket): void {
   ticket.pendingRequests = [];
@@ -366,8 +379,15 @@ export class SuperagentEngine {
 
   /** 事件入口:fast-path → Thread 归属 → 订阅 fan-out 直通 | 排队评估。 */
   async dispatch(input: DispatchInput): Promise<{ threadId: string; triggerId: string; directDelivered: boolean; note: string | null }> {
-    const outcome = await this.intake(input, { status: "pending" });
+    // 人的 /approve、/deny 由引擎确定性执行,不经 Router;引擎未启动时按普通消息排队,启动后补执行。
+    const kind = input.origin ? input.origin.channel : input.kind === "agent" ? "agent" : "manual";
+    const command = this.paseo ? humanApprovalCommand({ kind, context: input.context ?? false, text: input.task.trim() }) : null;
+    const outcome = await this.intake(input, command ? { status: "delivered", note: "approval command" } : { status: "pending" });
     if (!outcome) throw new Error("empty task");
+    if (command) {
+      const trigger = this.store.get().triggers.find((item) => item.id === outcome.triggerId);
+      if (trigger) return { ...outcome, note: await this.executeApprovalCommand(trigger, command) };
+    }
     return outcome;
   }
 
@@ -382,7 +402,8 @@ export class SuperagentEngine {
 
   private async intake(
     input: DispatchInput,
-    admission: { status: "pending" | "filtered"; note?: string },
+    /** delivered:引擎已直接处理(批准命令),只留痕,不直通、不评估、不重开线程。 */
+    admission: { status: "pending" | "filtered" | "delivered"; note?: string },
   ): Promise<{ threadId: string; triggerId: string; directDelivered: boolean; note: string | null } | null> {
     await this.store.ready;
     const settings = this.settingsValues;
@@ -492,8 +513,8 @@ export class SuperagentEngine {
       replyToAgentId: input.replyToAgentId ?? null,
       origin: input.origin ?? null,
       receivedAt: now,
-      status: "pending",
-      note: queuedBeforeStart ? QUEUED_BEFORE_START : null,
+      status: admission.status === "delivered" ? "delivered" : "pending",
+      note: admission.status === "delivered" ? admission.note ?? null : queuedBeforeStart ? QUEUED_BEFORE_START : null,
       threadId,
       quote: linked?.quote ?? null,
     };
@@ -507,6 +528,7 @@ export class SuperagentEngine {
       if (target) { target.updatedAt = now; target.lastActivityAt = now; }
     });
 
+    if (admission.status === "delivered") return { threadId, triggerId, directDelivered: false, note: admission.note ?? null };
     if (queuedBeforeStart) {
       return { threadId, triggerId, directDelivered: false, note: "queued until the orchestrator engine starts" };
     }
@@ -604,6 +626,8 @@ export class SuperagentEngine {
     if (JSON.stringify(ticket.pendingRequests ?? []) === JSON.stringify(requests)) return requests.length > 0;
     const now = new Date().toISOString();
     const notifyThreads = new Set<string>();
+    /** 授权类请求不交 Router:引擎原样告诉人,只有人能批准。 */
+    const approvalNotices: { threadId: string; ticketId: string; text: string }[] = [];
     await this.store.update((next) => {
       const target = next.tickets.find((item) => item.id === ticket.id);
       if (!target || target.workerAgentId !== agentId || TERMINAL_TICKET_STATUSES.includes(target.status)) return;
@@ -634,6 +658,10 @@ export class SuperagentEngine {
         for (const threadId of this.reportThreads(target)) {
           const thread = next.threads.find((item) => item.id === threadId && item.state === "active");
           if (!thread) continue;
+          if (needsHumanApproval(request)) {
+            approvalNotices.push({ threadId, ticketId: target.id, text: this.approvalNotice(target, request) });
+            continue;
+          }
           const origin = next.triggers.filter((item) => item.threadId === threadId && !item.workerRequest)
             .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
             .find((item) => item.status !== "filtered" && (item.origin || item.replyToAgentId));
@@ -641,7 +669,7 @@ export class SuperagentEngine {
             id: newId("trg"), kind: "engine", sender: `worker:${target.id}`, threadId, threadKey: thread.key,
             workerRequest: { ticketId: target.id, agentId, requestId: request.id },
             text: `Worker "${target.title}" needs a ${request.kind} response. ticketId=${target.id} requestId=${request.id}\n`
-              + `Use respond for this request; use reply to ask the human when context/authorization is insufficient.\n`
+              + `Answer this question with respond when established context covers it; otherwise use reply to ask the human.\n`
               + truncate(JSON.stringify(request), 6000) + `\nFull current requests: superagent_read ${target.id}`,
             context: false, origin: origin?.origin ?? null, replyToAgentId: origin?.replyToAgentId ?? null,
             receivedAt: now, status: "pending", note: null,
@@ -651,7 +679,123 @@ export class SuperagentEngine {
       }
     });
     for (const threadId of notifyThreads) this.scheduleEval(threadId, 0);
+    for (const notice of approvalNotices) {
+      await this.notifyThread(notice.threadId, notice.text, {
+        outcome: "reply", ticketId: notice.ticketId, rationale: "engine: Worker permission request awaits the human's /approve or /deny",
+      });
+    }
     return Boolean(this.store.get().tickets.find((item) => item.id === ticket.id)?.pendingRequests?.length);
+  }
+
+  /** 授权请求通知正文:请求原文摘录与批准码,不经模型转述。 */
+  private approvalNotice(ticket: Ticket, request: WorkerRequest): string {
+    return t("server.engine.approvalNeeded", {
+      title: ticket.title, request: describeRequest(request), code: approvalCode(ticket.id, request.id),
+    });
+  }
+
+  /**
+   * 人能处理的待批请求。IM 发送者只能处理在同一聊天里通知过的请求(票据的汇报线程
+   * 收过该聊天的消息);对话页与斜杠命令来自 Paseo 的使用者本人,不限对话。
+   */
+  private approvalCandidates(origin: TriggerOrigin | null | undefined): { ticket: Ticket; request: WorkerRequest; code: string }[] {
+    const state = this.store.get();
+    const conversation = origin ? imConversationKey(origin) : null;
+    const candidates: { ticket: Ticket; request: WorkerRequest; code: string }[] = [];
+    for (const ticket of state.tickets) {
+      if (!ticket.workerAgentId || TERMINAL_TICKET_STATUSES.includes(ticket.status)) continue;
+      const requests = (ticket.pendingRequests ?? []).filter((request) => needsHumanApproval(request));
+      if (!requests.length) continue;
+      if (conversation) {
+        const threads = new Set([ticket.threadId, ...followsOf(ticket)]);
+        const sameChat = state.threads.some((thread) => threads.has(thread.id) && thread.imConversationKey === conversation)
+          || state.triggers.some((trigger) => trigger.threadId && threads.has(trigger.threadId)
+            && trigger.origin && imConversationKey(trigger.origin) === conversation);
+        if (!sameChat) continue;
+      }
+      for (const request of requests) candidates.push({ ticket, request, code: approvalCode(ticket.id, request.id) });
+    }
+    return candidates;
+  }
+
+  private pendingApprovalSummary(candidates: { ticket: Ticket; request: WorkerRequest; code: string }[]): string {
+    if (!candidates.length) return t("server.engine.approvalNonePending");
+    const list = candidates.slice(0, APPROVAL_LIST_LIMIT)
+      .map(({ ticket, request, code }) => `${code} (${truncate(ticket.title, 40)}: ${request.kind} · ${truncate(request.name, 60)})`);
+    if (candidates.length > APPROVAL_LIST_LIMIT) list.push("…");
+    return t("server.engine.approvalPending", { list: list.join("; ") });
+  }
+
+  /**
+   * 执行人的 /approve、/deny:按批准码找到具体请求,刷新确认它仍在等待后直接回给 Worker,
+   * 不经 Router。结果写进命令触发的备注,并在同一对话里答复。返回备注。
+   */
+  private async executeApprovalCommand(trigger: Trigger, command: ApprovalCommand): Promise<string> {
+    const threadId = trigger.threadId!;
+    const candidates = this.approvalCandidates(trigger.origin);
+    const matches = command.code ? candidates.filter((candidate) => candidate.code === command.code) : [];
+    let text: string;
+    let note: string;
+    let ticketId: string | null = null;
+    if (!command.code) {
+      text = t("server.engine.approvalUsage", { pending: this.pendingApprovalSummary(candidates) });
+      note = "approval command without a valid code";
+    } else if (matches.length === 0) {
+      text = t("server.engine.approvalNotFound", { code: command.code, pending: this.pendingApprovalSummary(candidates) });
+      note = `no pending request with code ${command.code}`;
+    } else if (matches.length > 1) {
+      text = t("server.engine.approvalAmbiguous", { code: command.code });
+      note = `code ${command.code} is ambiguous`;
+    } else {
+      const { ticket, request } = matches[0];
+      ticketId = ticket.id;
+      const response: WorkerResponse = command.behavior === "allow"
+        ? { behavior: "allow" }
+        : { behavior: "deny", message: command.message ?? "Denied by the human" };
+      const result = await this.respondAsHuman(ticket, request, response);
+      if (result === "done") {
+        text = t(command.behavior === "allow" ? "server.engine.approvalAllowed" : "server.engine.approvalDenied", {
+          title: ticket.title, name: request.name,
+        });
+        note = `${command.behavior === "allow" ? "approved" : "denied"} request ${request.id} of ${ticket.id} (code ${command.code})`;
+      } else if (result === "gone") {
+        text = t("server.engine.approvalGone");
+        note = `request ${request.id} of ${ticket.id} was no longer pending`;
+      } else {
+        text = t("server.engine.approvalFailed", { error: truncate(result.error, 200) });
+        note = `response to request ${request.id} of ${ticket.id} failed: ${truncate(result.error, 120)}`;
+      }
+    }
+    await this.store.update((next) => {
+      const target = next.triggers.find((item) => item.id === trigger.id);
+      if (target) target.note = note;
+    });
+    await this.notifyThread(threadId, text, {
+      outcome: "reply", ticketId, triggerIds: [trigger.id],
+      rationale: `engine: human /${command.behavior === "allow" ? "approve" : "deny"} from ${trigger.sender}: ${note}`,
+    });
+    return note;
+  }
+
+  /** 人的决定原样发给 Worker:先刷新确认请求仍在等待,避免答到已解决或换了会话的请求。 */
+  private async respondAsHuman(
+    ticket: Ticket,
+    request: WorkerRequest,
+    response: WorkerResponse,
+  ): Promise<"done" | "gone" | { error: string }> {
+    const agentId = ticket.workerAgentId;
+    if (!agentId) return "gone";
+    await this.syncWorkerPermissions(agentId);
+    const current = this.store.get().tickets.find((item) => item.id === ticket.id);
+    if (!current || current.workerAgentId !== agentId || TERMINAL_TICKET_STATUSES.includes(current.status)
+      || !current.pendingRequests?.some((item) => item.id === request.id)) return "gone";
+    try {
+      await bounded(() => this.requirePaseo().agents.ref(agentId).respondToPermission({ requestId: request.id, response }), "Worker permission response");
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : String(error) };
+    }
+    await this.workerPermissionResolved(agentId);
+    return "done";
   }
 
   /** 人工或 Router 响应后继续追踪;不把一条普通消息当成权限响应。 */
@@ -1144,6 +1288,20 @@ export class SuperagentEngine {
         } else if (action.action === "steer") {
           decision.rationale = truncate(action.text, 300);
         } else if (action.action === "respond") {
+          const owner = state.tickets.find((ticket) => ticket.id === action.ticketId);
+          const request = owner?.pendingRequests?.find((item) => item.id === action.requestId);
+          if (owner && request && !routerMayRespond(request, action.response)) {
+            // 硬约束:Router 不能批准授权类请求。不执行,改为把请求原文和批准码交给人,请求保持等待。
+            const notice = this.approvalNotice(owner, request);
+            decision.outcome = "reply";
+            decision.reply = notice;
+            decision.ticketId = owner.id;
+            decision.rationale = `blocked Router approval of ${request.kind} request ${request.id}: only the human can approve it`;
+            replies.push(notice);
+            decisions.push(decision);
+            actionRecords.push(null);
+            continue;
+          }
           decision.rationale = `request ${action.requestId}: ${truncate(JSON.stringify(action.response), 1000)}`;
         } else if (action.action === "subscribe") {
           const target = state.tickets.find((t) => t.id === action.ticketId);
@@ -1469,6 +1627,14 @@ export class SuperagentEngine {
       // 人工已答复或崩溃前已经成功发送:幂等完成,不重发或误发给另一个请求。
       if (!request) {
         await this.workerPermissionResolved(record.workerAgentId);
+        return { ok: true };
+      }
+      // 纵深防御(含升级前落盘的旧记录):Router 的批准永不发出,请求留给人确认。
+      if (!routerMayRespond(request, record.response)) {
+        console.warn(`[superagent] dropped a Router approval of ${request.kind} request ${request.id}; it needs the human's confirmation`);
+        await this.notifyThread(record.threadId, this.approvalNotice(ticket, request), {
+          outcome: "reply", ticketId: ticket.id, rationale: `blocked Router approval of ${request.kind} request ${request.id}: only the human can approve it`,
+        });
         return { ok: true };
       }
       if (record.response.selectedActionId) {
@@ -1852,10 +2018,21 @@ export class SuperagentEngine {
       .filter((t) => t.status === "pending" && t.note === QUEUED_BEFORE_START)
       .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
     for (const trigger of queued) {
+      const command = trigger.threadId ? humanApprovalCommand(trigger) : null;
       await this.store.update((next) => {
         const target = next.triggers.find((t) => t.id === trigger.id);
         if (target?.note === QUEUED_BEFORE_START) target.note = null;
+        // 启动前排队的批准命令同样由引擎执行,不交 Router 评估。
+        if (target && command) {
+          target.status = "delivered";
+          target.note = "approval command";
+        }
       });
+      if (command) {
+        const target = this.store.get().triggers.find((t) => t.id === trigger.id);
+        if (target) await this.executeApprovalCommand(target, command);
+        continue;
+      }
       if (trigger.context || !trigger.threadId) continue;
       const direct = this.subscribedTickets(this.store.get(), trigger.threadId).filter((ticket) => ticket.workerAgentId);
       if (direct.length > 0) await this.deliverDirect({ ...trigger, note: null }, direct);
@@ -1876,12 +2053,22 @@ export class SuperagentEngine {
     } finally { this.watchdogInFlight = false; }
   }
 
-  /** Persist IM notices before delivery, using the thread's original return destination. */
-  private async notifyThread(threadId: string, text: string): Promise<void> {
+  /**
+   * Persist IM notices before delivery, using the thread's original return destination.
+   * Errors default to an "error" row; human-facing notices (approval requests and results) are
+   * recorded as a reply so the chat page shows the full text.
+   */
+  private async notifyThread(
+    threadId: string,
+    text: string,
+    options: { outcome?: "error" | "reply"; ticketId?: string | null; rationale?: string; triggerIds?: string[] } = {},
+  ): Promise<void> {
     const state = this.store.get();
     const source = state.triggers.filter((t) => t.threadId === threadId && t.status !== "filtered" && (t.origin || t.replyToAgentId))
       .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))[0];
-    const decision = newDecision(threadId, [], "error", { rationale: text });
+    const decision = options.outcome === "reply"
+      ? newDecision(threadId, options.triggerIds ?? [], "reply", { reply: text, rationale: options.rationale ?? null, ticketId: options.ticketId ?? null })
+      : newDecision(threadId, options.triggerIds ?? [], "error", { rationale: text, ticketId: options.ticketId ?? null });
     const delivery = source?.origin ? {
       id: `im-${decision.id}`, threadId, origin: source.origin,
       parts: splitImReply(text, this.settingsValues.imReplyMaxChars), nextPart: 0,

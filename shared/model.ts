@@ -169,6 +169,7 @@ export const WorkerResponseSchema = z.discriminatedUnion("behavior", [
     interrupt: z.boolean().optional(),
   }).strict(),
 ]);
+export type WorkerResponse = z.infer<typeof WorkerResponseSchema>;
 
 export const TicketSchema = z.object({
   id: z.string().min(1),
