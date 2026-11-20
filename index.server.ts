@@ -430,7 +430,7 @@ export default function contribute(server: PluginServerContext) {
   const removePermissionResolvedHook = server.addHook("agent.permission.after", async ({ agent, requestId, resolution }, context) => {
     engine.prime(context.paseo);
     await store.ready;
-    await engine.workerPermissionResolved(agent.id, { requestId, behavior: resolution.behavior });
+    await engine.workerPermissionResolved(agent.id, { requestId, resolution });
   });
 
   // hook 仅用于 prime(无头重启后到首个 RPC 之间保持引擎活着)。

@@ -85,7 +85,7 @@ paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 
 ## 批准 Worker 的请求
 
-Worker 请求运行工具、退出计划模式或切换模式时会暂停。Superagent 在对话中显示待处理卡片，可以展开详情、允许一次、拒绝，或打开 Worker 原生会话查看 provider 提供的全部选项。收到 Worker 提问时，可以从摘要卡片打开原生会话填写表单。
+Worker 请求运行工具、退出计划模式或切换模式时会暂停。Superagent 在对话中显示待处理卡片，可以展开详情、允许一次、拒绝，或打开 Worker 原生会话查看 provider 提供的全部选项。Worker 的提问显示在输入框上方，可以在卡片中选择选项或填写文字，再提交答案。
 
 任务来源的 IM 聊天或 agent 会话仍会收到包含原文摘录和六位批准码的通知。
 

@@ -243,7 +243,7 @@ export function ChatScreen(props: ChatScreenProps) {
           <View style={{ flex: 1 }}><Loading /></View>
         ) : (
           <ChatMessages
-            key={`${host.id}:${threadId ?? "new"}`}
+            key={`messages:${host.id}:${threadId ?? "new"}`}
             hostId={host.id}
             threadId={threadId}
             entries={entries}
@@ -263,7 +263,7 @@ export function ChatScreen(props: ChatScreenProps) {
         )}
 
         <ChatComposer
-          key={`${host.id}:${threadId ?? "new"}`}
+          key={`composer:${host.id}:${threadId ?? "new"}`}
           draftKey={`${host.id}:${threadId ?? "new"}`}
           theme={theme}
           layout={layout}

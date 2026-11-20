@@ -203,7 +203,7 @@ export function ChatMessages({
           ) : null}
           {threadId && permissions.map(({ ticket, agentId, request }) => (
             <View key={JSON.stringify([ticket.id, agentId, request.id])} style={{ marginTop: space.md }}>
-              <WorkerRequestCard threadId={threadId} ticket={ticket} agentId={agentId} request={request}
+              <WorkerRequestCard hostId={hostId} threadId={threadId} ticket={ticket} agentId={agentId} request={request}
                 theme={theme} navigation={navigation} />
             </View>
           ))}
@@ -218,7 +218,7 @@ export function ChatMessages({
           <View style={{ width: "100%", maxWidth: metrics.maxWidth, alignSelf: "center", paddingHorizontal: space.sm, gap: space.sm }}>
             {questions.map(({ ticket, agentId, request }) => (
               <WorkerRequestCard key={JSON.stringify([ticket.id, agentId, request.id])}
-                threadId={threadId} ticket={ticket} agentId={agentId} request={request} theme={theme} navigation={navigation} />
+                hostId={hostId} threadId={threadId} ticket={ticket} agentId={agentId} request={request} theme={theme} navigation={navigation} />
             ))}
           </View>
         </ScrollView>

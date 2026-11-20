@@ -5,6 +5,7 @@ import { ChatTabsSchema } from "./chat-tabs";
 import { WeixinStatusSchema } from "./weixin";
 import { FileKindSchema, FilePreviewSchema, MAX_STAT_PATHS } from "./file-preview";
 import { PiPermissionModesSchema } from "./pi-modes";
+import { WorkerQuestionAnswerSchema } from "./worker-questions";
 
 /**
  * 插件 RPC 契约。客户端经 `useRpc` 调用;server/handlers.ts 实现同名 handler。
@@ -80,15 +81,19 @@ export const superagentCancelTicketRpc = defineRpc({
   output: OkSchema,
 });
 
+const WorkerRequestTarget = z.object({
+  threadId: z.string().min(1),
+  ticketId: z.string().min(1),
+  agentId: z.string().min(1),
+  requestId: z.string().min(1),
+});
+
 export const superagentRespondToPermissionRpc = defineRpc({
   name: "superagent.respond_to_permission",
-  input: z.object({
-    threadId: z.string().min(1),
-    ticketId: z.string().min(1),
-    agentId: z.string().min(1),
-    requestId: z.string().min(1),
-    behavior: z.enum(["allow", "deny"]),
-  }).strict(),
+  input: z.union([
+    WorkerRequestTarget.extend({ behavior: z.enum(["allow", "deny"]) }).strict(),
+    WorkerRequestTarget.extend({ behavior: z.literal("answer"), answers: z.array(WorkerQuestionAnswerSchema).min(1) }).strict(),
+  ]),
   output: OkSchema,
 });
 

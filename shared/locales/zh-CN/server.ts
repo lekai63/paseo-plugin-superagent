@@ -147,6 +147,8 @@ export const server: Translation<typeof en> = {
     approvalNeeded: "Worker「{{title}}」请求授权，在你决定前保持暂停：\n{{request}}\n发送 /approve {{code}} 允许这一次，或发送 /deny {{code}} [原因] 拒绝；也可以在 Paseo 里打开该 Worker 会话直接处理。Router 不能替你批准。",
     approvalAllowed: "已允许 Worker「{{title}}」执行一次：{{name}}。",
     approvalDenied: "已拒绝 Worker「{{title}}」的请求：{{name}}。",
+    questionAnswered: "已向 Worker「{{title}}」提交答案。",
+    questionInvalid: "答案与 Worker 当前的提问不匹配。请检查卡片后重试。",
     approvalUsage: "请发送 /approve <批准码> 或 /deny <批准码> [原因]，批准码见请求通知。{{pending}}",
     approvalNotFound: "没有批准码为 {{code}} 的待批请求。{{pending}}",
     approvalPending: "等待你决定：{{list}}。",

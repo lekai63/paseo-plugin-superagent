@@ -13,7 +13,7 @@ Superagent 在 [Paseo](https://paseo.sh) 之上实现事件驱动的「超级 ag
 - **Router 只裁决**:每个 Thread 一个 Router 会话,以 JSON 动作给出裁决(派发、转向、处理请求、取消、重试、订阅、答复、忽略、结束)。插件用权限钩子拒绝 Router 的其他工具,只放行编排自身的只读回读与检索(Chain of Recall)。
 - **Worker 按 Ticket 执行**:每个 Ticket 一个独立 worktree,或在共享目录里工作;可配置多个具名 Worker 档位(不同 provider、模型、工作目录),Router 按用途为每个任务选择。Worker 挂在 Router 名下,在 app 的 Subagents 里可见,随时可人工接管。
 - **订阅直通**:线程里已有在干活的 Worker 时,后续消息绕过 Router 直接送达(不调用模型);一个 Worker 可以跟随多个线程。
-- **权限请求由你批准**。在 Superagent 的权限卡片上可以允许一次或拒绝。打开 Worker 的 Paseo 原生会话即可回答提问或查看 provider 提供的全部选项。IM 通知继续提供 `/approve <批准码>` 和 `/deny <批准码>` 命令。Router 可以依据上下文回答 Worker 的提问。请求落盘，重启后会重新同步。
+- **权限请求由你批准**。在 Superagent 的卡片上可以允许一次、拒绝或回答 Worker 的提问。打开 Worker 的 Paseo 原生会话可以查看 provider 提供的全部选项。IM 通知继续提供 `/approve <批准码>` 和 `/deny <批准码>` 命令。Router 可以依据上下文回答 Worker 的提问。请求落盘，重启后会重新同步。
 - **IM 触发源**:飞书、钉钉、企业微信(官方长连接,免公网)、微信(腾讯官方 ClawBot / iLink,扫码登录)、QQ(OneBot 11 / NapCat)。白名单准入;图片、文件、语音、视频下载到本机并写进消息。
 - **看门狗**:程序看门狗每 15 秒对账(漏掉的完成、卡死、超时、待执行动作);可选的 LLM 看门狗按间隔巡检任务进展并介入。
 - **投机执行(可选)**:按你在「Router 规则」里写的主动策略,后台静默尝试没人明确提出的事项,有价值才交付。

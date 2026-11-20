@@ -130,7 +130,7 @@ function fixture(t, status = "running", subscribed = true) {
         const wasPending = controls.pendingPermissions.get(id)?.some(request => request.id === options.requestId);
         await controls.respond(id, options);
         if (wasPending && !controls.pendingPermissions.get(id)?.some(request => request.id === options.requestId)) {
-          await engine.workerPermissionResolved(id, { requestId: options.requestId, behavior: options.response.behavior });
+          await engine.workerPermissionResolved(id, { requestId: options.requestId, resolution: options.response });
         }
       },
       run: async (prompt) => {
@@ -348,7 +348,7 @@ test("permission cards answer only the selected request and wait for Paseo to co
   assert.equal(f.state.decisions.some(d => d.reply?.includes("Denied for Worker")), false);
   assert.equal((await handle({ ...input, behavior: "allow" })).ok, false, "the first response is still in flight");
   await apply("worker", { requestId: toolRequest.id });
-  await f.engine.workerPermissionResolved("worker", { requestId: toolRequest.id, behavior: "deny" });
+  await f.engine.workerPermissionResolved("worker", { requestId: toolRequest.id, resolution: { behavior: "deny" } });
   assert.deepEqual(await response, { ok: true, error: null });
   assert.deepEqual(f.ticket.pendingRequests, [questionRequest]);
   assert.match(f.state.decisions.at(-1).reply, /Denied for Worker/);
@@ -373,6 +373,49 @@ test("the permission card RPC rejects unrelated sessions, questions and ambiguou
   assert.deepEqual(f.calls.permissionResponses, []);
   assert.deepEqual(await handle(input), { ok: true, error: null });
   assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "allow" } }]);
+});
+
+test("the question card sends validated answers in Paseo format without answering another permission", async t => {
+  const f = fixture(t);
+  const question = { ...questionRequest, input: { questions: [
+    { ...questionRequest.input.questions[0], multiSelect: true, allowOther: true },
+    { header: "Notes", question: "Anything else?", options: [], allowEmpty: true },
+  ], providerField: "preserved" } };
+  f.controls.pendingPermissions.set("worker", [toolRequest, question]);
+  await f.engine.syncWorkerPermissions("worker");
+  const handle = createRespondToPermissionHandler(f.engine);
+  const input = {
+    threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: question.id, behavior: "answer",
+    answers: [{ header: "Color", selections: ["Blue", "Green"], text: " Violet " }, { header: "Notes", selections: [], text: "" }],
+  };
+  assert.equal(superagentRespondToPermissionRpc.input.safeParse(input).success, true);
+  assert.equal((await handle({ ...input, requestId: toolRequest.id })).ok, false);
+  assert.equal((await handle({ ...input, answers: input.answers.slice(0, 1) })).ok, false);
+  assert.equal((await handle({ ...input, answers: [{ ...input.answers[0], selections: ["missing"] }, input.answers[1]] })).ok, false);
+  assert.deepEqual(f.calls.permissionResponses, []);
+  assert.deepEqual(await handle(input), { ok: true, error: null });
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: question.id, response: {
+    behavior: "allow", updatedInput: { ...question.input, answers: { Color: "Blue, Green, Violet", Notes: "" } },
+  } }]);
+  assert.deepEqual(f.ticket.pendingRequests, [toolRequest]);
+  assert.match(f.state.decisions.at(-1).reply, /Answer sent to Worker/);
+  assert.equal((await handle(input)).ok, false);
+});
+
+test("a different answer resolved in the native session is not credited to a card submission", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  f.controls.respond = async () => {};
+  const handle = createRespondToPermissionHandler(f.engine);
+  const reply = handle({ threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: questionRequest.id,
+    behavior: "answer", answers: [{ header: "Color", selections: ["Blue"], text: "" }] });
+  await until(() => f.calls.permissionResponses.length === 1);
+  f.controls.pendingPermissions.set("worker", []);
+  await f.engine.workerPermissionResolved("worker", { requestId: questionRequest.id,
+    resolution: { behavior: "allow", updatedInput: { answers: { Color: "Green" } } } });
+  assert.equal((await reply).ok, false);
+  assert.equal(f.state.decisions.some(d => d.reply?.includes("Answer sent to Worker")), false);
 });
 
 test("the Router can never approve a permission request; the engine asks the human instead", async t => {

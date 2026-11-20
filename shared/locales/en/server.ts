@@ -156,6 +156,8 @@ export const server = {
     approvalNeeded: "Worker \"{{title}}\" is asking for permission and stays paused until you decide:\n{{request}}\nSend /approve {{code}} to allow it once, or /deny {{code}} [reason] to refuse. You can also answer it in the Worker's session in Paseo. The Router cannot approve it for you.",
     approvalAllowed: "Approved once for Worker \"{{title}}\": {{name}}.",
     approvalDenied: "Denied for Worker \"{{title}}\": {{name}}.",
+    questionAnswered: "Answer sent to Worker \"{{title}}\".",
+    questionInvalid: "These answers don't match the Worker's current question. Review the card and try again.",
     approvalUsage: "Send /approve <code> or /deny <code> [reason] with the code from the request notice. {{pending}}",
     approvalNotFound: "No request waiting for your approval has the code {{code}}. {{pending}}",
     approvalPending: "Waiting for your decision: {{list}}.",

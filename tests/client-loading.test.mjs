@@ -86,11 +86,16 @@ function load(code, platform, { turbo = null, legacy = null, storage = null, pas
   return { exports: sandbox.module.exports, reads };
 }
 
-test("Worker question cards open the native session, while permission cards submit the exact decision", async () => {
+test("Worker cards submit answers and permission decisions and can open the native session", async () => {
   const calls = [];
-  const jsx = (_type, props) => props;
+  const pendingRequests = [{ id: "request" }, { id: "other-request" }];
+  let snapshot = { tickets: [{ id: "ticket", workerAgentId: "worker", pendingRequests }] };
+  let questionDraft;
+  const jsx = (component, props) => ({ ...props, component });
   const { exports } = load(requestCardBundle, "ios", { modules: {
-    react: { useState: (value) => [value, () => {}] },
+    react: { useState: (value) => typeof value === "object" && value && "active" in value
+      ? [questionDraft ?? value, (update) => { questionDraft = update(questionDraft ?? value); }]
+      : [value, () => {}] },
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "@getpaseo/plugin/client": { useRpc: (contract) => async (input) => {
       calls.push({ name: contract.name, ...input });
@@ -98,31 +103,52 @@ test("Worker question cards open the native session, while permission cards subm
     } },
     "@getpaseo/plugin/client/ui": { useToast: () => ({ error: assert.fail }) },
     "@tanstack/react-query": {
-      useQueryClient: () => ({ invalidateQueries: () => {} }),
-      useMutation: (options) => ({ mutate: options.mutationFn, isPending: false }),
+      useQueryClient: () => ({
+        cancelQueries: async () => {}, invalidateQueries: () => {},
+        setQueriesData: (_key, update) => { snapshot = update(snapshot); },
+      }),
+      useMutation: (options) => ({ isPending: false, mutate: async (input) => {
+        await options.mutationFn(input);
+        await options.onSuccess(undefined, input);
+      } }),
     },
   } });
-  function buttons(kind) {
-    const tree = exports.WorkerRequestCard({
-      threadId: "thread", ticket: { id: "ticket", title: "Worker task" }, agentId: "worker",
-      request: { id: "request", name: kind, kind },
+  function card(kind, input) {
+    return exports.WorkerRequestCard({
+      hostId: "host", threadId: "thread", ticket: { id: "ticket", title: "Worker task" }, agentId: "worker",
+      request: { id: "request", name: kind, kind, input },
       theme: { colors: {
         surface0: "#ffffff", surface1: "#f8fafc", surface2: "#f1f5f9", border: "#cbd5e1",
         foreground: "#0f172a", foregroundMuted: "#475569", accent: "#2563eb",
       } },
       navigation: { openAgent: (input) => calls.push(input) },
     });
-    return Array.from(tree.children.at(-1).children).filter((child) => child?.onPress);
   }
-  const [answer] = buttons("question");
-  assert.deepEqual(buttons("question").map((button) => button.label), ["Answer in Worker session"]);
-  answer.onPress();
-  const [allow, deny, open] = buttons("tool");
+  const buttons = (tree) => Array.from(tree.children.at(-1).children).filter((child) => child?.onPress);
+  const question = card("question", { questions: [{ header: "color", question: "Which color?", options: [{ label: "Blue" }] }] });
+  const [openQuestion] = buttons(question);
+  assert.equal(openQuestion.label, "Answer in Worker session");
+  openQuestion.onPress();
+  const answers = [{ header: "color", selections: ["Blue"], text: "" }];
+  const fields = question.children[1];
+  assert.equal(fields.questions[0].question, "Which color?");
+  const firstForm = fields.component(fields);
+  assert.equal(firstForm.children.at(-1).children.at(-1).disabled, true);
+  const singleQuestion = firstForm.children[0];
+  const choice = singleQuestion.children.flat().find((child) => child?.accessibilityRole === "radio");
+  choice.onPress();
+  const secondForm = fields.component(fields);
+  const submit = secondForm.children.at(-1).children.at(-1);
+  assert.equal(submit.disabled, false);
+  await submit.onPress();
+  assert.deepEqual(Array.from(snapshot.tickets[0].pendingRequests), [pendingRequests[1]]);
+  const [allow, deny, open] = buttons(card("tool"));
   assert.equal(open.label, "Open Worker session");
   await allow.onPress();
   await deny.onPress();
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     { agentId: "worker" },
+    { name: "superagent.respond_to_permission", threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: "request", behavior: "answer", answers },
     { name: "superagent.respond_to_permission", threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: "request", behavior: "allow" },
     { name: "superagent.respond_to_permission", threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: "request", behavior: "deny" },
   ]);
