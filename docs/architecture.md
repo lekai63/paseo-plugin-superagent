@@ -1,6 +1,6 @@
 # 架构与设计
 
-[← 返回 README](../README.md) · [English](architecture-EN.md)
+[← 返回 README](../README-CN.md) · [English](architecture-EN.md)
 
 ## 能力一览
 

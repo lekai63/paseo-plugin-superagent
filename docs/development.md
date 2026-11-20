@@ -1,6 +1,6 @@
 # 开发与发布
 
-[← 返回 README](../README.md) · [English](development-EN.md)
+[← 返回 README](../README-CN.md) · [English](development-EN.md)
 
 ## 本地开发
 
@@ -34,7 +34,9 @@ paseo plugin reload superagent                                    # 改代码后
 2. 打 Tag 并推送:`git tag v0.2.0 && git push origin main v0.2.0`;
 3. 流水线校验 Tag 与 `package.json` 版本一致,运行类型检查与测试,随后去掉 manifest 里只给 Git 安装用的 `build`(npm 安装时 Paseo 已装好依赖)并 `npm publish`。带 `-` 的预发布版本(如 `v0.2.0-beta.1`)以 `next` 标签发布,不影响 `latest`。
 
-依赖锁定:Git 安装按入库的 `package-lock.json` 执行 `npm ci`,依赖树完全锁定。npm 包不附带锁文件——npm 12 起既不打包也不读取依赖包里的 `npm-shrinkwrap.json`——所以运行时依赖在 `package.json` 里写精确版本,升级依赖时同时改 `package.json` 与 `package-lock.json`。若以后要提交到 Paseo 官方插件目录(要求锁定完整依赖树),需要改用 `bundleDependencies` 或 Git 来源。
+依赖锁定:Git 安装按入库的 `package-lock.json` 执行 `npm ci`,依赖树完全锁定。npm 包不附带锁文件——npm 12 起既不打包也不读取依赖包里的 `npm-shrinkwrap.json`——所以运行时依赖在 `package.json` 里写精确版本,升级依赖时同时改 `package.json` 与 `package-lock.json`。
+
+`https://github.com/lekai63/paseo-plugin-superagent` 是 Paseo 官方插件目录审阅用的公开镜像。它是 Git 来源,依赖树由入库的 `package-lock.json` 与 manifest 里的 `build` 命令锁定;发版时把 `main` 与发布 Tag 同时推到两个远端。
 
 发布使用构建内置的 `CNB_TOKEN`(`tag_push` 是可信事件,令牌带制品库读写权限),不需要密钥仓库;推 Tag 的人要在该 npm 制品库里是「开发者」或以上角色。发布前可在本地检查包内容:`npm run pack:check`。
 

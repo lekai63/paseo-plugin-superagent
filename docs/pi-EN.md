@@ -1,6 +1,6 @@
 # pi integration (Router / Worker / delegation entry point)
 
-[← Back to README](../README-EN.md) · [简体中文](pi.md)
+[← Back to README](../README.md) · [简体中文](pi.md)
 
 pi (pi-coding-agent ≥ 1.5.0) can serve as the provider for the Router, the watchdog and Workers, and can also receive delegation injection. The pi family does not use MCP injection, for two reasons: Paseo's config conversion to pi does not pass `exposure` through, so pi's MCP tools would be exposed in the default `codemode` (the model could not call them directly); and pi does not send tool calls into Paseo's permission flow, so the "decide-only" permission hook has no effect on pi. pi-family sessions therefore receive the role MCP URL through env (`SUPERAGENT_PI_MCP_URL` / `SUPERAGENT_PI_ROLE`; every session open carries the latest URL, following the port and secret rotation after a plugin reload), and the pi extension shipped with the plugin handles registration and constraints:
 

@@ -74,4 +74,4 @@ main:
             description: |
               npm: @0_0/paseo-plugin-superagent ($CNB_BRANCH), registry https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/
 
-              Installation and upgrade notes: see README.md (中文) / README-EN.md (English).
+              Installation and upgrade notes: see README.md (English) / README-CN.md (中文).

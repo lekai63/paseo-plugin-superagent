@@ -15,7 +15,7 @@
     "wechat",
     "qq"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "homepage": "https://github.com/lekai63/paseo-plugin-superagent",
   "bugs": {
     "url": "https://github.com/lekai63/paseo-plugin-superagent/issues"
@@ -31,7 +31,7 @@
   "files": [
     "paseo-plugin.json",
     "README.md",
-    "README-EN.md",
+    "README-CN.md",
     "OVERVIEW.md",
     "OVERVIEW.*.md",
     "LICENSE",

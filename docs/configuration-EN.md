@@ -1,6 +1,6 @@
 # Settings
 
-[← Back to README](../README-EN.md) · [简体中文](configuration.md)
+[← Back to README](../README.md) · [简体中文](configuration.md)
 
 After installation, a **Superagent** entry appears in the sidebar. Settings live in **Settings → Plugins → Superagent** (the chat page prompts you and jumps there in one click when nothing is configured; searching "Superagent settings" in the Command Center also opens it). The settings are split into five tabs — **Basics / Models / Rules / Execution / IM triggers**. All changes go into one shared draft that survives tab switches, and take effect together when you click **Save**; invalid input is highlighted in red on its row:
 

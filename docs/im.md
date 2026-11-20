@@ -1,6 +1,6 @@
 # IM 触发源(飞书 / 钉钉 / 企业微信 / 微信 / QQ)
 
-[← 返回 README](../README.md) · [English](im-EN.md)
+[← 返回 README](../README-CN.md) · [English](im-EN.md)
 
 在设置页「IM 触发源」打开对应开关并填入凭据与**白名单**(发送者/会话至少一项;全空不启动,防陌生人触发;微信的扫码人自动在白名单内)。保存即热重载,无需重启 daemon。
 

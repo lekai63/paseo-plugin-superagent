@@ -1,6 +1,6 @@
 # 使用指南
 
-简体中文 · [English](guide-EN.md) · [← 返回 README](../README.md)
+简体中文 · [English](guide-EN.md) · [← 返回 README](../README-CN.md)
 
 本指南按实际使用顺序介绍 Superagent:安装、指向一个仓库、发出第一个任务,再读回结果。截图来自示例项目 `acme-web`,对话内容均为虚构。
 
@@ -39,7 +39,7 @@ paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 
 也可以把仓库地址填进 **Settings → Plugins → Plugin source**,选择 **Install plugin**。用 `--ref v0.1.0` 固定到某个发布。升级用 `paseo plugin update superagent`。
 
-其他安装来源(CNB 制品库上的 npm 包、本地目录开发)见 [README](../README.md#安装)。
+其他安装来源(CNB 制品库上的 npm 包、本地目录开发)见 [README](../README-CN.md#安装)。
 
 安装完成后,Paseo 侧栏出现 **Superagent**。
 

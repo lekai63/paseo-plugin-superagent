@@ -1,97 +1,97 @@
-# Superagent · Paseo 的 Router/Worker 编排插件
+# Superagent · Router/Worker orchestration for Paseo
 
-简体中文 · [English](README-EN.md)
+[简体中文](README-CN.md) · English
 
-Superagent 在 [Paseo](https://paseo.sh) 之上实现事件驱动的「超级 agent」编排:每个活跃对话(Thread)由一个轻量模型的 **Router** 统一评估新消息,只做裁决;需要动手的事按 Ticket 派发给强模型的 **Worker**,在隔离的 worktree 或共享目录里执行,完成后自动汇报回对话。消息可以来自 Paseo app、任意 agent 会话里的 `/superagent` 命令,也可以来自飞书、钉钉、企业微信、微信和 QQ。
+Superagent adds event-driven "super-agent" orchestration on top of [Paseo](https://paseo.sh). Each active conversation (thread) gets a **Router** running on a lightweight model that evaluates every new message and only makes decisions. Work that needs doing is dispatched as a ticket to a **Worker** on a stronger model, which runs in an isolated worktree or a shared directory and reports back to the conversation when it finishes. Messages can come from the Paseo app, from the `/superagent` command in any agent session, or from Feishu, DingTalk, WeCom, WeChat and QQ.
 
-![Superagent 对话页](assets/screenshots/superagent-chat.png)
+![The Superagent chat page](assets/screenshots/superagent-chat.png)
 
-第一次使用?先看[使用指南](docs/guide.md):安装、发出第一个任务,以及每个界面的说明。
+New here? Start with the [usage guide](docs/guide-EN.md) for install, a first task, and what every screen shows.
 
-## 功能概览
+## Features
 
-- **Router 只裁决**:每个 Thread 一个 Router 会话,以 JSON 动作给出裁决(派发、转向、处理请求、取消、重试、订阅、答复、忽略、结束)。插件用权限钩子拒绝 Router 的其他工具,只放行编排自身的只读回读与检索(Chain of Recall)。
-- **Worker 按 Ticket 执行**:每个 Ticket 一个独立 worktree,或在共享目录里工作;可配置多个具名 Worker 档位(不同 provider、模型、工作目录),Router 按用途为每个任务选择。Worker 挂在 Router 名下,在 app 的 Subagents 里可见,随时可人工接管。
-- **订阅直通**:线程里已有在干活的 Worker 时,后续消息绕过 Router 直接送达(不调用模型);一个 Worker 可以跟随多个线程。
-- **权限与提问回流**:Worker 的权限请求、计划确认和提问先交 Router 处理,需要人决定时转告原聊天;请求落盘,重启后对账补收。
-- **IM 触发源**:飞书、钉钉、企业微信(官方长连接,免公网)、微信(腾讯官方 ClawBot / iLink,扫码登录)、QQ(OneBot 11 / NapCat)。白名单准入;图片、文件、语音、视频下载到本机并写进消息。
-- **看门狗**:程序看门狗每 15 秒对账(漏掉的完成、卡死、超时、待执行动作);可选的 LLM 看门狗按间隔巡检任务进展并介入。
-- **投机执行(可选)**:按你在「Router 规则」里写的主动策略,后台静默尝试没人明确提出的事项,有价值才交付。
-- **对话式界面**:多标签对话页,Markdown 答复、可展开的编排动作行、文件预览,右侧栏展示任务、对话与运行状态。
-- **中英双语**:界面跟随 Paseo 的语言设置,见下文[界面语言](#界面语言)。
+- **The Router only decides.** One Router session per thread returns its verdict as JSON actions (dispatch, steer, respond, cancel, retry, subscribe, reply, ignore, stop). A permission hook denies the Router every other tool; it may only use the orchestrator's own read-only recall and search tools (Chain of Recall).
+- **Workers execute tickets.** Each ticket gets its own worktree, or works in a shared directory. You can define named Worker profiles (different provider, model and working directory) and the Router picks one per task. Workers are children of the Router, visible under Subagents in the app, and you can take over any of them.
+- **Direct delivery for subscriptions.** While a Worker is working in a thread, follow-up messages skip the Router and go straight to it (no model call). One Worker can follow several threads.
+- **Permission requests and questions flow back.** Worker permission requests, plan confirmations and questions go to the Router first, and are relayed to the original chat when a person has to decide. Requests are persisted and reconciled after a restart.
+- **IM triggers.** Feishu, DingTalk and WeCom (official long-lived connections, no public endpoint needed), WeChat (Tencent's official ClawBot / iLink, QR-code login) and QQ (OneBot 11 / NapCat). Allowlists gate who can trigger; images, files, voice and video are downloaded to the daemon host and referenced in the message.
+- **Watchdog.** A programmatic watchdog reconciles every 15 seconds (missed completions, stuck launches, timeouts, pending actions). An optional LLM watchdog patrols task progress on an interval and intervenes.
+- **Speculative execution (optional).** Following the proactive policy you write in the Router rules, the Router can quietly try work nobody explicitly asked for and only deliver results worth keeping.
+- **Chat-style UI.** Tabbed conversations, Markdown replies, expandable orchestration rows, file previews, and a sidebar with tasks, conversations and runtime status.
+- **English and Simplified Chinese.** The UI follows Paseo's language setting; see [Interface language](#interface-language).
 
-完整的能力说明与设计取舍见 [架构与设计](docs/architecture.md)。
+For the full feature description and design trade-offs, see [Architecture and design](docs/architecture-EN.md).
 
-## 运行要求
+## Requirements
 
-- Paseo daemon 与各端客户端 **0.16.0** 或更新版本,并已在 daemon 上开启插件(**Settings → Plugins → Enable plugins**)。
-- daemon 主机:Node.js 20 或更新版本,`npm` 在 PATH 上(安装依赖用)。
-- 至少一个可用的 agent provider(如 claude、codex、opencode、pi)。Router 配轻量模型、Worker 配强模型最划算。
-- `worktree` 隔离要求工作目录位于 git 仓库内;`shared` 隔离不需要 git。
+- Paseo daemon and all clients **0.16.0** or later, with plugins enabled on the daemon (**Settings → Plugins → Enable plugins**).
+- Daemon host: Node.js 20 or later with `npm` on the `PATH` (used to install dependencies).
+- At least one working agent provider (for example claude, codex, opencode or pi). A lightweight model for the Router and a strong model for Workers works best.
+- `worktree` isolation requires the working directory to be inside a git repository; `shared` isolation does not need git.
 
-## 安装
+## Installation
 
-以下命令都在 **daemon 主机**上、以运行 Paseo 的用户执行。也可以把来源标识(如 `npm:@0_0/paseo-plugin-superagent`)直接填进 app 的 **Settings → Plugins**。
+Run these commands on the **daemon host**, as the user that runs Paseo. You can also paste a source identifier such as `npm:@0_0/paseo-plugin-superagent` into **Settings → Plugins** in the app.
 
-### 从 GitHub 安装
+### From GitHub
 
 ```bash
 paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 ```
 
-daemon 克隆仓库后按 manifest 执行 `npm ci --omit=dev --ignore-scripts` 安装锁定的依赖。加 `--ref v<版本>` 可固定到某个发布 Tag。也可以把仓库地址填进 **Settings → Plugins → Plugin source**。
+The daemon clones the repository and installs the locked dependencies with `npm ci --omit=dev --ignore-scripts`, as declared in the manifest. Add `--ref v<version>` to pin a release tag. You can also paste the URL into **Settings → Plugins → Plugin source**.
 
-### 从 CNB npm 制品库安装
+### From the CNB npm registry
 
-插件也以 `@0_0/paseo-plugin-superagent` 发布在 CNB 的 npm 制品库。先让 npm 把 `@0_0` 作用域指向该制品库(只影响这个作用域,其余依赖仍从 npmjs 安装),再安装:
+The plugin is also published as `@0_0/paseo-plugin-superagent` on a CNB npm registry. Point the `@0_0` scope at that registry first (this affects only that scope; all other dependencies still come from npmjs), then install:
 
 ```bash
 npm config set @0_0:registry=https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/
 paseo plugin install npm:@0_0/paseo-plugin-superagent
 ```
 
-- 指定版本:`npm:@0_0/paseo-plugin-superagent@0.1.0`;升级:`paseo plugin update superagent`。
-- 运行时依赖在 `package.json` 里精确钉死版本,装到的直接依赖与发布时测试过的一致。
+- Pin a version with `npm:@0_0/paseo-plugin-superagent@0.1.0`; upgrade with `paseo plugin update superagent`.
+- Runtime dependencies are pinned to exact versions in `package.json`, so you get the same direct dependencies that were tested at release.
 
-### 从本地目录安装(开发)
+### From a local directory (development)
 
-见 [开发与发布](docs/development.md)。
+See [Development and releases](docs/development-EN.md).
 
-### 可选:pi 扩展
+### Optional: pi extension
 
-用 pi 担任 Router、Worker 或接收委派时,把随包发行的 `pi-extension/superagent.js` 复制到 `~/.pi/agent/extensions/`。这是手动副本,插件升级后要重新复制。详见 [pi 集成](docs/pi.md)。
+If pi will act as the Router, a Worker or a delegation entry point, copy the bundled `pi-extension/superagent.js` to `~/.pi/agent/extensions/`. It is a manual copy, so copy it again after upgrading the plugin. See [pi integration](docs/pi-EN.md).
 
-## 快速开始
+## Quick start
 
-1. 在 Paseo app 打开 **Settings → Plugins → Superagent**,填写**工作目录**(必填,daemon 主机上的绝对路径),按需选择 Router 与 Worker 的 provider 与模型,点「保存」。每一项的说明见 [设置项](docs/configuration.md)。
-2. 点侧栏的 **Superagent**,在底部输入框描述任务。Router 会直接答复,或派发 Worker 执行并把结果写回对话。
-3. 在任意 agent 会话里输入 `/superagent <任务>`,把工作委派给编排层;Router 的答复回到该会话。
-4. 想从聊天工具下达指令时,按 [IM 触发源](docs/im.md) 打开对应通道并填写白名单。
+1. In the Paseo app, open **Settings → Plugins → Superagent**, fill in the **Working directory** (required; an absolute path on the daemon host), pick providers and models for the Router and Worker if you like, and click **Save**. Every option is described in [Settings](docs/configuration-EN.md).
+2. Click **Superagent** in the sidebar and describe a task in the composer. The Router either replies directly or dispatches a Worker and writes the result back into the conversation.
+3. In any agent session, type `/superagent <task>` to delegate work to the orchestrator; the Router's reply comes back to that session.
+4. To take instructions from a chat app, enable the channel and fill in its allowlist as described in [IM triggers](docs/im-EN.md).
 
-## 界面语言
+## Interface language
 
-插件界面跟随 Paseo 的语言设置(**Settings → General → Language**):选简体中文时显示中文,其余语言一律显示英文,切换后立即生效。daemon 生成的文字(IM 附件描述、引擎通知、微信扫码状态等)按最近一次连接的客户端语言书写。Router、Worker 与看门狗的内置提示词固定为英文;需要固定答复语言时,在「Router 规则」里写明。详见 [使用指南 · 界面语言](docs/usage.md#界面语言)。
+The plugin UI follows Paseo's language setting (**Settings → General → Language**): Simplified Chinese shows Chinese, every other language shows English, and switching takes effect immediately. Text generated by the daemon (attachment descriptions in IM messages, engine notices, WeChat login status and so on) uses the language of the most recently connected client. The built-in Router, Worker and watchdog prompts are always English; to fix the reply language, say so in the Router rules. See [Usage · Interface language](docs/usage-EN.md#interface-language).
 
-## 数据与安全
+## Data and security
 
-- Paseo 插件是受信任、无沙箱的代码,以 daemon 用户的权限运行。
-- 对话内容、IM 消息、附件的本机路径与 Worker 汇报会作为提示词发给你配置的 agent provider。
-- 插件状态保存在 `$PASEO_HOME/plugin-data/superagent/`;IM 凭据以明文保存在 `$PASEO_HOME/plugin-settings/superagent/`(权限 0600),微信 bot 凭证保存在 `$PASEO_HOME/plugin-data/superagent/weixin/`(0600)。
-- IM 通道直接连接各平台官方接口(飞书开放平台、钉钉、企业微信、腾讯 iLink);QQ 连接你自己部署的 NapCat。收到的附件保存在 daemon 主机上。
-- 对话页的文件预览经 daemon 只读读取答复里链接的绝对路径;委派 MCP 只监听 `127.0.0.1` 的随机端口与随机路径。
+- Paseo plugins are trusted, unsandboxed code that runs with the daemon user's permissions.
+- Conversation content, IM messages, local paths of downloaded attachments and Worker reports are sent as prompts to the agent providers you configure.
+- Plugin state lives in `$PASEO_HOME/plugin-data/superagent/`. IM credentials are stored in plain text in `$PASEO_HOME/plugin-settings/superagent/` (mode 0600), and the WeChat bot credentials in `$PASEO_HOME/plugin-data/superagent/weixin/` (0600).
+- IM channels connect directly to each platform's official API (Feishu Open Platform, DingTalk, WeCom, Tencent iLink); QQ connects to the NapCat instance you run. Received attachments are stored on the daemon host.
+- File previews in the chat page read absolute paths linked from replies, read-only, through the daemon. The delegation MCP server listens only on `127.0.0.1`, on a random port and secret path.
 
-## 文档
+## Documentation
 
-| 文档 | 内容 |
+| Document | Contents |
 |---|---|
-| [使用指南](docs/guide.md) | 安装、第一个任务、对话页、侧栏、设置、IM 触发源、常见用法与排障,含截图 |
-| [架构与设计](docs/architecture.md) | 能力一览、架构图、状态模型、与《Super-agent 设计探索》五模块的对应、设计取舍与限制 |
-| [设置项](docs/configuration.md) | 设置页每一项的含义、取值范围与生效时机 |
-| [界面细节](docs/usage.md) | 对话页、标签、消息流、右侧栏、命令中心、侧栏状态、界面语言 |
-| [IM 触发源](docs/im.md) | 飞书、钉钉、企业微信、微信、QQ 的接入步骤与行为 |
-| [pi 集成](docs/pi.md) | pi 担任 Router / Worker / 委派入口时的扩展安装与约束 |
-| [开发与发布](docs/development.md) | 本地开发与测试、翻译约定、CNB 发布流程、iOS 闪退排查 |
+| [Usage guide](docs/guide-EN.md) | Install, first task, chat page, sidebar, settings, IM triggers, recipes and troubleshooting, with screenshots |
+| [Architecture and design](docs/architecture-EN.md) | Feature overview, architecture diagram, state model, mapping to the five modules of the "Super-agent design exploration" article, trade-offs and limitations |
+| [Settings](docs/configuration-EN.md) | What each setting means, its range, and when changes take effect |
+| [Usage](docs/usage-EN.md) | Chat page, tabs, message stream, sidebar, Command Center, sidebar status, interface language |
+| [IM triggers](docs/im-EN.md) | Setup and behavior for Feishu, DingTalk, WeCom, WeChat and QQ |
+| [pi integration](docs/pi-EN.md) | Installing the extension and its constraints when pi is the Router, a Worker or a delegation entry point |
+| [Development and releases](docs/development-EN.md) | Local development and tests, translation conventions, the CNB release pipeline, the iOS crash investigation |
 
-## 许可证
+## License
 
-[MIT](LICENSE)
+[Apache-2.0](LICENSE)

@@ -1,6 +1,6 @@
 # Architecture and design
 
-[← Back to README](../README-EN.md) · [简体中文](architecture.md)
+[← Back to README](../README.md) · [简体中文](architecture.md)
 
 ## Feature overview
 

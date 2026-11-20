@@ -1,6 +1,6 @@
 # pi 集成(Router / Worker / 委派入口)
 
-[← 返回 README](../README.md) · [English](pi-EN.md)
+[← 返回 README](../README-CN.md) · [English](pi-EN.md)
 
 pi(pi-coding-agent ≥ 1.5.0)可以担任 Router、看门狗、Worker 的 provider,也可以接收委派注入。pi 家族不走 MCP 注入,原因有二:Paseo→pi 的配置转换不透传 `exposure`,pi 的 MCP 工具会以默认 `codemode` 暴露(模型无法直接调用);pi 也不把工具调用送进 Paseo 权限流,「只裁决」的权限钩子对 pi 不生效。因此 pi 系会话改经 env 下发角色 MCP URL(`SUPERAGENT_PI_MCP_URL` / `SUPERAGENT_PI_ROLE`,每次 session open 都带最新 URL,跟随插件重载后的端口与密钥轮换),由随插件发行的 pi 扩展完成注册与约束:
 

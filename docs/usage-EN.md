@@ -1,6 +1,6 @@
 # Usage
 
-[← Back to README](../README-EN.md) · [简体中文](usage.md)
+[← Back to README](../README.md) · [简体中文](usage.md)
 
 The main screen is a chat page that works like talking to an agent in a Paseo project: the conversation is on the left, and the right sidebar holds everything that is not part of the conversation.
 

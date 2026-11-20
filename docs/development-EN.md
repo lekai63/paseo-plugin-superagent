@@ -1,6 +1,6 @@
 # Development and releases
 
-[← Back to README](../README-EN.md) · [简体中文](development.md)
+[← Back to README](../README.md) · [简体中文](development.md)
 
 ## Local development
 
@@ -34,7 +34,9 @@ Layout: `shared/` (domain model + RPC contract + settings, shared by both sides;
 2. Tag and push: `git tag v0.2.0 && git push origin main v0.2.0`;
 3. The pipeline checks that the tag matches the `package.json` version, runs the type check and tests, then removes the `build` in the manifest that exists only for Git installs (Paseo has already installed dependencies on npm installs) and runs `npm publish`. A prerelease version containing `-` (such as `v0.2.0-beta.1`) is published under the `next` tag and does not affect `latest`.
 
-Dependency locking: a Git install runs `npm ci` against the committed `package-lock.json`, so the dependency tree is fully locked. The npm package ships no lockfile (since npm 12, `npm-shrinkwrap.json` inside a dependency package is neither packed nor read), so runtime dependencies are pinned to exact versions in `package.json`; when upgrading a dependency, change both `package.json` and `package-lock.json`. If the plugin is later submitted to the official Paseo plugin directory (which requires the full dependency tree to be locked), it will need to switch to `bundleDependencies` or a Git source.
+Dependency locking: a Git install runs `npm ci` against the committed `package-lock.json`, so the dependency tree is fully locked. The npm package ships no lockfile (since npm 12, `npm-shrinkwrap.json` inside a dependency package is neither packed nor read), so runtime dependencies are pinned to exact versions in `package.json`; when upgrading a dependency, change both `package.json` and `package-lock.json`.
+
+`https://github.com/lekai63/paseo-plugin-superagent` is the public mirror the Paseo plugin registry reviews. It is a Git source, so the committed `package-lock.json` and the `build` command in the manifest are what lock the dependency tree for review; keep the two remotes in step by pushing `main` and the release tag to both.
 
 Publishing uses the build's built-in `CNB_TOKEN` (`tag_push` is a trusted event, and the token has registry read/write permission), so no secrets repository is needed; whoever pushes the tag must have the "Developer" role or above in that npm registry. Before publishing you can check the package contents locally with `npm run pack:check`.
 

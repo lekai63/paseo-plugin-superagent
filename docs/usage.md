@@ -1,6 +1,6 @@
 # 使用指南
 
-[← 返回 README](../README.md) · [English](usage-EN.md)
+[← 返回 README](../README-CN.md) · [English](usage-EN.md)
 
 主界面是一个对话页,用法和在 Paseo 项目里与 agent 对话一样:左边是对话,右侧栏放对话之外的信息。
 

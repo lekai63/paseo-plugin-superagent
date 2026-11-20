@@ -1,6 +1,6 @@
 # IM triggers (Feishu / DingTalk / WeCom / WeChat / QQ)
 
-[← Back to README](../README-EN.md) · [简体中文](im.md)
+[← Back to README](../README.md) · [简体中文](im.md)
 
 In the **IM triggers** section of the settings page, turn on the channel you want and fill in its credentials and **allowlist** (at least one of senders/chats; if everything is empty the channel does not start, which keeps strangers from triggering it; the person who scans the QR code for WeChat is automatically on the allowlist). Saving hot-reloads the channel; there is no need to restart the daemon.
 

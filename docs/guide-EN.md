@@ -1,6 +1,6 @@
 # Usage guide
 
-[简体中文](guide.md) · English · [← Back to README](../README-EN.md)
+[简体中文](guide.md) · English · [← Back to README](../README.md)
 
 This guide walks through Superagent the way you actually use it: install it, point it at a repository, send a first task, then read what comes back. Screenshots show a sample project (`acme-web`) with made-up conversations.
 
@@ -39,7 +39,7 @@ paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 
 Or paste the repository URL into **Settings → Plugins → Plugin source** and choose **Install plugin**. Pin a release with `--ref v0.1.0`. Upgrades are `paseo plugin update superagent`.
 
-Other install sources (npm on the CNB registry, a local checkout for development) are listed in the [README](../README-EN.md#installation).
+Other install sources (npm on the CNB registry, a local checkout for development) are listed in the [README](../README.md#installation).
 
 When the install finishes, **Superagent** appears in the Paseo sidebar.
 
