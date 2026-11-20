@@ -28,13 +28,15 @@ let clientBundle;
 let webBundle;
 let queryBundle;
 let requestCardBundle;
+let chatMessagesBundle;
 before(async () => {
-  [fontBundle, clientBundle, webBundle, queryBundle, requestCardBundle] = await Promise.all([
+  [fontBundle, clientBundle, webBundle, queryBundle, requestCardBundle, chatMessagesBundle] = await Promise.all([
     compile("../client/host-font-scale.ts"),
     compile("../index.client.tsx"),
     compile("../client/web.ts"),
     compile("../client/query.ts"),
     compile("../client/worker-request-card.tsx"),
+    compile("../client/chat-messages.tsx"),
   ]);
 });
 
@@ -124,6 +126,33 @@ test("Worker question cards open the native session, while permission cards subm
     { name: "superagent.respond_to_permission", threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: "request", behavior: "allow" },
     { name: "superagent.respond_to_permission", threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: "request", behavior: "deny" },
   ]);
+});
+
+test("pending questions stay outside the Router's scrollable transcript and disappear when resolved", () => {
+  const jsx = (type, props) => ({ type, props });
+  const { exports } = load(chatMessagesBundle, "ios", { modules: {
+    react: {
+      useMemo: (compute) => compute(), useRef: (current) => ({ current }), useState: (value) => [value, () => {}],
+    },
+    "react/jsx-runtime": { jsx, jsxs: jsx },
+    "@getpaseo/plugin/client/ui": { ScrollView: "ScrollView" },
+  } });
+  const question = { id: "q1", kind: "question", name: "Pi select", input: { questions: [{ question: "Which color?" }] } };
+  const permission = { id: "p1", kind: "tool", name: "shell" };
+  const render = (pendingRequests) => exports.ChatMessages({
+    hostId: "host", threadId: "thread", entries: [],
+    tickets: [{ id: "ticket", workerAgentId: "worker", status: "running", pendingRequests }],
+    theme: { colors: { border: "#ccc" } }, metrics: { compact: true, maxWidth: 820 },
+  }).props.children;
+
+  const [transcript, questions] = render([question, permission]);
+  const [permissionRow] = transcript.props.children.props.children.at(-1);
+  assert.equal(permissionRow.props.children.props.request, permission);
+  assert.equal(questions.props.testID, "worker-questions");
+  const [questionCard] = questions.props.children.props.children;
+  assert.equal(questionCard.props.request, question);
+  assert.equal(questionCard.props.agentId, "worker");
+  assert.equal(render([permission])[1], null);
 });
 
 test("plugin Router status includes background sessions, filters archived sessions, and retains the remembered fallback", async () => {

@@ -20,7 +20,7 @@ import { RunningDot } from "./agent-status-icon";
 import { FileLinkList, FilePreviewModal, useFileKinds, type FileTarget } from "./file-preview";
 import type { FileKind } from "../shared/file-preview";
 import { useHostAppearance } from "./host-font-scale";
-import { ROW, TOUCH, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
+import { HAIRLINE, ROW, TOUCH, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
 import { CopyButton, TextButton, toneColor } from "./ui";
 import { useT } from "./i18n";
 import { WorkerRequestCard } from "./worker-request-card";
@@ -147,6 +147,8 @@ export function ChatMessages({
   const files = (id: string): FileRefs => ({ links: fileLinks.get(id) ?? NO_LINKS, kinds: fileKinds, onOpen: setPreview });
   const ticketById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
   const requests = threadId ? pendingWorkerRequests(tickets) : [];
+  const questions = requests.filter(({ request }) => request.kind === "question");
+  const permissions = requests.filter(({ request }) => request.kind !== "question");
   const hasContent = entries.length > 0 || Boolean(pendingText) || requests.length > 0;
   const last = entries[entries.length - 1];
   return (
@@ -199,7 +201,7 @@ export function ChatMessages({
               <WorkingRow working={working} theme={theme} metrics={metrics} />
             </View>
           ) : null}
-          {threadId && requests.map(({ ticket, agentId, request }) => (
+          {threadId && permissions.map(({ ticket, agentId, request }) => (
             <View key={JSON.stringify([ticket.id, agentId, request.id])} style={{ marginTop: space.md }}>
               <WorkerRequestCard threadId={threadId} ticket={ticket} agentId={agentId} request={request}
                 theme={theme} navigation={navigation} />
@@ -207,6 +209,20 @@ export function ChatMessages({
           ))}
         </View>
       </ScrollView>
+      {threadId && questions.length > 0 ? (
+        <ScrollView testID="worker-questions"
+          style={{ flexGrow: 0, maxHeight: "45%", borderTopWidth: HAIRLINE, borderTopColor: theme.colors.border }}
+          contentContainerStyle={{ paddingHorizontal: metrics.compact ? space.md : space.lg, paddingVertical: space.sm }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={{ width: "100%", maxWidth: metrics.maxWidth, alignSelf: "center", paddingHorizontal: space.sm, gap: space.sm }}>
+            {questions.map(({ ticket, agentId, request }) => (
+              <WorkerRequestCard key={JSON.stringify([ticket.id, agentId, request.id])}
+                threadId={threadId} ticket={ticket} agentId={agentId} request={request} theme={theme} navigation={navigation} />
+            ))}
+          </View>
+        </ScrollView>
+      ) : null}
       <FilePreviewModal target={preview} hostId={hostId} theme={theme} wide={Platform.OS === "web" && !metrics.compact}
         onClose={() => setPreview(null)} />
     </>

@@ -247,7 +247,7 @@ export function ChatScreen(props: ChatScreenProps) {
             hostId={host.id}
             threadId={threadId}
             entries={entries}
-            tickets={detailData?.tickets ?? []}
+            tickets={tickets}
             pendingText={pendingText}
             working={working}
             truncated={truncated}
