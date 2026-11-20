@@ -13,6 +13,8 @@ import { imDay, imConversationKey, dailyImThreadKey } from "../shared/im-threads
 import { RECALL_EXHAUSTED_MARKER, ROUTER_CONTEXT_LIMIT, ROUTER_EVALUATION_LIMIT } from "../server/router.ts";
 import { BACKGROUND_WORKSPACE_TITLE, workspaceTitles } from "../server/workspace.ts";
 import { approvalCode } from "../server/approvals.ts";
+import { createRespondToPermissionHandler } from "../server/handlers.ts";
+import { superagentRespondToPermissionRpc } from "../shared/rpc.ts";
 
 const oldTime = "2020-01-01T00:00:00.000Z";
 
@@ -125,7 +127,11 @@ function fixture(t, status = "running", subscribed = true) {
       },
       respondToPermission: async (options) => {
         calls.permissionResponses.push({ id, ...options });
+        const wasPending = controls.pendingPermissions.get(id)?.some(request => request.id === options.requestId);
         await controls.respond(id, options);
+        if (wasPending && !controls.pendingPermissions.get(id)?.some(request => request.id === options.requestId)) {
+          await engine.workerPermissionResolved(id, { requestId: options.requestId, behavior: options.response.behavior });
+        }
       },
       run: async (prompt) => {
         if (id.includes("watchdog")) {
@@ -323,6 +329,50 @@ test("a permission wait releases its watcher and the human's approval reattaches
   f.finishes[1].resolve({ status: "idle" });
   await until(() => f.state.triggers.some(trigger => trigger.kind === "report"));
   assert.equal(f.ticket.report, "work completed");
+});
+
+test("permission cards answer only the selected request and wait for Paseo to confirm it", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest, questionRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  const handle = createRespondToPermissionHandler(f.engine);
+  const input = { threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: toolRequest.id, behavior: "deny" };
+  const apply = f.controls.respond;
+  f.controls.respond = async () => {};
+
+  const response = handle(input);
+  await until(() => f.calls.permissionResponses.length === 1);
+  assert.deepEqual(f.calls.permissionResponses[0], {
+    id: "worker", requestId: toolRequest.id, response: { behavior: "deny", message: "Denied by the human" },
+  });
+  assert.equal(f.state.decisions.some(d => d.reply?.includes("Denied for Worker")), false);
+  assert.equal((await handle({ ...input, behavior: "allow" })).ok, false, "the first response is still in flight");
+  await apply("worker", { requestId: toolRequest.id });
+  await f.engine.workerPermissionResolved("worker", { requestId: toolRequest.id, behavior: "deny" });
+  assert.deepEqual(await response, { ok: true, error: null });
+  assert.deepEqual(f.ticket.pendingRequests, [questionRequest]);
+  assert.match(f.state.decisions.at(-1).reply, /Denied for Worker/);
+  assert.equal((await handle(input)).ok, false, "a stale card cannot answer again");
+  assert.equal(f.calls.permissionResponses.length, 1);
+});
+
+test("the permission card RPC rejects unrelated sessions, questions and ambiguous provider options", async t => {
+  const f = fixture(t);
+  const persistent = { ...toolRequest, id: "persistent", metadata: { options: [
+    { optionId: "remember", kind: "allow_always" }, { optionId: "reject", kind: "reject_once" },
+  ] } };
+  f.controls.pendingPermissions.set("worker", [toolRequest, questionRequest, persistent]);
+  await f.engine.syncWorkerPermissions("worker");
+  const handle = createRespondToPermissionHandler(f.engine);
+  const input = { threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: toolRequest.id, behavior: "allow" };
+  assert.equal(superagentRespondToPermissionRpc.input.safeParse({ ...input, selectedActionId: "remember" }).success, false);
+  assert.equal((await handle({ ...input, threadId: "another-thread" })).ok, false);
+  assert.equal((await handle({ ...input, agentId: "old-worker" })).ok, false);
+  assert.equal((await handle({ ...input, requestId: questionRequest.id })).ok, false);
+  assert.equal((await handle({ ...input, requestId: persistent.id })).ok, false);
+  assert.deepEqual(f.calls.permissionResponses, []);
+  assert.deepEqual(await handle(input), { ok: true, error: null });
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "allow" } }]);
 });
 
 test("the Router can never approve a permission request; the engine asks the human instead", async t => {

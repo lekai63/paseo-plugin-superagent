@@ -1,4 +1,4 @@
-import type { Decision, Ticket, Trigger } from "./model";
+import { TERMINAL_TICKET_STATUSES, type Decision, type Ticket, type Trigger, type WorkerRequest } from "./model";
 import type { MessageKey, Translate } from "./i18n";
 import { outcomeLabel, triggerKindLabel, triggerSenderLabel, type Tone } from "./labels";
 
@@ -36,6 +36,14 @@ export type ChatEntry =
       /** 派发行跟随 Ticket 的实时状态,并可打开 Worker 会话。 */
       live: boolean;
     };
+
+export function pendingWorkerRequests(tickets: readonly Ticket[]): { ticket: Ticket; agentId: string; request: WorkerRequest }[] {
+  return tickets.flatMap((ticket) => {
+    const agentId = ticket.workerAgentId;
+    if (!agentId || TERMINAL_TICKET_STATUSES.includes(ticket.status)) return [];
+    return (ticket.pendingRequests ?? []).map((request) => ({ ticket, agentId, request }));
+  });
+}
 
 const USER_KINDS: readonly Trigger["kind"][] = ["manual", "agent", "feishu", "qq", "dingtalk", "wecom", "weixin"];
 
@@ -116,7 +124,9 @@ export function buildChatEntries(
   }
   for (const decision of decisions) {
     if (decision.outcome === "reply") {
-      if (decision.reply?.trim()) entries.push({ kind: "reply", id: decision.id, at: decision.createdAt, text: decision.reply });
+      if (!decision.workerApprovalNotice && decision.reply?.trim()) {
+        entries.push({ kind: "reply", id: decision.id, at: decision.createdAt, text: decision.reply });
+      }
       continue;
     }
     const ticket = decision.ticketId ? ticketById.get(decision.ticketId) : undefined;

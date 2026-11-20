@@ -63,6 +63,18 @@ export const chat: Translation<typeof en> = {
     openWorkerSession: "打开 Worker 会话:{{title}}",
     expand: "展开{{label}}",
   },
+  requests: {
+    question: "{{title}} 发来的提问",
+    permission: "{{title}} 的权限请求",
+    allow: "允许一次",
+    deny: "拒绝",
+    answerInWorker: "在 Worker 会话中回答",
+    openWorker: "打开 Worker 会话",
+    chooseInWorker: "打开 Worker 会话查看全部选项。",
+    details: "查看请求详情",
+    submitting: "正在提交…",
+    responseFailed: "未能确认 Worker 已收到你的决定。",
+  },
   tabs: {
     conversation: "对话",
     new: "新对话",

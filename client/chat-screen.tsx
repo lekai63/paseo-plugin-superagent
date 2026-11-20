@@ -124,7 +124,7 @@ export function ChatScreen(props: ChatScreenProps) {
       .map((trigger) => trigger.receivedAt).sort()[0] ?? null;
     if (engine.currentEvalThreadId === thread.id) return { label: t("chat.working.evaluating"), since: pendingSince };
     if (thread.pendingTriggers > 0) return { label: t("chat.working.awaiting"), since: pendingSince };
-    const active = tickets.filter((ticket) => ticket.status === "launching" || ticket.status === "running");
+    const active = tickets.filter((ticket) => !ticket.pendingRequests?.length && (ticket.status === "launching" || ticket.status === "running"));
     if (!active.length) return null;
     const since = active.map((ticket) => ticket.startedAt).filter((value): value is string => Boolean(value)).sort()[0] ?? null;
     return { label: active.length === 1 ? t("chat.working.workerRunning", { title: active[0].title }) : t("chat.working.workersRunning", { count: active.length }), since };
@@ -243,8 +243,9 @@ export function ChatScreen(props: ChatScreenProps) {
           <View style={{ flex: 1 }}><Loading /></View>
         ) : (
           <ChatMessages
-            key={threadId ?? "new"}
+            key={`${host.id}:${threadId ?? "new"}`}
             hostId={host.id}
+            threadId={threadId}
             entries={entries}
             tickets={detailData?.tickets ?? []}
             pendingText={pendingText}

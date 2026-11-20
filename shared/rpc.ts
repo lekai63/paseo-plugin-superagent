@@ -80,6 +80,18 @@ export const superagentCancelTicketRpc = defineRpc({
   output: OkSchema,
 });
 
+export const superagentRespondToPermissionRpc = defineRpc({
+  name: "superagent.respond_to_permission",
+  input: z.object({
+    threadId: z.string().min(1),
+    ticketId: z.string().min(1),
+    agentId: z.string().min(1),
+    requestId: z.string().min(1),
+    behavior: z.enum(["allow", "deny"]),
+  }).strict(),
+  output: OkSchema,
+});
+
 export const superagentRetryTicketRpc = defineRpc({
   name: "superagent.retry_ticket",
   input: z.object({ ticketId: z.string() }),

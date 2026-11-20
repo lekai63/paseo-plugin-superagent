@@ -5,8 +5,8 @@ import { createHash } from "node:crypto";
  *
  * 只有 Worker 的提问(kind=question)可以由 Router 依据上下文代答;工具、计划、模式等
  * 授权类请求必须由人针对具体请求确认:Router 只能拒绝或转告,不能批准。人通过
- * `/approve <code>` / `/deny <code>`(对话页、`/superagent` 斜杠命令、白名单 IM 发送者)
- * 或在 Paseo 里直接打开 Worker 会话来处理。
+ * 对话页的权限卡片、`/approve <code>` / `/deny <code>`(对话页、`/superagent` 斜杠命令、
+ * 白名单 IM 发送者)或 Paseo 的 Worker 原生会话来处理。
  */
 
 interface RequestLike {

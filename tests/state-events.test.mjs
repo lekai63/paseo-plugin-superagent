@@ -41,6 +41,7 @@ test("state_events pushes the current revision, one revision per change burst, a
   const state = handlers.get("superagent.state");
   const saveTabs = handlers.get("superagent.save_chat_tabs");
   assert.equal(typeof subscribe, "function");
+  assert.equal(typeof handlers.get("superagent.respond_to_permission"), "function");
 
   const paseo = {};
   // Let startup (state file load, settings read) settle before anyone listens.

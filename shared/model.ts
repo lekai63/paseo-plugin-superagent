@@ -171,6 +171,19 @@ export const WorkerResponseSchema = z.discriminatedUnion("behavior", [
 ]);
 export type WorkerResponse = z.infer<typeof WorkerResponseSchema>;
 
+/** ACP can offer persistent choices or several different choices with the same behavior. */
+export function canRespondToWorkerPermission(request: WorkerRequest, behavior: "allow" | "deny"): boolean {
+  if (request.kind === "question") return false;
+  const metadata = request.metadata as { options?: unknown } | undefined;
+  if (!Array.isArray(metadata?.options)) return true;
+  const kinds = metadata.options.flatMap((option) =>
+    typeof option?.optionId === "string" && typeof option.kind === "string" ? [option.kind] : []);
+  if (!kinds.some((kind) => ["allow_once", "allow_always", "reject_once", "reject_always"].includes(kind))) return true;
+  if (behavior === "allow") return kinds.filter((kind) => kind === "allow_once").length === 1;
+  const rejects = kinds.filter((kind) => kind === "reject_once").length;
+  return rejects === 1 || (rejects === 0 && !kinds.includes("reject_always"));
+}
+
 export const TicketSchema = z.object({
   id: z.string().min(1),
   threadId: z.string().min(1),
@@ -242,6 +255,8 @@ export const DecisionSchema = z.object({
   reply: z.string().nullish(),
   rationale: z.string().nullish(),
   ticketId: z.string().nullish(),
+  /** 批准码通知留给原来的回传通道,对话页用实时请求卡片。 */
+  workerApprovalNotice: z.literal(true).optional(),
   /** 解析失败时保留的原始回复存根(排障用)。 */
   raw: z.string().nullish(),
   createdAt: z.string(),

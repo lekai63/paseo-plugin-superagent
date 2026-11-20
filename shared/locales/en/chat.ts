@@ -63,6 +63,18 @@ export const chat = {
     openWorkerSession: "Open Worker session: {{title}}",
     expand: "Expand {{label}}",
   },
+  requests: {
+    question: "Question from {{title}}",
+    permission: "Permission request from {{title}}",
+    allow: "Allow once",
+    deny: "Deny",
+    answerInWorker: "Answer in Worker session",
+    openWorker: "Open Worker session",
+    chooseInWorker: "Open the Worker session to see all choices.",
+    details: "Show request details",
+    submitting: "Submitting…",
+    responseFailed: "Couldn't confirm your decision with the Worker.",
+  },
   tabs: {
     conversation: "Conversation",
     new: "New conversation",

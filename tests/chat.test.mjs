@@ -74,6 +74,21 @@ test("empty replies are skipped and failed evaluations surface their raw output"
   assert.equal(entries[1].text, null, "nothing to expand without a rationale");
 });
 
+test("live Worker cards come from pending ticket requests while old notices remain readable", () => {
+  const request = { id: "question", name: "question", kind: "question" };
+  assert.deepEqual(chat.pendingWorkerRequests([
+    { ...ticket, pendingRequests: [request] },
+    { ...ticket, id: "ended", status: "completed", pendingRequests: [request] },
+    { ...ticket, id: "missing", workerAgentId: null, pendingRequests: [request] },
+    { ...ticket, id: "legacy" },
+  ]).map(({ agentId, request }) => [agentId, request.id]), [["agent-w", "question"]]);
+  assert.deepEqual(buildChatEntries([], [
+    decision("legacy", 1, "reply", { reply: "old approval notice" }),
+    decision("notice", 2, "reply", { reply: "new approval notice", workerApprovalNotice: true }),
+    decision("receipt", 3, "reply", { reply: "approved" }),
+  ], []).map(entry => entry.id), ["legacy", "receipt"]);
+});
+
 test("delivery status under a message only appears when it is not the normal case", () => {
   const [pending, delivered, evaluated, filtered] = buildChatEntries([
     trigger("a", 1, { status: "pending" }),

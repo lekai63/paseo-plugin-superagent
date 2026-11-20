@@ -4,7 +4,9 @@ import { createHash } from "node:crypto";
 import { dailyImThreadKey, imConversationKey, imDay } from "../shared/im-threads";
 import { DecisionBudget } from "./decision-budget";
 import { Deadline, DeadlineError, bounded } from "./deadline";
+import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginSettings } from "@getpaseo/plugin/server";
+import type { superagentRespondToPermissionRpc } from "../shared/rpc";
 import type { SuperagentStore } from "./store";
 import { followsOf, subscribesTo } from "../shared/execution";
 import { isPiProviderSelection } from "../shared/pi-modes";
@@ -12,6 +14,7 @@ import { recentResults, threadResult } from "../shared/results";
 import { defaultChatTabs, pruneChatTabs, type ChatTabs } from "../shared/chat-tabs";
 import {
   dispatchMandateIssue,
+  canRespondToWorkerPermission,
   newId,
   truncate,
   MAX_SPECULATIVE_TICKETS,
@@ -222,6 +225,7 @@ export class SuperagentEngine {
   private batchTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private watchedTickets = new Map<string, symbol>();
   private permissionChains = new Map<string, Promise<boolean>>();
+  private permissionConfirmations = new Map<string, (behavior: WorkerResponse["behavior"]) => void>();
   /**
    * 线程评估的 unparsed 计数(模型输出质量),≥3 次后看门狗不再自动重排,
    * 需人工「重新评估」——防 Router 持续劣化时的失控 token 循环。
@@ -681,7 +685,8 @@ export class SuperagentEngine {
     for (const threadId of notifyThreads) this.scheduleEval(threadId, 0);
     for (const notice of approvalNotices) {
       await this.notifyThread(notice.threadId, notice.text, {
-        outcome: "reply", ticketId: notice.ticketId, rationale: "engine: Worker permission request awaits the human's /approve or /deny",
+        outcome: "reply", ticketId: notice.ticketId, workerApprovalNotice: true,
+        rationale: "engine: Worker permission request awaits the human's /approve or /deny",
       });
     }
     return Boolean(this.store.get().tickets.find((item) => item.id === ticket.id)?.pendingRequests?.length);
@@ -777,29 +782,66 @@ export class SuperagentEngine {
     return note;
   }
 
-  /** 人的决定原样发给 Worker:先刷新确认请求仍在等待,避免答到已解决或换了会话的请求。 */
+  /** 对话页的人工授权,绑定卡片所显示的线程、Worker 和请求。 */
+  async respondToWorkerPermission(input: RpcInput<typeof superagentRespondToPermissionRpc>): Promise<void> {
+    await this.store.ready;
+    const { threadId, ticketId, agentId, requestId, behavior } = input;
+    const ticket = this.store.get().tickets.find((item) => item.id === ticketId && item.workerAgentId === agentId);
+    const request = ticket?.pendingRequests?.find((item) => item.id === requestId);
+    if (!ticket || !request || !this.reportThreads(ticket).includes(threadId)) {
+      throw new Error(t("server.engine.approvalGone"));
+    }
+    const response: WorkerResponse = behavior === "allow" ? { behavior } : { behavior, message: "Denied by the human" };
+    const result = await this.respondAsHuman(ticket, request, response, threadId);
+    if (result !== "done") throw new Error(result === "gone" ? t("server.engine.approvalGone") : result.error);
+    await this.notifyThread(threadId, t(behavior === "allow" ? "server.engine.approvalAllowed" : "server.engine.approvalDenied", {
+      title: ticket.title, name: request.name,
+    }), {
+      outcome: "reply", ticketId,
+      rationale: `engine: human ${behavior} for request ${requestId} of ${ticketId} from the permission card`,
+    });
+  }
+
+  /** 人的决定原样发给 Worker,等待 Paseo 的解决事件再记为成功。 */
   private async respondAsHuman(
     ticket: Ticket,
     request: WorkerRequest,
     response: WorkerResponse,
+    threadId?: string,
   ): Promise<"done" | "gone" | { error: string }> {
     const agentId = ticket.workerAgentId;
     if (!agentId) return "gone";
     await this.syncWorkerPermissions(agentId);
     const current = this.store.get().tickets.find((item) => item.id === ticket.id);
+    const pending = current?.pendingRequests?.find((item) => item.id === request.id);
     if (!current || current.workerAgentId !== agentId || TERMINAL_TICKET_STATUSES.includes(current.status)
-      || !current.pendingRequests?.some((item) => item.id === request.id)) return "gone";
+      || !pending || (threadId && !this.reportThreads(current).includes(threadId))) return "gone";
+    if (!canRespondToWorkerPermission(pending, response.behavior)) return { error: t("server.engine.approvalOpenWorker") };
+    const key = JSON.stringify([agentId, request.id]);
+    if (this.permissionConfirmations.has(key)) return { error: t("server.engine.approvalInFlight") };
+    const confirmation = new Promise<WorkerResponse["behavior"]>((resolve) => this.permissionConfirmations.set(key, resolve));
     try {
-      await bounded(() => this.requirePaseo().agents.ref(agentId).respondToPermission({ requestId: request.id, response }), "Worker permission response");
+      const resolvedBehavior = await bounded(async () => {
+        await this.requirePaseo().agents.ref(agentId).respondToPermission({ requestId: request.id, response });
+        return confirmation;
+      }, "Worker permission response", 15_000);
+      return resolvedBehavior === response.behavior ? "done" : "gone";
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      try {
+        await this.workerPermissionResolved(agentId);
+      } catch (error) {
+        console.error("[superagent] failed to reconcile Worker permissions after a human response", error);
+      } finally {
+        this.permissionConfirmations.delete(key);
+      }
     }
-    await this.workerPermissionResolved(agentId);
-    return "done";
   }
 
   /** 人工或 Router 响应后继续追踪;不把一条普通消息当成权限响应。 */
-  async workerPermissionResolved(agentId: string): Promise<void> {
+  async workerPermissionResolved(agentId: string, result?: { requestId: string; behavior: WorkerResponse["behavior"] }): Promise<void> {
+    if (result) this.permissionConfirmations.get(JSON.stringify([agentId, result.requestId]))?.(result.behavior);
     if (await this.syncWorkerPermissions(agentId)) return;
     const ticket = this.store.get().tickets.find((item) => item.workerAgentId === agentId);
     if (ticket?.status === "running") this.watchTicket(ticket.id);
@@ -1633,7 +1675,8 @@ export class SuperagentEngine {
       if (!routerMayRespond(request, record.response)) {
         console.warn(`[superagent] dropped a Router approval of ${request.kind} request ${request.id}; it needs the human's confirmation`);
         await this.notifyThread(record.threadId, this.approvalNotice(ticket, request), {
-          outcome: "reply", ticketId: ticket.id, rationale: `blocked Router approval of ${request.kind} request ${request.id}: only the human can approve it`,
+          outcome: "reply", ticketId: ticket.id, workerApprovalNotice: true,
+          rationale: `blocked Router approval of ${request.kind} request ${request.id}: only the human can approve it`,
         });
         return { ok: true };
       }
@@ -2061,13 +2104,16 @@ export class SuperagentEngine {
   private async notifyThread(
     threadId: string,
     text: string,
-    options: { outcome?: "error" | "reply"; ticketId?: string | null; rationale?: string; triggerIds?: string[] } = {},
+    options: { outcome?: "error" | "reply"; ticketId?: string | null; rationale?: string; triggerIds?: string[]; workerApprovalNotice?: true } = {},
   ): Promise<void> {
     const state = this.store.get();
     const source = state.triggers.filter((t) => t.threadId === threadId && t.status !== "filtered" && (t.origin || t.replyToAgentId))
       .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))[0];
     const decision = options.outcome === "reply"
-      ? newDecision(threadId, options.triggerIds ?? [], "reply", { reply: text, rationale: options.rationale ?? null, ticketId: options.ticketId ?? null })
+      ? newDecision(threadId, options.triggerIds ?? [], "reply", {
+        reply: text, rationale: options.rationale ?? null, ticketId: options.ticketId ?? null,
+        workerApprovalNotice: options.workerApprovalNotice,
+      })
       : newDecision(threadId, options.triggerIds ?? [], "error", { rationale: text, ticketId: options.ticketId ?? null });
     const delivery = source?.origin ? {
       id: `im-${decision.id}`, threadId, origin: source.origin,

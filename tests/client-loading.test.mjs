@@ -27,12 +27,14 @@ let fontBundle;
 let clientBundle;
 let webBundle;
 let queryBundle;
+let requestCardBundle;
 before(async () => {
-  [fontBundle, clientBundle, webBundle, queryBundle] = await Promise.all([
+  [fontBundle, clientBundle, webBundle, queryBundle, requestCardBundle] = await Promise.all([
     compile("../client/host-font-scale.ts"),
     compile("../index.client.tsx"),
     compile("../client/web.ts"),
     compile("../client/query.ts"),
+    compile("../client/worker-request-card.tsx"),
   ]);
 });
 
@@ -81,6 +83,48 @@ function load(code, platform, { turbo = null, legacy = null, storage = null, pas
   runInNewContext(code, sandbox);
   return { exports: sandbox.module.exports, reads };
 }
+
+test("Worker question cards open the native session, while permission cards submit the exact decision", async () => {
+  const calls = [];
+  const jsx = (_type, props) => props;
+  const { exports } = load(requestCardBundle, "ios", { modules: {
+    react: { useState: (value) => [value, () => {}] },
+    "react/jsx-runtime": { jsx, jsxs: jsx },
+    "@getpaseo/plugin/client": { useRpc: (contract) => async (input) => {
+      calls.push({ name: contract.name, ...input });
+      return { ok: true };
+    } },
+    "@getpaseo/plugin/client/ui": { useToast: () => ({ error: assert.fail }) },
+    "@tanstack/react-query": {
+      useQueryClient: () => ({ invalidateQueries: () => {} }),
+      useMutation: (options) => ({ mutate: options.mutationFn, isPending: false }),
+    },
+  } });
+  function buttons(kind) {
+    const tree = exports.WorkerRequestCard({
+      threadId: "thread", ticket: { id: "ticket", title: "Worker task" }, agentId: "worker",
+      request: { id: "request", name: kind, kind },
+      theme: { colors: {
+        surface0: "#ffffff", surface1: "#f8fafc", surface2: "#f1f5f9", border: "#cbd5e1",
+        foreground: "#0f172a", foregroundMuted: "#475569", accent: "#2563eb",
+      } },
+      navigation: { openAgent: (input) => calls.push(input) },
+    });
+    return Array.from(tree.children.at(-1).children).filter((child) => child?.onPress);
+  }
+  const [answer] = buttons("question");
+  assert.deepEqual(buttons("question").map((button) => button.label), ["Answer in Worker session"]);
+  answer.onPress();
+  const [allow, deny, open] = buttons("tool");
+  assert.equal(open.label, "Open Worker session");
+  await allow.onPress();
+  await deny.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    { agentId: "worker" },
+    { name: "superagent.respond_to_permission", threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: "request", behavior: "allow" },
+    { name: "superagent.respond_to_permission", threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: "request", behavior: "deny" },
+  ]);
+});
 
 test("plugin Router status includes background sessions, filters archived sessions, and retains the remembered fallback", async () => {
   const records = [

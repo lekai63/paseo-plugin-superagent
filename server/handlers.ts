@@ -6,6 +6,7 @@ import {
   superagentCloseThreadRpc,
   superagentDispatchRpc,
   superagentForceEvalRpc,
+  superagentRespondToPermissionRpc,
   superagentRetryTicketRpc,
   superagentRetryImDeliveryRpc,
   superagentSaveChatTabsRpc,
@@ -61,6 +62,17 @@ export function createCancelTicketHandler(engine: SuperagentEngine) {
   ) => {
     try {
       await engine.cancelTicket(input.ticketId);
+      return { ok: true, error: null };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+  };
+}
+
+export function createRespondToPermissionHandler(engine: SuperagentEngine) {
+  return async (input: RpcInput<typeof superagentRespondToPermissionRpc>, _context: PluginHandlerContext) => {
+    try {
+      await engine.respondToWorkerPermission(input);
       return { ok: true, error: null };
     } catch (error) {
       return { ok: false, error: errorMessage(error) };
