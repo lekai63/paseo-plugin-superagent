@@ -1,6 +1,6 @@
 {
   "name": "@0_0/paseo-plugin-superagent",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Event-driven Router/Worker orchestration for Paseo: a lightweight Router per thread triages events, isolated Workers execute tickets, with IM triggers (Feishu, DingTalk, WeCom, WeChat, QQ) and a watchdog",
   "keywords": [
     "paseo",
@@ -44,9 +44,6 @@
     "shared/",
     "pi-extension/"
   ],
-  "publishConfig": {
-    "registry": "https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/"
-  },
   "scripts": {
     "test": "node --import ./tests/register-typescript.mjs --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit",

@@ -2,11 +2,10 @@
 #
 # - main 分支推送、目标为 main 的 PR:安装依赖 → 类型检查 → 测试
 # - 推送 v* Tag(如 v0.2.0):校验 Tag 与 package.json 版本一致 → 类型检查与测试 →
-#   打包并发布 @0_0/paseo-plugin-superagent 到 CNB npm 制品库 →
-#   创建同名 Release
+#   检查打包内容 → 创建同名 Release
 #
-# 发布使用构建内置的 CNB_TOKEN(tag_push 属于可信事件,令牌带制品库读写权限),无需密钥仓库;
-# 推送 Tag 的人需要是该 npm 制品库的「开发者」或以上角色。发版步骤见 docs/development.md。
+# 不再向 CNB npm 制品库发布。插件来源是 GitHub 仓库(git:)与 Paseo 官方插件目录;
+# 发版步骤见 docs/development.md。
 
 .node: &node
   docker:
@@ -34,10 +33,8 @@ main:
 
 "v*":
   tag_push:
-    - name: publish
+    - name: release
       <<: *node
-      env:
-        NPM_REGISTRY: https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/
       stages:
         - name: verify version
           script: |
@@ -52,26 +49,15 @@ main:
           script: npm run typecheck
         - name: test
           script: npm test
-        - name: prepare package
-          script: |
-            # npm 来源安装时 Paseo 已用 npm 装好生产依赖;manifest 的 build(npm ci)只给 Git/目录安装用,
-            # 发布到 npm 的副本去掉它,避免在包目录里再装一遍。
-            node -e 'const fs=require("fs");const m=JSON.parse(fs.readFileSync("paseo-plugin.json","utf8"));delete m.build;fs.writeFileSync("paseo-plugin.json",JSON.stringify(m,null,2)+"\n")'
-            # 不随包发布锁文件:npm 12 起既不打包也不读取依赖包里的 npm-shrinkwrap.json;
-            # 用户安装时的直接依赖由 package.json 里精确钉死的版本保证。
-            npm pack --dry-run --ignore-scripts
-        - name: publish
-          script: |
-            npm config set "//${NPM_REGISTRY#https://}:_authToken" "$CNB_TOKEN"
-            case "$CNB_BRANCH" in
-              *-*) npm publish --registry "$NPM_REGISTRY" --ignore-scripts --tag next ;;
-              *) npm publish --registry "$NPM_REGISTRY" --ignore-scripts ;;
-            esac
+        - name: check package
+          script: npm pack --dry-run --ignore-scripts
         - name: release
           type: git:release
           options:
             title: $CNB_BRANCH
             description: |
-              npm: @0_0/paseo-plugin-superagent ($CNB_BRANCH), registry https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/
+              Install from the Git repository, pinned to this tag:
+
+              paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git --ref $CNB_BRANCH
 
               Installation and upgrade notes: see README.md (English) / README-CN.md (中文).

@@ -31,7 +31,7 @@ For the full feature description and design trade-offs, see [Architecture and de
 
 ## Installation
 
-Run these commands on the **daemon host**, as the user that runs Paseo. You can also paste a source identifier such as `npm:@0_0/paseo-plugin-superagent` into **Settings → Plugins** in the app.
+Run these commands on the **daemon host**, as the user that runs Paseo. You can also paste the repository URL into **Settings → Plugins → Plugin source** in the app.
 
 ### From GitHub
 
@@ -41,17 +41,7 @@ paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 
 The daemon clones the repository and installs the locked dependencies with `npm ci --omit=dev --ignore-scripts`, as declared in the manifest. Add `--ref v<version>` to pin a release tag. You can also paste the URL into **Settings → Plugins → Plugin source**.
 
-### From the CNB npm registry
-
-The plugin is also published as `@0_0/paseo-plugin-superagent` on a CNB npm registry. Point the `@0_0` scope at that registry first (this affects only that scope; all other dependencies still come from npmjs), then install:
-
-```bash
-npm config set @0_0:registry=https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/
-paseo plugin install npm:@0_0/paseo-plugin-superagent
-```
-
-- Pin a version with `npm:@0_0/paseo-plugin-superagent@0.1.0`; upgrade with `paseo plugin update superagent`.
-- Runtime dependencies are pinned to exact versions in `package.json`, so you get the same direct dependencies that were tested at release.
+- Pin a release with `--ref v0.1.1`; upgrade with `paseo plugin update superagent`.
 
 ### From a local directory (development)
 
@@ -90,7 +80,7 @@ The plugin UI follows Paseo's language setting (**Settings → General → Langu
 | [Usage](docs/usage-EN.md) | Chat page, tabs, message stream, sidebar, Command Center, sidebar status, interface language |
 | [IM triggers](docs/im-EN.md) | Setup and behavior for Feishu, DingTalk, WeCom, WeChat and QQ |
 | [pi integration](docs/pi-EN.md) | Installing the extension and its constraints when pi is the Router, a Worker or a delegation entry point |
-| [Development and releases](docs/development-EN.md) | Local development and tests, translation conventions, the CNB release pipeline, the iOS crash investigation |
+| [Development and releases](docs/development-EN.md) | Local development and tests, translation conventions, tagging a release, the iOS crash investigation |
 
 ## License
 

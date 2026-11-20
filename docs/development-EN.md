@@ -26,19 +26,19 @@ Layout: `shared/` (domain model + RPC contract + settings, shared by both sides;
 - Do not call `t` at module top level or store translations in constants; logs, user/agent content and prompts sent to the model are not translated.
 - `tests/i18n.test.mjs` checks that the Chinese and English keys and interpolations match and that the host resolves titles by the app language, and it scans the source: Chinese string literals outside comments must be moved into `shared/locales` (those deliberately kept, such as search keywords, are listed in the allowlist).
 
-## Releases (CNB)
+## Releases
 
-`.cnb.yml` runs the type check and tests on pushes to `main` and on PRs targeting `main`; pushing a `v*` tag publishes the npm package `@0_0/paseo-plugin-superagent` to the CNB npm registry `https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/` and creates a Release of the same name.
+The plugin is distributed as a Git source: users install `git:https://github.com/lekai63/paseo-plugin-superagent.git`, and the Paseo plugin registry reviews that repository. No npm package is published.
+
+`.cnb.yml` runs the type check and tests on pushes to `main` and on PRs targeting `main`. Pushing a `v*` tag checks that the tag matches the `package.json` version, reruns the checks, verifies the package contents and creates a Release of the same name; it does not publish anything.
 
 1. Update the version (without tagging automatically): `npm version 0.2.0 --no-git-tag-version`, then commit `package.json` and `package-lock.json`;
-2. Tag and push: `git tag v0.2.0 && git push origin main v0.2.0`;
-3. The pipeline checks that the tag matches the `package.json` version, runs the type check and tests, then removes the `build` in the manifest that exists only for Git installs (Paseo has already installed dependencies on npm installs) and runs `npm publish`. A prerelease version containing `-` (such as `v0.2.0-beta.1`) is published under the `next` tag and does not affect `latest`.
+2. Tag and push to both remotes: `git tag v0.2.0 && git push github main v0.2.0 && git push origin main v0.2.0`;
+3. The pipeline verifies the tag against the `package.json` version, runs the type check and tests and runs `npm pack --dry-run --ignore-scripts`, so a tag that would ship an incomplete package fails the build.
 
-Dependency locking: a Git install runs `npm ci` against the committed `package-lock.json`, so the dependency tree is fully locked. The npm package ships no lockfile (since npm 12, `npm-shrinkwrap.json` inside a dependency package is neither packed nor read), so runtime dependencies are pinned to exact versions in `package.json`; when upgrading a dependency, change both `package.json` and `package-lock.json`.
+Dependency locking: a Git install runs `npm ci --omit=dev --ignore-scripts` against the committed `package-lock.json`, as declared in the manifest's `build`, so the dependency tree is fully locked. That is also what the registry review checks, so keep `package.json` and `package-lock.json` in step when upgrading a dependency.
 
-`https://github.com/lekai63/paseo-plugin-superagent` is the public mirror the Paseo plugin registry reviews. It is a Git source, so the committed `package-lock.json` and the `build` command in the manifest are what lock the dependency tree for review; keep the two remotes in step by pushing `main` and the release tag to both.
-
-Publishing uses the build's built-in `CNB_TOKEN` (`tag_push` is a trusted event, and the token has registry read/write permission), so no secrets repository is needed; whoever pushes the tag must have the "Developer" role or above in that npm registry. Before publishing you can check the package contents locally with `npm run pack:check`.
+`https://github.com/lekai63/paseo-plugin-superagent` is the public repository the Paseo plugin registry reviews. Keep the two remotes in step by pushing `main` and the release tag to both; the registry resolves `main` unless a commit or tag is supplied. Before tagging you can check the package contents locally with `npm run pack:check`.
 
 ## iOS crash investigation: avoid importing all of React Native
 

@@ -26,19 +26,19 @@ paseo plugin reload superagent                                    # 改代码后
 - 不要在模块顶层调用 `t` 或把译文存进常量;不翻译日志、用户/agent 内容与发给模型的提示词。
 - `tests/i18n.test.mjs` 检查中英文键与插值一致、宿主按 app 语言解析标题,并扫描源码:注释以外的中文字符串字面量必须移进 `shared/locales`(搜索关键词等有意保留的写在白名单里)。
 
-## 发布(CNB)
+## 发布
 
-`.cnb.yml` 在 `main` 推送与指向 `main` 的 PR 上跑类型检查与测试;推送 `v*` Tag 时发布 npm 包 `@0_0/paseo-plugin-superagent` 到 CNB npm 制品库 `https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/`,并创建同名 Release。
+插件以 Git 来源分发:用户安装 `git:https://github.com/lekai63/paseo-plugin-superagent.git`,Paseo 官方插件目录审阅的是这个仓库。不再发布 npm 包。
+
+`.cnb.yml` 在 `main` 推送与指向 `main` 的 PR 上跑类型检查与测试。推送 `v*` Tag 时校验 Tag 与 `package.json` 版本一致、重跑检查、核对打包内容,并创建同名 Release;不发布任何包。
 
 1. 更新版本号(不自动打 Tag):`npm version 0.2.0 --no-git-tag-version`,提交 `package.json` 与 `package-lock.json`;
-2. 打 Tag 并推送:`git tag v0.2.0 && git push origin main v0.2.0`;
-3. 流水线校验 Tag 与 `package.json` 版本一致,运行类型检查与测试,随后去掉 manifest 里只给 Git 安装用的 `build`(npm 安装时 Paseo 已装好依赖)并 `npm publish`。带 `-` 的预发布版本(如 `v0.2.0-beta.1`)以 `next` 标签发布,不影响 `latest`。
+2. 打 Tag 并推到两个远端:`git tag v0.2.0 && git push github main v0.2.0 && git push origin main v0.2.0`;
+3. 流水线校验 Tag 与 `package.json` 版本一致,运行类型检查与测试,再执行 `npm pack --dry-run --ignore-scripts`,打包内容缺失会让构建失败。
 
-依赖锁定:Git 安装按入库的 `package-lock.json` 执行 `npm ci`,依赖树完全锁定。npm 包不附带锁文件——npm 12 起既不打包也不读取依赖包里的 `npm-shrinkwrap.json`——所以运行时依赖在 `package.json` 里写精确版本,升级依赖时同时改 `package.json` 与 `package-lock.json`。
+依赖锁定:Git 安装按 manifest 的 `build` 执行 `npm ci --omit=dev --ignore-scripts`,读取入库的 `package-lock.json`,依赖树完全锁定;插件目录审阅检查的也是这一条,升级依赖时同时改 `package.json` 与 `package-lock.json`。
 
-`https://github.com/lekai63/paseo-plugin-superagent` 是 Paseo 官方插件目录审阅用的公开镜像。它是 Git 来源,依赖树由入库的 `package-lock.json` 与 manifest 里的 `build` 命令锁定;发版时把 `main` 与发布 Tag 同时推到两个远端。
-
-发布使用构建内置的 `CNB_TOKEN`(`tag_push` 是可信事件,令牌带制品库读写权限),不需要密钥仓库;推 Tag 的人要在该 npm 制品库里是「开发者」或以上角色。发布前可在本地检查包内容:`npm run pack:check`。
+`https://github.com/lekai63/paseo-plugin-superagent` 是 Paseo 官方插件目录审阅用的公开仓库。发版时把 `main` 与发布 Tag 同时推到两个远端;未指定 commit 或 Tag 时目录按当时的 `main` 审阅。打 Tag 前可在本地检查包内容:`npm run pack:check`。
 
 ## iOS 闪退排查:避免整包导入 React Native
 

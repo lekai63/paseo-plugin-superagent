@@ -37,9 +37,9 @@ Superagent 本身不需要 API key,它使用你在 Paseo 里已经配置好的 p
 paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 ```
 
-也可以把仓库地址填进 **Settings → Plugins → Plugin source**,选择 **Install plugin**。用 `--ref v0.1.0` 固定到某个发布。升级用 `paseo plugin update superagent`。
+也可以把仓库地址填进 **Settings → Plugins → Plugin source**,选择 **Install plugin**。用 `--ref v0.1.1` 固定到某个发布。升级用 `paseo plugin update superagent`。
 
-其他安装来源(CNB 制品库上的 npm 包、本地目录开发)见 [README](../README-CN.md#安装)。
+以本地目录开发安装见 [README](../README-CN.md#安装)。
 
 安装完成后,Paseo 侧栏出现 **Superagent**。
 

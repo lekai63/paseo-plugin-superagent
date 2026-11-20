@@ -37,9 +37,9 @@ Run everything on the **daemon host**, as the user that runs Paseo.
 paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 ```
 
-Or paste the repository URL into **Settings → Plugins → Plugin source** and choose **Install plugin**. Pin a release with `--ref v0.1.0`. Upgrades are `paseo plugin update superagent`.
+Or paste the repository URL into **Settings → Plugins → Plugin source** and choose **Install plugin**. Pin a release with `--ref v0.1.1`. Upgrades are `paseo plugin update superagent`.
 
-Other install sources (npm on the CNB registry, a local checkout for development) are listed in the [README](../README.md#installation).
+A local checkout for development is described in the [README](../README.md#installation).
 
 When the install finishes, **Superagent** appears in the Paseo sidebar.
 
