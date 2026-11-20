@@ -4,6 +4,10 @@
 
 Superagent adds event-driven "super-agent" orchestration on top of [Paseo](https://paseo.sh). Each active conversation (thread) gets a **Router** running on a lightweight model that evaluates every new message and only makes decisions. Work that needs doing is dispatched as a ticket to a **Worker** on a stronger model, which runs in an isolated worktree or a shared directory and reports back to the conversation when it finishes. Messages can come from the Paseo app, from the `/superagent` command in any agent session, or from Feishu, DingTalk, WeCom, WeChat and QQ.
 
+![The Superagent chat page](assets/screenshots/superagent-chat.png)
+
+New here? Start with the [usage guide](docs/guide-EN.md) for install, a first task, and what every screen shows.
+
 ## Features
 
 - **The Router only decides.** One Router session per thread returns its verdict as JSON actions (dispatch, steer, respond, cancel, retry, subscribe, reply, ignore, stop). A permission hook denies the Router every other tool; it may only use the orchestrator's own read-only recall and search tools (Chain of Recall).
@@ -29,9 +33,17 @@ For the full feature description and design trade-offs, see [Architecture and de
 
 Run these commands on the **daemon host**, as the user that runs Paseo. You can also paste a source identifier such as `npm:@0_0/paseo-plugin-superagent` into **Settings → Plugins** in the app.
 
-### From the CNB npm registry (recommended)
+### From GitHub
 
-The plugin is published as `@0_0/paseo-plugin-superagent` on a CNB npm registry. Point the `@0_0` scope at that registry first (this affects only that scope; all other dependencies still come from npmjs), then install:
+```bash
+paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
+```
+
+The daemon clones the repository and installs the locked dependencies with `npm ci --omit=dev --ignore-scripts`, as declared in the manifest. Add `--ref v<version>` to pin a release tag. You can also paste the URL into **Settings → Plugins → Plugin source**.
+
+### From the CNB npm registry
+
+The plugin is also published as `@0_0/paseo-plugin-superagent` on a CNB npm registry. Point the `@0_0` scope at that registry first (this affects only that scope; all other dependencies still come from npmjs), then install:
 
 ```bash
 npm config set @0_0:registry=https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/
@@ -40,14 +52,6 @@ paseo plugin install npm:@0_0/paseo-plugin-superagent
 
 - Pin a version with `npm:@0_0/paseo-plugin-superagent@0.1.0`; upgrade with `paseo plugin update superagent`.
 - Runtime dependencies are pinned to exact versions in `package.json`, so you get the same direct dependencies that were tested at release.
-
-### From Git
-
-```bash
-paseo plugin install git:https://cnb.cool/0_0/paseo/paseo-plugin-superagent.git
-```
-
-The daemon clones the repository and installs the locked dependencies with `npm ci --omit=dev --ignore-scripts`, as declared in the manifest. Add `--ref v<version>` to pin a release tag.
 
 ### From a local directory (development)
 
@@ -80,6 +84,7 @@ The plugin UI follows Paseo's language setting (**Settings → General → Langu
 
 | Document | Contents |
 |---|---|
+| [Usage guide](docs/guide-EN.md) | Install, first task, chat page, sidebar, settings, IM triggers, recipes and troubleshooting, with screenshots |
 | [Architecture and design](docs/architecture-EN.md) | Feature overview, architecture diagram, state model, mapping to the five modules of the "Super-agent design exploration" article, trade-offs and limitations |
 | [Settings](docs/configuration-EN.md) | What each setting means, its range, and when changes take effect |
 | [Usage](docs/usage-EN.md) | Chat page, tabs, message stream, sidebar, Command Center, sidebar status, interface language |

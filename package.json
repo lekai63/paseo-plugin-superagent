@@ -16,13 +16,13 @@
     "qq"
   ],
   "license": "MIT",
-  "homepage": "https://cnb.cool/0_0/paseo/paseo-plugin-superagent",
+  "homepage": "https://github.com/lekai63/paseo-plugin-superagent",
   "bugs": {
-    "url": "https://cnb.cool/0_0/paseo/paseo-plugin-superagent/-/issues"
+    "url": "https://github.com/lekai63/paseo-plugin-superagent/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://cnb.cool/0_0/paseo/paseo-plugin-superagent.git"
+    "url": "git+https://github.com/lekai63/paseo-plugin-superagent.git"
   },
   "type": "module",
   "engines": {
@@ -35,6 +35,7 @@
     "OVERVIEW.md",
     "OVERVIEW.*.md",
     "LICENSE",
+    "assets/",
     "docs/",
     "index.client.tsx",
     "index.server.ts",

@@ -4,6 +4,10 @@
 
 Superagent 在 [Paseo](https://paseo.sh) 之上实现事件驱动的「超级 agent」编排:每个活跃对话(Thread)由一个轻量模型的 **Router** 统一评估新消息,只做裁决;需要动手的事按 Ticket 派发给强模型的 **Worker**,在隔离的 worktree 或共享目录里执行,完成后自动汇报回对话。消息可以来自 Paseo app、任意 agent 会话里的 `/superagent` 命令,也可以来自飞书、钉钉、企业微信、微信和 QQ。
 
+![Superagent 对话页](assets/screenshots/superagent-chat.png)
+
+第一次使用?先看[使用指南](docs/guide.md):安装、发出第一个任务,以及每个界面的说明。
+
 ## 功能概览
 
 - **Router 只裁决**:每个 Thread 一个 Router 会话,以 JSON 动作给出裁决(派发、转向、处理请求、取消、重试、订阅、答复、忽略、结束)。插件用权限钩子拒绝 Router 的其他工具,只放行编排自身的只读回读与检索(Chain of Recall)。
@@ -29,9 +33,17 @@ Superagent 在 [Paseo](https://paseo.sh) 之上实现事件驱动的「超级 ag
 
 以下命令都在 **daemon 主机**上、以运行 Paseo 的用户执行。也可以把来源标识(如 `npm:@0_0/paseo-plugin-superagent`)直接填进 app 的 **Settings → Plugins**。
 
-### 从 CNB npm 制品库安装(推荐)
+### 从 GitHub 安装
 
-插件以 `@0_0/paseo-plugin-superagent` 发布在 CNB 的 npm 制品库。先让 npm 把 `@0_0` 作用域指向该制品库(只影响这个作用域,其余依赖仍从 npmjs 安装),再安装:
+```bash
+paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
+```
+
+daemon 克隆仓库后按 manifest 执行 `npm ci --omit=dev --ignore-scripts` 安装锁定的依赖。加 `--ref v<版本>` 可固定到某个发布 Tag。也可以把仓库地址填进 **Settings → Plugins → Plugin source**。
+
+### 从 CNB npm 制品库安装
+
+插件也以 `@0_0/paseo-plugin-superagent` 发布在 CNB 的 npm 制品库。先让 npm 把 `@0_0` 作用域指向该制品库(只影响这个作用域,其余依赖仍从 npmjs 安装),再安装:
 
 ```bash
 npm config set @0_0:registry=https://npm.cnb.cool/0_0/paseo/superagent-plugin/-/packages/
@@ -40,14 +52,6 @@ paseo plugin install npm:@0_0/paseo-plugin-superagent
 
 - 指定版本:`npm:@0_0/paseo-plugin-superagent@0.1.0`;升级:`paseo plugin update superagent`。
 - 运行时依赖在 `package.json` 里精确钉死版本,装到的直接依赖与发布时测试过的一致。
-
-### 从 Git 安装
-
-```bash
-paseo plugin install git:https://cnb.cool/0_0/paseo/paseo-plugin-superagent.git
-```
-
-daemon 克隆仓库后按 manifest 执行 `npm ci --omit=dev --ignore-scripts` 安装锁定的依赖。加 `--ref v<版本>` 可固定到某个发布 Tag。
 
 ### 从本地目录安装(开发)
 
@@ -80,9 +84,10 @@ daemon 克隆仓库后按 manifest 执行 `npm ci --omit=dev --ignore-scripts` �
 
 | 文档 | 内容 |
 |---|---|
+| [使用指南](docs/guide.md) | 安装、第一个任务、对话页、侧栏、设置、IM 触发源、常见用法与排障,含截图 |
 | [架构与设计](docs/architecture.md) | 能力一览、架构图、状态模型、与《Super-agent 设计探索》五模块的对应、设计取舍与限制 |
 | [设置项](docs/configuration.md) | 设置页每一项的含义、取值范围与生效时机 |
-| [使用指南](docs/usage.md) | 对话页、标签、消息流、右侧栏、命令中心、侧栏状态、界面语言 |
+| [界面细节](docs/usage.md) | 对话页、标签、消息流、右侧栏、命令中心、侧栏状态、界面语言 |
 | [IM 触发源](docs/im.md) | 飞书、钉钉、企业微信、微信、QQ 的接入步骤与行为 |
 | [pi 集成](docs/pi.md) | pi 担任 Router / Worker / 委派入口时的扩展安装与约束 |
 | [开发与发布](docs/development.md) | 本地开发与测试、翻译约定、CNB 发布流程、iOS 闪退排查 |
