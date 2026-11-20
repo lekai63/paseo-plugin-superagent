@@ -42,6 +42,17 @@ export const TriggerOriginSchema = z.object({
 });
 export type TriggerOrigin = z.infer<typeof TriggerOriginSchema>;
 
+export const ImCardSubmissionSchema = z.object({
+  deliveryId: z.string().min(1),
+  behavior: z.enum(["allow", "deny", "answer"]),
+  text: z.string().max(16000).optional(),
+  fields: z.record(z.string(), z.string().max(16000)).optional(),
+  selections: z.record(z.string(), z.array(z.string())).optional(),
+}).strict();
+export type ImCardSubmission = z.infer<typeof ImCardSubmissionSchema>;
+
+const WorkerRequestRefSchema = z.object({ ticketId: z.string(), agentId: z.string(), requestId: z.string() });
+
 export const TRIGGER_STATUSES = ["pending", "filtered", "evaluated", "delivered", "failed"] as const;
 export type TriggerStatus = (typeof TRIGGER_STATUSES)[number];
 
@@ -65,7 +76,8 @@ export const TriggerSchema = z.object({
   note: z.string().nullish(),
   threadId: z.string().nullish(),
   /** 权限通知的关联键:用于去重、撤销已解决的通知,不与普通汇报混淆。 */
-  workerRequest: z.object({ ticketId: z.string(), agentId: z.string(), requestId: z.string() }).nullish(),
+  workerRequest: WorkerRequestRefSchema.nullish(),
+  imCardSubmission: ImCardSubmissionSchema.optional(),
   /**
    * IM 消息引用(回复)的那条消息(§3.3 Inline):在本地记录里找到时内联其摘要与 ID,
    * 找不到时只保留平台消息 id。text 已截断,全文按 triggerId 回读。
@@ -407,6 +419,7 @@ export const ImDeliverySchema = z.object({
   id: z.string(),
   threadId: z.string(),
   origin: TriggerOriginSchema,
+  workerRequest: WorkerRequestRefSchema.optional(),
   parts: z.array(z.string()).min(1),
   nextPart: z.number().int().nonnegative(),
   status: z.enum(["pending", "failed", "sent"]),

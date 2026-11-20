@@ -1,6 +1,7 @@
 import path from "node:path";
-import type { TriggerOrigin } from "../shared/model";
+import type { ImCardSubmission, TriggerOrigin } from "../shared/model";
 import type { ReplySink } from "./engine";
+import type { ImRequestCard } from "./im-requests";
 import { resolvePaseoHome } from "./store";
 
 /**
@@ -30,6 +31,7 @@ export interface InboundMessage {
    * 把回复归入被引用消息所在的线程,并把被引用内容内联给 Router(§3.3)。
    */
   replyTo?: string[];
+  imCardSubmission?: ImCardSubmission;
 }
 
 /**
@@ -55,6 +57,8 @@ export interface ImSource {
   stop(): Promise<void>;
   /** 发送一段答复;通道回执带消息 id 时返回它(供引用回复时找回线程),否则返回空。 */
   send(origin: TriggerOrigin, text: string): Promise<string | null | void>;
+  /** undefined requests the text fallback; null is success without a message ID. */
+  sendRequestCard?(origin: TriggerOrigin, card: ImRequestCard): Promise<string | null | undefined>;
 }
 
 /** 多源管理:按设置启停各 channel,并作为引擎的 ReplySink。 */
@@ -106,5 +110,9 @@ export class ImManager implements ReplySink {
     const source = this.sources.get(origin.channel);
     if (!source) throw new Error(`IM channel ${origin.channel} is not running`);
     return (await source.send(origin, text)) ?? null;
+  }
+
+  async sendRequestCard(origin: TriggerOrigin, card: ImRequestCard): Promise<string | null | undefined> {
+    return this.sources.get(origin.channel)?.sendRequestCard?.(origin, card);
   }
 }

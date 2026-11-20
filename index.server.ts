@@ -150,6 +150,7 @@ export default function contribute(server: PluginServerContext) {
         threadKey: message.threadKey,
         context: message.context,
         replyTo: message.replyTo,
+        imCardSubmission: message.imCardSubmission,
       })
       .catch((error) => {
         console.error("[superagent] IM trigger dispatch failed", error);

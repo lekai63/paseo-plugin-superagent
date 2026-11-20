@@ -24,6 +24,15 @@ Behavior: a DM triggers directly; in a group the bot must be **@mentioned** (or 
 
 Non-text: for rich text (post) it takes the title, text, links and code blocks, plus the images and videos in it; images, files, voice messages (raw audio; Feishu provides no transcription) and videos are downloaded through the "get message resource file" interface. When replying to a message that has an attachment (for example replying to that file in a group and @mentioning the bot with "handle this"), the original message is fetched through the "get specified message content" interface and the replied-to file is downloaded. A merged forward lists the text of up to 50 sub-messages. Cards (interactive, such as a forwarded approval card): the event carries only degraded content (a complex card is reduced to its title), so the original card is fetched by calling "get specified message content" with `card_msg_content_type=raw_card_content` and converted into the title, field labels and values, @mentioned names and button links; if it cannot be fetched, the title and card link from the event are used. Feishu does not let a bot download resources inside merged forwards and cards, so such attachments are noted by type only. Folders, contact cards and locations get a one-sentence description, and sticker emoji are ignored. The local app was verified on 2026-11-10 to have permission for both interfaces; if a new app reports insufficient permission, enable them on the open platform as the error message says.
 
+## Answering or approving Worker requests
+
+- **Feishu** supports question forms and permission buttons. Enable long-connection callbacks and subscribe to `card.action.trigger` in the app console.
+- **WeCom** uses template cards for permissions and compatible choice questions. Free text and question sets beyond the template controls use text prompts.
+- **WeChat, QQ and DingTalk's current sessionWebhook integration** use text prompts. If a platform rejects a card, the plugin sends the text fallback.
+- Reply with `/answer <code> <answer>`. Enter option numbers, use commas for multiple selections, and use one `question number: answer` line per question in a set. If the channel returns quoted message IDs, you can also quote the prompt and reply with the answer. Use `/approve <code>` or `/deny <code> [reason]` for permissions.
+
+Answers and permissions are bound to the bot account, chat, and pending request. Text replies in a group follow the channel's mention rules.
+
 ## DingTalk (official Stream mode, no public endpoint)
 
 1. Create an in-house enterprise app in the [DingTalk developer console](https://open-dev.dingtalk.com) and note the AppKey / AppSecret;

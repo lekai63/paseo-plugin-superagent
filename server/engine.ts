@@ -14,6 +14,7 @@ import { isPiProviderSelection } from "../shared/pi-modes";
 import { recentResults, threadResult } from "../shared/results";
 import { defaultChatTabs, pruneChatTabs, type ChatTabs } from "../shared/chat-tabs";
 import { buildWorkerQuestionAnswers, parseWorkerQuestions, type WorkerQuestionAnswer } from "../shared/worker-questions";
+import { imQuestionNotice, parseImAnswerCommand, parseImQuestionAnswers, type ImRequestCard } from "./im-requests";
 import {
   dispatchMandateIssue,
   canRespondToWorkerPermission,
@@ -23,6 +24,8 @@ import {
   SUBSCRIBED_STATUSES,
   TERMINAL_TICKET_STATUSES,
   type Decision,
+  type ImCardSubmission,
+  type ImDelivery,
   type PendingAction,
   type RouterAction,
   type SuperagentSnapshot,
@@ -125,6 +128,11 @@ function humanApprovalCommand(trigger: Pick<Trigger, "kind" | "context" | "text"
   return HUMAN_TRIGGER_KINDS.includes(trigger.kind) && !trigger.context ? parseApprovalCommand(trigger.text) : null;
 }
 
+function imRequestCommand(trigger: Pick<Trigger, "origin" | "context" | "text" | "imCardSubmission">) {
+  if (!trigger.origin || trigger.context) return null;
+  return trigger.imCardSubmission ?? parseImAnswerCommand(trigger.text);
+}
+
 function clearWorkerRequests(state: SuperagentState, ticket: Ticket): void {
   ticket.pendingRequests = [];
   for (const trigger of state.triggers) {
@@ -204,12 +212,14 @@ export interface DispatchInput {
   threadKey?: string;
   /** IM 消息引用/回复的平台消息 id(父消息在前):命中本地记录时归入其线程并内联原文。 */
   replyTo?: string[];
+  imCardSubmission?: ImCardSubmission;
 }
 
 /** 答复外发通道:由 index.server 注入(engine 不直接依赖具体 IM 实现)。 */
 export interface ReplySink {
   /** 返回通道回执里的消息 id(有的话),用于用户引用答复时找回线程。 */
   send(origin: TriggerOrigin, text: string): Promise<string | null | void>;
+  sendRequestCard?(origin: TriggerOrigin, card: ImRequestCard): Promise<string | null | undefined>;
 }
 
 export class SuperagentEngine {
@@ -386,13 +396,28 @@ export class SuperagentEngine {
   /** 事件入口:fast-path → Thread 归属 → 订阅 fan-out 直通 | 排队评估。 */
   async dispatch(input: DispatchInput): Promise<{ threadId: string; triggerId: string; directDelivered: boolean; note: string | null }> {
     // 人的 /approve、/deny 由引擎确定性执行,不经 Router;引擎未启动时按普通消息排队,启动后补执行。
+    if (input.origin && !input.context && !input.imCardSubmission && input.replyTo?.length
+      && !parseApprovalCommand(input.task) && !parseImAnswerCommand(input.task)) {
+      await this.store.ready;
+      const chat = imConversationKey(input.origin);
+      const quoted = input.replyTo.map((id) => this.store.get().imDeliveries.find((item) => item.workerRequest
+        && imConversationKey(item.origin) === chat && item.sentMessageIds?.includes(id))).find(Boolean);
+      const ref = quoted?.workerRequest;
+      if (quoted && ref && this.pendingImRequest(ref)?.request.kind === "question") {
+        input = { ...input, imCardSubmission: { deliveryId: quoted.id, behavior: "answer",
+          text: input.task.trim().slice(0, this.settingsValues.triggerMaxChars) } };
+      }
+    }
     const kind = input.origin ? input.origin.channel : input.kind === "agent" ? "agent" : "manual";
     const command = this.paseo ? humanApprovalCommand({ kind, context: input.context ?? false, text: input.task.trim() }) : null;
-    const outcome = await this.intake(input, command ? { status: "delivered", note: "approval command" } : { status: "pending" });
+    const imCommand = this.paseo && imRequestCommand({ origin: input.origin, context: input.context ?? false,
+      text: input.task.trim().slice(0, this.settingsValues.triggerMaxChars), imCardSubmission: input.imCardSubmission });
+    const outcome = await this.intake(input, command || imCommand ? { status: "delivered", note: "worker request response" } : { status: "pending" });
     if (!outcome) throw new Error("empty task");
-    if (command) {
+    if (command || imCommand) {
       const trigger = this.store.get().triggers.find((item) => item.id === outcome.triggerId);
-      if (trigger) return { ...outcome, note: await this.executeApprovalCommand(trigger, command) };
+      if (trigger) return { ...outcome, note: imCommand ? await this.executeImRequest(trigger, imCommand)
+        : await this.executeApprovalCommand(trigger, command!) };
     }
     return outcome;
   }
@@ -518,6 +543,7 @@ export class SuperagentEngine {
       context: input.context ?? false,
       replyToAgentId: input.replyToAgentId ?? null,
       origin: input.origin ?? null,
+      imCardSubmission: input.origin && !input.context ? input.imCardSubmission : undefined,
       receivedAt: now,
       status: admission.status === "delivered" ? "delivered" : "pending",
       note: admission.status === "delivered" ? admission.note ?? null : queuedBeforeStart ? QUEUED_BEFORE_START : null,
@@ -632,8 +658,9 @@ export class SuperagentEngine {
     if (JSON.stringify(ticket.pendingRequests ?? []) === JSON.stringify(requests)) return requests.length > 0;
     const now = new Date().toISOString();
     const notifyThreads = new Set<string>();
+    const requestDeliveries: string[] = [];
     /** 授权类请求不交 Router:引擎原样告诉人,只有人能批准。 */
-    const approvalNotices: { threadId: string; ticketId: string; text: string }[] = [];
+    const approvalNotices: { threadId: string; workerRequest: NonNullable<Trigger["workerRequest"]>; text: string }[] = [];
     await this.store.update((next) => {
       const target = next.tickets.find((item) => item.id === ticket.id);
       if (!target || target.workerAgentId !== agentId || TERMINAL_TICKET_STATUSES.includes(target.status)) return;
@@ -664,16 +691,30 @@ export class SuperagentEngine {
         for (const threadId of this.reportThreads(target)) {
           const thread = next.threads.find((item) => item.id === threadId && item.state === "active");
           if (!thread) continue;
-          if (needsHumanApproval(request)) {
-            approvalNotices.push({ threadId, ticketId: target.id, text: this.approvalNotice(target, request) });
-            continue;
-          }
+          const workerRequest = { ticketId: target.id, agentId, requestId: request.id };
+          const approval = needsHumanApproval(request);
           const origin = next.triggers.filter((item) => item.threadId === threadId && !item.workerRequest)
             .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
             .find((item) => item.status !== "filtered" && (item.origin || item.replyToAgentId));
+          const form = !approval && origin?.origin ? parseWorkerQuestions(request.input) : null;
+          if (origin?.origin && (approval || form)) {
+            const text = form ? imQuestionNotice(target.title, approvalCode(target.id, request.id), form.questions)
+              : this.approvalNotice(target, request);
+            const notice = newDecision(threadId, [], "reply", { reply: text, ticketId: target.id, workerApprovalNotice: true,
+              rationale: "engine: Worker request sent to IM" });
+            const delivery = this.prepareImDelivery(notice, origin.origin, text, workerRequest);
+            next.decisions.push(notice);
+            next.imDeliveries.push(delivery);
+            requestDeliveries.push(delivery.id);
+            continue;
+          }
+          if (approval) {
+            approvalNotices.push({ threadId, workerRequest, text: this.approvalNotice(target, request) });
+            continue;
+          }
           next.triggers.push({
             id: newId("trg"), kind: "engine", sender: `worker:${target.id}`, threadId, threadKey: thread.key,
-            workerRequest: { ticketId: target.id, agentId, requestId: request.id },
+            workerRequest,
             text: `Worker "${target.title}" needs a ${request.kind} response. ticketId=${target.id} requestId=${request.id}\n`
               + `Answer this question with respond when established context covers it; otherwise use reply to ask the human.\n`
               + truncate(JSON.stringify(request), 6000) + `\nFull current requests: superagent_read ${target.id}`,
@@ -684,10 +725,11 @@ export class SuperagentEngine {
         }
       }
     });
+    for (const id of requestDeliveries) void this.sendImDelivery(id);
     for (const threadId of notifyThreads) this.scheduleEval(threadId, 0);
     for (const notice of approvalNotices) {
       await this.notifyThread(notice.threadId, notice.text, {
-        outcome: "reply", ticketId: notice.ticketId, workerApprovalNotice: true,
+        outcome: "reply", ticketId: notice.workerRequest.ticketId, workerApprovalNotice: true, workerRequest: notice.workerRequest,
         rationale: "engine: Worker permission request awaits the human's /approve or /deny",
       });
     }
@@ -731,6 +773,61 @@ export class SuperagentEngine {
       .map(({ ticket, request, code }) => `${code} (${truncate(ticket.title, 40)}: ${request.kind} · ${truncate(request.name, 60)})`);
     if (candidates.length > APPROVAL_LIST_LIMIT) list.push("…");
     return t("server.engine.approvalPending", { list: list.join("; ") });
+  }
+
+  private pendingImRequest(ref: NonNullable<ImDelivery["workerRequest"]>) {
+    const ticket = this.store.get().tickets.find((item) => item.id === ref.ticketId && item.workerAgentId === ref.agentId);
+    if (!ticket || TERMINAL_TICKET_STATUSES.includes(ticket.status)) return null;
+    const request = ticket.pendingRequests?.find((item) => item.id === ref.requestId);
+    return request ? { ticket, request } : null;
+  }
+
+  private async executeImRequest(trigger: Trigger, command: NonNullable<ReturnType<typeof imRequestCommand>>): Promise<string> {
+    const origin = trigger.origin!;
+    const card = "deliveryId" in command ? command : null;
+    const code = "code" in command ? command.code : null;
+    const candidates = new Map<string, { ticket: Ticket; request: WorkerRequest; threadId: string }>();
+    for (const delivery of this.store.get().imDeliveries) {
+      const ref = delivery.workerRequest;
+      if (!ref || imConversationKey(origin) !== imConversationKey(delivery.origin)) continue;
+      if (card ? delivery.id !== card.deliveryId : !code || approvalCode(ref.ticketId, ref.requestId) !== code) continue;
+      const current = this.pendingImRequest(ref);
+      if (current && this.reportThreads(current.ticket).includes(delivery.threadId) && (card || current.request.kind === "question")) {
+        candidates.set(JSON.stringify(ref), { ...current, threadId: delivery.threadId });
+      }
+    }
+    const candidate = candidates.size === 1 ? candidates.values().next().value : undefined;
+    let note = candidates.size > 1 ? "ambiguous IM request" : "IM request is no longer pending";
+    let text = candidates.size > 1 ? t("server.engine.approvalAmbiguous", { code: code ?? "" }) : t("server.engine.approvalGone");
+    if (code === "") text = t("server.engine.imAnswerUsage");
+    if (candidate) {
+      const { ticket, request } = candidate;
+      const behavior = card?.behavior ?? "answer";
+      const form = behavior === "answer" && request.kind === "question" ? parseWorkerQuestions(request.input) : null;
+      const answers = form && parseImQuestionAnswers(form.questions, card ?? { text: command.text });
+      const decision = behavior === "answer" ? (answers ? { behavior, answers } : null)
+        : behavior === "allow" ? { behavior } : { behavior, message: "Denied by the human" };
+      const result = decision ? await this.respondAsHuman(ticket, request, decision, candidate.threadId)
+        : { error: t("server.engine.imAnswerInvalid") };
+      if (result === "done") {
+        text = t(behavior === "answer" ? "server.engine.questionAnswered"
+          : behavior === "allow" ? "server.engine.approvalAllowed" : "server.engine.approvalDenied", { title: ticket.title, name: request.name });
+        note = `human ${behavior} for IM request ${request.id} of ${ticket.id}`;
+      } else if (result !== "gone") {
+        text = result.error;
+        note = "IM response was rejected";
+      }
+    }
+    await this.store.update((next) => {
+      const current = next.triggers.find((item) => item.id === trigger.id);
+      if (current) {
+        current.note = note;
+        delete current.imCardSubmission;
+      }
+    });
+    await this.notifyThread(trigger.threadId!, text, { outcome: "reply", origin, ticketId: candidate?.ticket.id,
+      triggerIds: [trigger.id], rationale: note });
+    return note;
   }
 
   /**
@@ -1494,6 +1591,39 @@ export class SuperagentEngine {
       if (!delivery || delivery.status !== "pending") return;
       // 首次落盘失败时记录仍可能留在内存;恢复发送前先确认它可以持久化。
       await this.store.update(() => {});
+      const ref = delivery.workerRequest;
+      if (ref && delivery.nextPart === 0) {
+        const current = this.pendingImRequest(ref);
+        if (!current) {
+          await this.store.update((next) => {
+            const target = next.imDeliveries.find((item) => item.id === id);
+            if (target) { target.status = "sent"; target.nextPart = target.parts.length; }
+          });
+          return;
+        }
+        const { ticket, request } = current;
+        const sink = this.replySink;
+        if (sink?.sendRequestCard) {
+          const card: ImRequestCard = {
+            deliveryId: id, title: ticket.title, text: delivery.parts.join("\n"),
+            questions: request.kind === "question" ? parseWorkerQuestions(request.input)?.questions : undefined,
+            allow: canRespondToWorkerPermission(request, "allow"), deny: canRespondToWorkerPermission(request, "deny"),
+          };
+          const origin = delivery.origin;
+          const cardMessageId = await bounded(() => sink.sendRequestCard!(origin, card), "IM request card").catch(() => undefined);
+          if (cardMessageId !== undefined) {
+            await this.store.update((next) => {
+              const target = next.imDeliveries.find((item) => item.id === id);
+              if (!target) return;
+              target.nextPart = target.parts.length;
+              target.status = "sent";
+              target.updatedAt = this.now().toISOString();
+              if (cardMessageId) target.sentMessageIds = [...(target.sentMessageIds ?? []), cardMessageId];
+            });
+            return;
+          }
+        }
+      }
       while (delivery.nextPart < delivery.parts.length) {
         let sentId: string | null = null;
         try {
@@ -2079,18 +2209,20 @@ export class SuperagentEngine {
       .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
     for (const trigger of queued) {
       const command = trigger.threadId ? humanApprovalCommand(trigger) : null;
+      const imCommand = trigger.threadId ? imRequestCommand(trigger) : null;
       await this.store.update((next) => {
         const target = next.triggers.find((t) => t.id === trigger.id);
         if (target?.note === QUEUED_BEFORE_START) target.note = null;
         // 启动前排队的批准命令同样由引擎执行,不交 Router 评估。
-        if (target && command) {
+        if (target && (command || imCommand)) {
           target.status = "delivered";
           target.note = "approval command";
         }
       });
-      if (command) {
+      if (command || imCommand) {
         const target = this.store.get().triggers.find((t) => t.id === trigger.id);
-        if (target) await this.executeApprovalCommand(target, command);
+        if (target && imCommand) await this.executeImRequest(target, imCommand);
+        else if (target && command) await this.executeApprovalCommand(target, command);
         continue;
       }
       if (trigger.context || !trigger.threadId) continue;
@@ -2118,10 +2250,19 @@ export class SuperagentEngine {
    * Errors default to an "error" row; human-facing notices (approval requests and results) are
    * recorded as a reply so the chat page shows the full text.
    */
+  private prepareImDelivery(decision: Decision, origin: TriggerOrigin, text: string, workerRequest?: ImDelivery["workerRequest"]): ImDelivery {
+    return {
+      id: `im-${decision.id}`, threadId: decision.threadId, origin, workerRequest,
+      parts: splitImReply(text, this.settingsValues.imReplyMaxChars), nextPart: 0,
+      status: "pending", sentMessageIds: [], createdAt: decision.createdAt, updatedAt: decision.createdAt,
+    };
+  }
+
   private async notifyThread(
     threadId: string,
     text: string,
-    options: { outcome?: "error" | "reply"; ticketId?: string | null; rationale?: string; triggerIds?: string[]; workerApprovalNotice?: true } = {},
+    options: { outcome?: "error" | "reply"; ticketId?: string | null; rationale?: string; triggerIds?: string[];
+      workerApprovalNotice?: true; origin?: TriggerOrigin; workerRequest?: ImDelivery["workerRequest"] } = {},
   ): Promise<void> {
     const state = this.store.get();
     const source = state.triggers.filter((t) => t.threadId === threadId && t.status !== "filtered" && (t.origin || t.replyToAgentId))
@@ -2132,11 +2273,8 @@ export class SuperagentEngine {
         workerApprovalNotice: options.workerApprovalNotice,
       })
       : newDecision(threadId, options.triggerIds ?? [], "error", { rationale: text, ticketId: options.ticketId ?? null });
-    const delivery = source?.origin ? {
-      id: `im-${decision.id}`, threadId, origin: source.origin,
-      parts: splitImReply(text, this.settingsValues.imReplyMaxChars), nextPart: 0,
-      status: "pending" as const, sentMessageIds: [], createdAt: decision.createdAt, updatedAt: decision.createdAt,
-    } : null;
+    const origin = options.origin ?? source?.origin;
+    const delivery = origin ? this.prepareImDelivery(decision, origin, text, options.workerRequest) : null;
     await this.store.update((next) => {
       next.decisions.push(decision);
       if (delivery) next.imDeliveries.push(delivery);
