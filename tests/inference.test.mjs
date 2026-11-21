@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 import { Deadline } from "../server/deadline.ts";
-import { runInference } from "../server/inference.ts";
+import { listInferenceModels, runInference } from "../server/inference.ts";
 import { parseVerdict } from "../server/router.ts";
 
 const tool = (id, name, args) => ({ id, type: "function", function: { name, arguments: JSON.stringify(args) } });
@@ -11,6 +11,30 @@ const payload = (content, tools, usage) => ({
   usage: usage ?? { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 80 } },
 });
 const okText = '{"actions":[{"action":"reply","reply":"done"}]}';
+
+test("inference model discovery uses the same endpoint and keeps only valid advertised effort", async () => {
+  const models = await listInferenceModels("https://inference.example/api/v1/", "test-key", async (url, init) => {
+    assert.equal(String(url), "https://inference.example/api/v1/models");
+    assert.equal(init.method, "GET");
+    assert.equal(init.headers.authorization, "Bearer test-key");
+    assert.equal(init.redirect, "error");
+    return Response.json({ data: [
+      { id: "bare-model", owned_by: "example" },
+      { id: "effort-model", effort: { supported_levels: ["low", "max"], default_level: "low" } },
+      { id: "malformed-effort", effort: { supported_levels: "low" } },
+      { id: "bare-model" },
+      { name: "missing-id" },
+    ] });
+  });
+  assert.deepEqual(models.map((model) => model.id), ["bare-model", "effort-model", "malformed-effort"]);
+  assert.equal(models[0].effort, undefined);
+  assert.deepEqual(models[1].effort, { supported_levels: ["low", "max"], default_level: "low" });
+  assert.equal(models[2].effort, undefined);
+  await assert.rejects(listInferenceModels("http://inference.example/v1", "test-key",
+    async () => assert.fail("HTTP endpoint reached fetch")), /requires HTTPS/);
+  await assert.rejects(listInferenceModels("https://inference.example/v1", "test-key",
+    async () => new Response("secret detail", { status: 403 })), /HTTP 403$/);
+});
 
 function options(t, recall = {}, config = {}) {
   const deadline = new Deadline(5_000, "test inference");

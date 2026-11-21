@@ -2851,6 +2851,7 @@ Return the full patrol JSON with summary and actions.`,
       baseUrl: settings.inferenceBaseUrl,
       model: (role === "watchdog" ? settings.watchdogModel : "") || settings.routerModel,
       apiKey: settings.inferenceApiKey,
+      reasoningEffort: role === "router" ? settings.routerReasoningEffort : undefined,
     };
   }
 

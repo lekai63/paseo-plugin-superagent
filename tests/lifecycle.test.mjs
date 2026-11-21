@@ -829,6 +829,21 @@ test("inference uses only the API key configured in Superagent settings", async 
   assert.doesNotMatch(JSON.stringify(f.calls.requests.at(-1).body), /plugin-key|legacy-key/);
 });
 
+test("configured reasoning effort is sent for the Router and omitted for the watchdog", async t => {
+  const f = fixture(t);
+  await evaluateRouter(f);
+  assert.equal(Object.hasOwn(f.calls.requests.at(-1).body, "reasoning_effort"), false);
+  f.controls.settingsChanged({ status: "ready", values: {
+    ...f.values, routerReasoningEffort: "provider-specific", watchdogEnabled: true,
+  } });
+  await evaluateRouter(f);
+  assert.equal(f.calls.requests.at(-1).body.reasoning_effort, "provider-specific");
+  await f.engine.maybePatrol(true);
+  const patrol = f.calls.requests.at(-1).body;
+  assert.match(patrol.messages[1].content, /^# Patrol /);
+  assert.equal(Object.hasOwn(patrol, "reasoning_effort"), false);
+});
+
 test("a new thread gets recovery context without resending the Router protocol", async (t) => {
   const f = fixture(t, "waiting");
   await evaluateRouter(f);

@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Pressable, Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
-import { useSettings, type PluginSurfaceProps, type SettingsState } from "@getpaseo/plugin/client";
+import { useRpc, useSettings, type PluginSurfaceProps, type SettingsState } from "@getpaseo/plugin/client";
 import {
+  Icon,
+  ScrollView,
   SettingsAction,
   SettingsCard,
   SettingsInput,
@@ -26,6 +28,7 @@ import {
   type WorkerProfile,
 } from "../shared/settings";
 import type { MessageKey, Translate } from "../shared/i18n";
+import { superagentInferenceModelsRpc, type InferenceModel } from "../shared/rpc";
 import { isPiProviderSelection, type PiPermissionModes } from "../shared/pi-modes";
 import { useT } from "./i18n";
 import { STATE_QUERY_KEY, usePiPermissionModes, useProviderSnapshot, type ProviderSnapshotEntry } from "./query";
@@ -254,9 +257,12 @@ function SettingsForm({ settings, hostId, theme, tab }: { settings: Ready; hostI
 
   const set = useCallback(<K extends keyof FormValues>(key: K, value: FormValues[K]) => {
     const current = draft.form;
+    const routerTargetChanged = (key === "routerModel" || key === "inferenceBaseUrl")
+      && String(current[key]).trim() !== String(value).trim();
     draft.form = {
       ...current,
       [key]: value,
+      ...(routerTargetChanged ? { routerReasoningEffort: "" } : {}),
       ...(key === "workerProvider" && splitProviderModel(current.workerProvider).provider !== splitProviderModel(String(value)).provider
         ? { workerModeId: "" } : {}),
     };
@@ -375,8 +381,7 @@ function SettingsForm({ settings, hostId, theme, tab }: { settings: Ready; hostI
             hint={t("settings.model.inferenceBaseUrlHint")} placeholder="https://your-inference-host/v1" />
           <TextField {...field} name="inferenceApiKey" label={t("settings.model.inferenceApiKey")}
             hint={t("settings.model.inferenceApiKeyHint")} secret />
-          <TextField {...field} name="routerModel" label={t("settings.model.routerModel")}
-            hint={t("settings.model.routerHint")} />
+          <RouterModelFields {...field} theme={theme} />
           <ModelField
             {...field}
             name="workerProvider"
@@ -587,6 +592,164 @@ function SettingsForm({ settings, hostId, theme, tab }: { settings: Ready; hostI
 }
 
 // ---------------------------------------------------------------- Fields
+
+type RouterField = "routerModel" | "routerReasoningEffort";
+type ModelCatalog =
+  | { baseUrl: string; apiKey: string; status: "loading" | "error" }
+  | { baseUrl: string; apiKey: string; status: "ready"; models: InferenceModel[] };
+
+function RouterModelFields({ form, errors, set, disabled, theme }: Pick<FieldContext, "form" | "errors" | "set" | "disabled">
+  & { theme: PluginSurfaceProps["theme"] }) {
+  const t = useT();
+  const getModels = useRpc(superagentInferenceModelsRpc);
+  const [activeField, setActiveField] = useState<RouterField | null>(null);
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
+  const requestId = useRef(0);
+  const baseUrl = form.inferenceBaseUrl.trim();
+  const apiKey = form.inferenceApiKey.trim();
+  const current = catalog?.baseUrl === baseUrl && catalog.apiKey === apiKey ? catalog : null;
+  const models = current?.status === "ready" ? current.models : null;
+  const modelId = form.routerModel.trim();
+  const effort = models?.find((model) => model.id === modelId)?.effort;
+  const effortLevels = [...new Set(effort?.supported_levels ?? [])];
+  const noEffort = models !== null && effortLevels.length === 0;
+  const effortDefault = effort?.default_level && effortLevels.includes(effort.default_level)
+    ? t("settings.model.catalogDefaultLevel", { level: effort.default_level }) : t("settings.model.routerReasoningEffortDefault");
+  const openField = current ? activeField : null;
+  const browse = async (name: RouterField) => {
+    if (openField === name) {
+      setActiveField(null);
+      return;
+    }
+    setActiveField(name);
+    if (current?.status === "ready" || current?.status === "loading") return;
+    const id = ++requestId.current;
+    setCatalog({ baseUrl, apiKey, status: "loading" });
+    try {
+      const result = await getModels({ baseUrl, apiKey });
+      if (requestId.current === id) setCatalog({ baseUrl, apiKey, status: "ready", models: result.models });
+    } catch {
+      if (requestId.current === id) setCatalog({ baseUrl, apiKey, status: "error" });
+    }
+  };
+
+  const fields = [
+    { name: "routerModel", label: t("settings.model.routerModel"), hint: t("settings.model.routerHint"),
+      placeholder: undefined, width: 240, grow: 2 },
+    { name: "routerReasoningEffort", label: t("settings.model.routerReasoningEffort"),
+      hint: modelId && noEffort ? t("settings.model.catalogNoEffort") : t("settings.model.routerReasoningEffortHint"),
+      placeholder: effortDefault, width: 150, grow: 1 },
+  ] as const;
+  const options = openField === "routerModel"
+    ? models?.map(({ id }) => ({ value: id, label: id }))
+    : effortLevels.length ? [
+      { value: "", label: effortDefault },
+      ...effortLevels.map((level) => ({ value: level, label: level })),
+    ] : undefined;
+  const dropdownNote = current?.status === "loading" ? t("settings.model.catalogLoading")
+    : current?.status === "error" ? t("settings.model.catalogFailed")
+    : t("settings.model.catalogEmpty");
+  return (
+    <View testID="superagent-router-model-fields" style={{ flexDirection: "row", flexWrap: "wrap", gap: space.md, padding: space.lg }}>
+      {fields.map(({ name, label, hint, placeholder, width, grow }) => {
+        const error = errors[name];
+        const canBrowse = Boolean(baseUrl) && (name === "routerModel" || (Boolean(modelId) && !noEffort));
+        return (
+          <View key={name} style={{ flexBasis: width, flexGrow: grow, flexShrink: 1, minWidth: 0, gap: space.xs }}>
+            <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base }}>{label}</Text>
+            <View style={{ flexDirection: "row", alignItems: "stretch" }}>
+              <TextInput
+                accessibilityLabel={label}
+                autoCapitalize="none"
+                autoCorrect={false}
+                value={form[name]}
+                onChangeText={(value) => { setActiveField(null); set(name, value); }}
+                editable={!disabled}
+                placeholder={placeholder}
+                placeholderTextColor={theme.colors.foregroundMuted}
+                style={{
+                  flex: 1, minWidth: 0, minHeight: 36, paddingHorizontal: space.sm, borderWidth: 1, borderRadius: radius.md,
+                  borderColor: error ? theme.colors.statusDanger : theme.colors.border,
+                  color: theme.colors.foreground, backgroundColor: theme.colors.surface0, fontSize: fontSize.base,
+                  opacity: disabled ? 0.5 : 1,
+                }}
+              />
+              {canBrowse ? (
+                <Pressable
+                  accessibilityLabel={t("settings.model.catalogBrowse", { field: label })}
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded: openField === name, disabled }}
+                  disabled={disabled}
+                  onPress={() => void browse(name)}
+                  style={{ justifyContent: "center", alignItems: "center", width: 36, marginLeft: space.xs,
+                    borderWidth: 1, borderColor: theme.colors.border, borderRadius: radius.md }}
+                >
+                  <Icon name={openField === name ? "ChevronUp" : "ChevronDown"} size={16} color={theme.colors.foreground} />
+                </Pressable>
+              ) : null}
+            </View>
+            <Text accessibilityRole={error ? "alert" : undefined}
+              style={{ color: error ? theme.colors.statusDanger : theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
+              {error ?? hint}
+            </Text>
+            {canBrowse && openField === name ? (
+              options?.length ? (
+                <InferenceChoices key={name} options={options} value={form[name]} theme={theme} onSelect={(value) => {
+                  set(name, value);
+                  setActiveField(null);
+                }} />
+              ) : <Text accessibilityLiveRegion="polite" style={{ color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
+                {dropdownNote}
+              </Text>
+            ) : null}
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+function InferenceChoices({ options, value, theme, onSelect }: {
+  options: { value: string; label: string }[];
+  value: string;
+  theme: PluginSurfaceProps["theme"];
+  onSelect(value: string): void;
+}) {
+  const t = useT();
+  const [query, setQuery] = useState("");
+  const prefix = query.trim().toLowerCase();
+  const matches = options.filter((option) => option.label.toLowerCase().startsWith(prefix));
+  const searchLabel = t("settings.model.catalogSearch");
+  return (
+    <View style={{ borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface0, borderRadius: radius.md }}>
+      <TextInput
+        autoCapitalize="none"
+        autoCorrect={false}
+        accessibilityLabel={searchLabel}
+        placeholder={searchLabel}
+        placeholderTextColor={theme.colors.foregroundMuted}
+        value={query}
+        onChangeText={setQuery}
+        onSubmitEditing={() => { if (matches.length === 1) onSelect(matches[0].value); }}
+        style={{ minHeight: 36, paddingHorizontal: space.sm, color: theme.colors.foreground,
+          fontSize: fontSize.base, borderBottomWidth: 1, borderColor: theme.colors.border }}
+      />
+      <ScrollView keyboardShouldPersistTaps="handled" nestedScrollEnabled style={{ maxHeight: 220 }}>
+        {matches.length === 0 ? (
+          <Text accessibilityLiveRegion="polite" style={{ padding: space.sm, color: theme.colors.foregroundMuted, fontSize: fontSize.sm }}>
+            {t("settings.model.catalogNoMatches")}
+          </Text>
+        ) : matches.map((option) => (
+          <Pressable key={option.value} accessibilityRole="button" accessibilityState={{ selected: option.value === value }}
+            onPress={() => onSelect(option.value)}
+            style={{ padding: space.sm, backgroundColor: option.value === value ? theme.colors.surface1 : theme.colors.surface0 }}>
+            <Text style={{ color: theme.colors.foreground, fontSize: fontSize.base }}>{option.label}</Text>
+          </Pressable>
+        ))}
+      </ScrollView>
+    </View>
+  );
+}
 
 function ProfileCard({
   row,

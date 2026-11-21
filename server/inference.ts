@@ -1,8 +1,9 @@
 import { isIPv4 } from "node:net";
 import { z } from "zod";
 import { truncate, type InferenceTrace } from "../shared/model";
+import { InferenceModelSchema, type InferenceModel } from "../shared/rpc";
 import { DECISION_REPEAT_LIMIT, DECISION_TOOL_LIMIT } from "./decision-budget";
-import type { Deadline } from "./deadline";
+import { Deadline } from "./deadline";
 
 const RECALL_RESULT_LIMIT = 66_000;
 const RECALL_CONTEXT_LIMIT = 128_000;
@@ -62,6 +63,7 @@ export interface InferenceConfig {
   baseUrl: string;
   model: string;
   apiKey?: string;
+  reasoningEffort?: string;
 }
 
 interface InferenceInput<V> {
@@ -81,7 +83,7 @@ type InferenceResult<V> = ({ verdict: V } | { error: string }) & {
   trace: InferenceTrace;
 };
 
-function completionsUrl(baseUrl: string): URL {
+function inferenceUrl(baseUrl: string, resource: "chat/completions" | "models"): URL {
   if (!baseUrl) throw new Error("Superagent inference API base URL is not configured");
   let url: URL;
   try {
@@ -96,8 +98,36 @@ function completionsUrl(baseUrl: string): URL {
   if (url.protocol === "http:" && !loopback) {
     throw new Error("Superagent inference API requires HTTPS unless the URL uses a loopback IP address");
   }
-  url.pathname = url.pathname.replace(/\/+$/, "") + "/chat/completions";
+  url.pathname = url.pathname.replace(/\/+$/, "") + "/" + resource;
   return url;
+}
+
+export async function listInferenceModels(baseUrl: string, apiKey: string, request: typeof fetch = fetch): Promise<InferenceModel[]> {
+  const url = inferenceUrl(baseUrl, "models");
+  const headers: Record<string, string> = { accept: "application/json", "user-agent": "paseo-superagent" };
+  if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+  const deadline = new Deadline(10_000, "Inference model discovery");
+  try {
+    const response = await deadline.wait(() => request(url, {
+      method: "GET", headers, signal: deadline.signal, redirect: "error",
+    })).catch(() => { throw new Error("Could not reach the Superagent inference API"); });
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error(`Superagent inference API returned HTTP ${response.status}`);
+    }
+    const payload = z.object({ data: z.array(z.unknown()) })
+      .safeParse(await deadline.wait(() => response.json()).catch(() => undefined));
+    if (!payload.success) throw new Error("Superagent inference API returned an invalid model list");
+    const models = new Map<string, InferenceModel>();
+    const modelEntry = InferenceModelSchema.extend({ effort: InferenceModelSchema.shape.effort.catch(undefined) });
+    for (const entry of payload.data.data) {
+      const model = modelEntry.safeParse(entry);
+      if (model.success && !models.has(model.data.id)) models.set(model.data.id, model.data);
+    }
+    return [...models.values()];
+  } finally {
+    deadline.cancel();
+  }
 }
 
 async function query(call: ToolCall, recall: Recall, consume: (key: string) => string | null): Promise<string> {
@@ -129,7 +159,7 @@ export async function runInference<V>(
   { config, instructions, context, threadId, recall, parse, repair, deadline }: InferenceInput<V>,
   request: typeof fetch = fetch,
 ): Promise<InferenceResult<V>> {
-  const url = completionsUrl(config.baseUrl);
+  const url = inferenceUrl(config.baseUrl, "chat/completions");
   if (!config.model) throw new Error("Superagent inference model is not configured");
 
   const started = Date.now();
@@ -155,6 +185,7 @@ export async function runInference<V>(
       body: JSON.stringify({
         model: config.model,
         messages,
+        ...(config.reasoningEffort ? { reasoning_effort: config.reasoningEffort } : {}),
         ...(allowRecall ? { tools } : {}),
         ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
       }),

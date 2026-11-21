@@ -11,6 +11,7 @@
 | Worker 待命回收 | `workerIdleTimeoutMin`,默认 1440 分钟(24 小时),可设 1–43200 分钟。长期空闲的 waiting 票据完结并退订全部线程,保留汇报,归档 Worker 与其独占工作区;共享工作区保留。回收意图落盘,失败后看门狗继续清理。有新消息、待执行动作、实际运行或审批时暂缓;Worker 本轮结束后仍留着后台 shell/监控(Paseo 0.16 上报的 `backgroundWork`)时也暂缓,等它们结束再回收。审批/问题等待超过 24 小时提醒一次,保留请求供人工处理 |
 | 工作目录 | daemon 上的绝对路径。派发默认 Worker 时需要填写。共享隔离按目录复用工作区，worktree 隔离要求路径位于 Git 仓库内。 |
 | 推理 API 基础地址和 Router 模型 | `inferenceBaseUrl` 与 `routerModel`。使用支持函数调用的 Chat Completions API，地址包含版本路径，例如 `https://inference.example/v1`。插件补上 `/chat/completions`。需要 Bearer 鉴权时，在「推理 API 密钥」字段（`inferenceApiKey`）填写密钥。远程地址须使用 HTTPS，`127.0.0.1` 和 `[::1]` 等回环 IP 地址可使用 HTTP。 |
+| Router 思考强度 | 可选的 `routerReasoningEffort`。打开模型或思考强度下拉框时，插件向配置的 API 请求 `GET /models`。可以按前缀搜索或直接填写。思考强度下拉框显示所选模型声明的档位，留空时沿用服务默认。更改端点或 Router 模型会清空该字段。 |
 | thinking 档位（可选） | 默认 Worker 和具名档位可独立设置，候选来自 Paseo provider。 |
 | Router 自定义规则 | `routerInstructions`，支持多行，最多 12000 字符。随每次评估的系统消息发送。 |
 | IM 附件收件目录 | `imInboxDir`,daemon 主机上的绝对路径;留空为 `$PASEO_HOME/plugin-data/superagent/inbox`。聊天里收到的文件存到 `<目录>/<通道>/<北京时间日期>/<消息 id>/` 下,改后对下一条消息立即生效,不重连通道。各 Worker 档位的工作目录有自己的归档规则时,宜设成它们之外的中立目录,由 Worker 按规则移入任务目录 |

@@ -1,6 +1,7 @@
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { SuperagentStore } from "./server/store";
 import { SuperagentEngine } from "./server/engine";
+import { listInferenceModels } from "./server/inference";
 import {
   createCancelTicketHandler,
   createCloseThreadHandler,
@@ -30,6 +31,7 @@ import {
   superagentCloseThreadRpc,
   superagentDispatchRpc,
   superagentForceEvalRpc,
+  superagentInferenceModelsRpc,
   superagentReadFileRpc,
   superagentRespondToPermissionRpc,
   superagentRetryTicketRpc,
@@ -114,6 +116,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(superagentStatFilesRpc, withPrime(async (input) => ({ kinds: await statPaths(input.paths) })));
   // pi 权限模式候选(pi-permission-modes):设置页 provider 选 pi 时的 Worker 模式来源。
   server.handle(superagentPiModesRpc, withPrime(() => readPiPermissionModes()));
+  server.handle(superagentInferenceModelsRpc, async ({ baseUrl, apiKey }) => ({
+    models: await listInferenceModels(baseUrl, apiKey),
+  }));
 
   // agent 委派与编排工具入口:插件自持的本地 MCP endpoint(按调用方角色下发
   // superagent_dispatch / Worker 退订转回工具),经 session_open 注入。

@@ -14,6 +14,24 @@ import { WorkerQuestionAnswerSchema } from "./worker-questions";
 
 const OkSchema = z.object({ ok: z.boolean(), error: z.string().nullish() });
 
+export const InferenceModelSchema = z.object({
+  id: z.string().min(1).max(200),
+  effort: z.object({
+    supported_levels: z.array(z.string().min(1).max(120)).max(32),
+    default_level: z.string().min(1).max(120).optional(),
+  }).optional(),
+});
+export type InferenceModel = z.infer<typeof InferenceModelSchema>;
+
+export const superagentInferenceModelsRpc = defineRpc({
+  name: "superagent.inference_models",
+  input: z.object({
+    baseUrl: z.string().trim().min(1).max(1000),
+    apiKey: z.string().trim().max(8192),
+  }),
+  output: z.object({ models: z.array(InferenceModelSchema) }),
+});
+
 export const superagentRetryImDeliveryRpc = defineRpc({
   name: "superagent.retry_im_delivery",
   input: z.object({ deliveryId: z.string() }),

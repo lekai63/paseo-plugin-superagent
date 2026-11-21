@@ -26,7 +26,8 @@ const entries = [
 ];
 
 // Render the real settings draft and callbacks with host UI components as leaves.
-function fixture({ query = { data: entries }, modeId = "", piModes = { data: { available: false, modes: [], defaultModeId: null } }, values = null } = {}) {
+function fixture({ query = { data: entries }, modeId = "", piModes = { data: { available: false, modes: [], defaultModeId: null } },
+  values = null, listModels = async () => ({ models: [] }) } = {}) {
   const saved = [];
   const slots = [];
   let cursor = 0;
@@ -48,17 +49,17 @@ function fixture({ query = { data: entries }, modeId = "", piModes = { data: { a
   const modules = {
     react: { useState, useEffect() {}, useCallback: (fn) => fn, useMemo: (fn) => fn(), useRef: (value) => useState({ current: value })[0] },
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
-    "react-native": { View: "View", Text: "Text" },
+    "react-native": { View: "View", Text: "Text", Pressable: "Pressable" },
     "@getpaseo/plugin": plugin,
     "@getpaseo/plugin/client": {
       defineTranslations,
       useTranslation: () => ({ locale: "zh-CN", t: (key) => key }),
       useSettings: () => settings,
       usePaseo: () => ({ providers: { snapshot: async () => ({ entries: [], compactSnapshot: { entries } }) } }),
-      useRpc: () => async () => piModes.data,
+      useRpc: (contract) => contract.name === "superagent.inference_models" ? listModels : async () => piModes.data,
     },
     "@getpaseo/plugin/client/ui": Object.fromEntries([
-      "SettingsAction", "SettingsCard", "SettingsInput", "SettingsSection", "SettingsSelect", "SettingsSwitch", "TextInput",
+      "SettingsAction", "SettingsCard", "SettingsInput", "SettingsSection", "SettingsSelect", "SettingsSwitch", "TextInput", "Icon", "ScrollView",
     ].map((name) => [name, name])),
     "@tanstack/react-query": {
       useQueryClient: () => ({ getQueryData() {} }),
@@ -100,6 +101,63 @@ test("mode options use each provider's own catalog, including compact host snaps
   assert.deepEqual(Array.from(f.field("Worker 模式(可选)").options, (option) => option.value), ["", "full-access"]);
   const compact = await f.queryFn();
   assert.equal(compact[1].modes[1].id, "agent");
+});
+
+test("Router model and reasoning effort share a row and changing either inference target clears the effort", async () => {
+  const f = fixture({
+    values: { inferenceBaseUrl: "https://inference.example/v1", routerModel: "model-a", routerReasoningEffort: "high" },
+  });
+  const modelRow = f.render().find((node) => node.props.testID === "superagent-router-model-fields");
+  assert.ok(modelRow);
+  assert.equal(modelRow.props.style.flexDirection, "row");
+  assert.deepEqual(Array.from(modelRow.props.children, (column) => column.props.children[0].props.children), ["Router 模型", "思考强度"]);
+  const input = (label) => f.render().find((node) => node.type === "TextInput" && node.props.accessibilityLabel === label).props;
+  assert.equal(input("思考强度").value, "high");
+  input("Router 模型").onChangeText("model-b");
+  assert.equal(input("思考强度").value, "");
+  input("思考强度").onChangeText("provider-specific");
+  f.field("推理 API 基础地址", "SettingsInput").onChangeText("https://other.example/v1");
+  assert.equal(input("思考强度").value, "");
+  input("思考强度").onChangeText("provider-specific");
+  await f.render().find((node) => node.type === "SettingsAction" && node.props.actionLabel === "保存").props.onPress();
+  assert.equal(f.saved[0].values.routerModel, "model-b");
+  assert.equal(f.saved[0].values.routerReasoningEffort, "provider-specific");
+});
+
+test("the Router selects endpoint models by prefix and offers the selected model's advertised effort", async () => {
+  const requests = [];
+  const f = fixture({
+    values: { inferenceBaseUrl: "https://inference.example/v1", inferenceApiKey: "test-key", routerModel: "other" },
+    listModels: async (input) => {
+      requests.push(input);
+      return { models: [{ id: "deepseek-flash", effort: { supported_levels: ["low", "high"], default_level: "high" } },
+        { id: "other" }, { id: "ultra-deepseek" }] };
+    },
+  });
+  const byLabel = (label) => f.render().find((node) => node.props.accessibilityLabel === label).props;
+  const option = (label) => f.render().find((node) => node.type === "Pressable" && node.props.children?.props?.children === label);
+  assert.equal(requests.length, 0);
+  byLabel("浏览Router 模型选项").onPress();
+  await new Promise(setImmediate);
+  assert.equal(requests[0].baseUrl, "https://inference.example/v1");
+  assert.equal(requests[0].apiKey, "test-key");
+  byLabel("按前缀搜索").onChangeText("DEEP");
+  assert.ok(option("deepseek-flash"));
+  assert.equal(option("ultra-deepseek"), undefined);
+  byLabel("按前缀搜索").onSubmitEditing();
+  assert.equal(byLabel("Router 模型").value, "deepseek-flash");
+  byLabel("浏览思考强度选项").onPress();
+  byLabel("按前缀搜索").onChangeText("LO");
+  assert.ok(option("low"));
+  assert.equal(option("high"), undefined);
+  option("low").props.onPress();
+  assert.equal(byLabel("思考强度").value, "low");
+  assert.equal(requests.length, 1, "the model and effort pickers share the same catalog");
+  byLabel("Router 模型").onChangeText("other");
+  assert.ok(!f.render().some((node) => node.props.accessibilityLabel === "浏览思考强度选项"));
+  assert.ok(f.render().some((node) => node.props.children === "端点未列出此模型的思考档位。可以手动填写。"));
+  byLabel("思考强度").onChangeText("custom");
+  assert.equal(byLabel("思考强度").value, "custom");
 });
 
 test("selecting modes survives saving; changing models preserves mode and changing providers clears it", async () => {
