@@ -93,6 +93,7 @@ function fixture(t, status = "running", subscribed = true) {
     timeline: async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: "work completed" } }] }),
     verdict: { decision: "reply", reply: "done" },
     patrolVerdict: { summary: "all good", actions: [] },
+    providerSnapshot: async () => ({ entries: PROVIDER_ENTRIES }),
     isGit: true,
     instructionFiles: [],
     routerSessionId: null,
@@ -206,7 +207,7 @@ function fixture(t, status = "running", subscribed = true) {
     },
     providers: {
       waitForReady: async () => ({ entries: PROVIDER_ENTRIES }),
-      snapshot: async () => ({ entries: PROVIDER_ENTRIES }),
+      snapshot: () => controls.providerSnapshot(),
     },
     workspaces: {
       create: async (options) => {
@@ -1733,6 +1734,17 @@ test("an unknown profile from the Router falls back to the default worker and is
   assert.match(f.state.decisions[0].rationale, /unknown worker profile "codex\/gpt-9" \(configured: glm, flash\)/);
 });
 
+test("a ticket can start a Codex Worker from a named profile", async (t) => {
+  const f = fixture(t, "pending");
+  f.values.workerProvider = "claude/sonnet";
+  f.values.workerProfiles = [{ name: "code", provider: "codex/test" }];
+  f.ticket.profile = "code";
+  await f.engine.startTicket("ticket");
+  assert.equal(f.calls.workerCreates[0].config.provider, "codex/test");
+  assert.equal(f.ticket.profile, "code");
+  assert.equal(f.ticket.status, "running");
+});
+
 test("retry keeps the ticket's profile and picks up that profile's current model", async (t) => {
   const f = fixture(t, "failed");
   f.values.workerProfiles = WORKER_PROFILES;
@@ -2760,14 +2772,30 @@ test("codex cannot serve as the Router: the sandbox cannot withhold tools, so it
   f.state.kv.routerAgentId = null;
   f.values.routerProvider = "codex/test";
   await assert.rejects(evaluateRouter(f, "first event"), /cannot run as a decision-only session/);
-  assert.equal(f.calls.routerCreates.length, 0, "no Router agent is created with a provider that cannot withhold tools");
+  assert.equal(f.calls.routerCreates.length, 0);
 });
 
-test("an automatic Router pick skips codex and lands on a provider that can withhold tools", async (t) => {
+test("the Router rejects configured Codex before reading the provider snapshot", async (t) => {
+  const f = fixture(t, "waiting");
+  f.values.routerProvider = "codex/test";
+  const snapshot = t.mock.fn(async () => { throw new Error("provider snapshot unavailable"); });
+  f.controls.providerSnapshot = snapshot;
+  await assert.rejects(evaluateRouter(f, "first event"), /router provider "codex\/test" cannot run/);
+  assert.equal(snapshot.mock.callCount(), 0);
+  assert.equal(f.calls.routerCreates.length, 0);
+});
+
+test("an automatic Router pick skips Codex and honors the provider priority", async (t) => {
   const f = fixture(t, "waiting");
   f.state.kv.routerAgentId = null;
   f.state.kv.routerProvider = null;
   f.values.routerProvider = "";
+  f.controls.providerSnapshot = async () => ({
+    entries: [
+      { provider: "opencode", status: "ready", models: [{ id: "test" }] },
+      ...PROVIDER_ENTRIES.toReversed(),
+    ],
+  });
   await evaluateRouter(f, "first event");
   assert.equal(f.calls.routerCreates[0].config.provider, "claude/sonnet");
 });
@@ -2780,13 +2808,15 @@ test("a remembered codex Router is not reused: the next evaluation picks another
   assert.equal(f.calls.routerCreates[0].config.provider, "claude/sonnet");
 });
 
-test("the watchdog refuses codex but still allows it for Workers", async (t) => {
+test("the watchdog rejects configured Codex before reading the provider snapshot", async (t) => {
   const f = fixture(t, "running");
   f.values.watchdogEnabled = true;
   f.values.watchdogProvider = "codex/test";
-  await assert.rejects(f.engine.maybePatrol(true), /cannot run as a decision-only session/);
-  f.values.workerProvider = "codex/test";
-  assert.equal(await f.engine.resolveProvider("worker", null), "codex/test", "Workers may use codex");
+  const snapshot = t.mock.fn(async () => { throw new Error("provider snapshot unavailable"); });
+  f.controls.providerSnapshot = snapshot;
+  await assert.rejects(f.engine.maybePatrol(true), /watchdog provider "codex\/test" cannot run/);
+  assert.equal(snapshot.mock.callCount(), 0);
+  assert.equal(f.calls.watchdogCreates.length, 0);
 });
 
 

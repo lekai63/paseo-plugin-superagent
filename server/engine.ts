@@ -55,7 +55,7 @@ import {
 } from "./router";
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
 import type { ToolOutcome } from "./mcp-server";
-import { providerCanDecideOnly } from "../shared/decision-provider";
+import { isDecisionProviderExcluded } from "../shared/decision-provider";
 import { matchWorkerProfile, pickDecisionProvider, resolveProviderSelection, validateProviderMode, validateProviderThinkingOption } from "./providers";
 import { readPiPermissionModes } from "./pi-modes";
 import { BACKGROUND_WORKSPACE_TITLE, ensureSharedWorkspace, detachRoleChildren, workspaceTitles } from "./workspace";
@@ -3401,9 +3401,10 @@ export class SuperagentEngine {
     if (name) {
       const profile = this.settingsValues.workerProfiles.find((candidate) => candidate.name === name);
       if (profile) {
-        const provider = await this.validateConfiguredProvider(`worker profile "${name}"`, profile.provider);
-        const modeId = await this.validateWorkerMode(`worker profile "${name}"`, provider, profile.modeId);
-        const thinkingOptionId = await this.validateWorkerThinkingOption(`worker profile "${name}"`, provider, profile.thinkingOptionId);
+        const label = `worker profile "${name}"`;
+        const provider = await this.validateConfiguredProvider("worker", profile.provider, label);
+        const modeId = await this.validateWorkerMode(label, provider, profile.modeId);
+        const thinkingOptionId = await this.validateWorkerThinkingOption(label, provider, profile.thinkingOptionId);
         return { provider, profile: name, modeId, thinkingOptionId };
       }
       console.warn(`[superagent] worker profile "${name}" of ticket ${ticket.id} is no longer configured; using the default worker`);
@@ -3467,8 +3468,7 @@ export class SuperagentEngine {
   }
 
   /**
-   * provider 解析:设置显式指定优先;否则从 daemon provider 快照挑一个稳定默认
-   * (claude → codex → opencode → 任意 ready),并记入 kv 保证跨重启一致。
+   * provider 解析:显式设置优先,其次沿用允许的已记忆值,最后从 daemon 快照选择。
    */
   private async resolveProvider(
     role: "router" | "worker",
@@ -3477,7 +3477,7 @@ export class SuperagentEngine {
     const configured = role === "router" ? this.settingsValues.routerProvider : this.settingsValues.workerProvider;
     if (configured.trim()) return this.validateConfiguredProvider(role, configured.trim());
     // 记住的值也要过一遍:升级前存下的 provider 可能已经不能担任只裁决角色。
-    if (remembered && this.providerUsableForRole(role, remembered)) return remembered;
+    if (remembered && (role === "worker" || !isDecisionProviderExcluded(remembered))) return remembered;
     const paseo = this.requirePaseo();
     try {
       await paseo.providers.waitForReady({ timeoutMs: 20_000 }).catch(() => undefined);
@@ -3495,16 +3495,21 @@ export class SuperagentEngine {
     }
   }
 
-  /** 该角色能不能用这个 provider:只有只裁决角色受限,Worker 不受影响。 */
-  private providerUsableForRole(role: "router" | "worker", selection: string): boolean {
-    return role === "worker" || providerCanDecideOnly(selection);
-  }
-
   /**
-   * 显式设置的 provider/model 先对照 provider 快照校验,避免把错误 model 交给 provider
-   * 后只拿到一句 "Internal error";过度转义的反斜杠自动纠正。快照不可用时原样放行。
+   * 先校验角色的 provider 限制，再用快照校验模型和纠正转义。
+   * 快照不可用时，将已通过角色校验的配置交给 Paseo。
    */
-  private async validateConfiguredProvider(role: string, configured: string): Promise<string> {
+  private async validateConfiguredProvider(
+    role: "router" | "watchdog" | "worker",
+    configured: string,
+    label: string = role,
+  ): Promise<string> {
+    if (role !== "worker" && isDecisionProviderExcluded(configured)) {
+      throw new Error(
+        `${label} provider "${configured}" cannot run as a decision-only session: `
+        + "Codex permits workspace reads without a permission request. Choose another provider or clear the setting.",
+      );
+    }
     const paseo = this.requirePaseo();
     let entries;
     try {
@@ -3514,13 +3519,13 @@ export class SuperagentEngine {
       console.error("[superagent] provider snapshot unavailable; using configured provider as-is", error);
       return configured;
     }
-    const result = resolveProviderSelection(configured, entries, role === "worker" ? "worker" : "router");
+    const result = resolveProviderSelection(configured, entries);
     if ("error" in result) {
-      throw new Error(`${role} provider setting "${configured}" is invalid: ${result.error}`);
+      throw new Error(`${label} provider setting "${configured}" is invalid: ${result.error}`);
     }
-    if (result.note && !this.providerNotes.has(`${role}:${configured}`)) {
-      this.providerNotes.add(`${role}:${configured}`);
-      console.warn(`[superagent] ${role} provider: ${result.note}`);
+    if (result.note && !this.providerNotes.has(`${label}:${configured}`)) {
+      this.providerNotes.add(`${label}:${configured}`);
+      console.warn(`[superagent] ${label} provider: ${result.note}`);
     }
     return result.selection;
   }

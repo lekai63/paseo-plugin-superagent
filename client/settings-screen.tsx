@@ -26,7 +26,7 @@ import {
   type WorkerProfile,
 } from "../shared/settings";
 import type { MessageKey, Translate } from "../shared/i18n";
-import { providerCanDecideOnly } from "../shared/decision-provider";
+import { isDecisionProviderExcluded } from "../shared/decision-provider";
 import { isPiProviderSelection, type PiPermissionModes } from "../shared/pi-modes";
 import { useT } from "./i18n";
 import { STATE_QUERY_KEY, usePiPermissionModes, useProviderSnapshot, type ProviderSnapshotEntry } from "./query";
@@ -922,7 +922,7 @@ function ModelPicker({
   snapshot: SnapshotState;
   /** 留空选项的文案;不提供时字段必填。 */
   emptyLabel?: string;
-  /** 只裁决角色(Router/看门狗):排除无法关闭工具的 provider。 */
+  /** Router 与看门狗的 provider 选择受限。 */
   decisionOnly?: boolean;
 }) {
   const t = useT();
@@ -948,7 +948,7 @@ function ModelPicker({
   const entry = snapshot.entries.find((candidate) => candidate.provider === provider);
   // 已禁用的 provider 不进候选;仅当已保存的值正好是它时保留为选项,避免被静默清掉。
   const enabled = snapshot.entries.filter((candidate) => candidate.enabled !== false
-    && (!decisionOnly || providerCanDecideOnly(candidate.provider)));
+    && !(decisionOnly && isDecisionProviderExcluded(candidate.provider)));
   const providerOptions = [
     ...(emptyLabel ? [{ label: emptyLabel, value: "" }] : []),
     ...enabled.map((candidate) => ({ label: providerOptionLabel(candidate, t), value: candidate.provider })),

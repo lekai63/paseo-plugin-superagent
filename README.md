@@ -10,7 +10,7 @@ New here? Start with the [usage guide](docs/guide-EN.md) for install, a first ta
 
 ## Features
 
-- **The Router only decides.** One Router session per thread returns its verdict as JSON actions (dispatch, steer, respond, cancel, retry, subscribe, reply, ignore, stop). A permission hook denies the Router every other tool; it may only use the orchestrator's own read-only recall and search tools (Chain of Recall).
+- **The Router only decides.** One Router session per thread returns its verdict as JSON actions (dispatch, steer, respond, cancel, retry, subscribe, reply, ignore, stop). Superagent supplies read-only recall and search tools (Chain of Recall) and denies requests for other tools that providers send through Paseo. The Router and LLM watchdog exclude Codex. Pi tool restrictions require the bundled extension.
 - **Workers execute tickets.** Each ticket gets its own worktree, or works in a shared directory. You can define named Worker profiles (different provider, model and working directory) and the Router picks one per task. Workers are children of the Router, visible under Subagents in the app, and you can take over any of them.
 - **Direct delivery for subscriptions.** While a Worker is working in a thread, follow-up messages skip the Router and go straight to it (no model call). One Worker can follow several threads.
 - **You approve permission requests.** A Worker's tool, plan and mode requests are posted to the original chat, quoted from the provider, with a short code. Only you approve them, by sending `/approve <code>` (or `/deny <code>`) or in the Worker's own session. The Router answers Worker questions from context and may decline a request, but it cannot approve one. Requests are persisted and reconciled after a restart.
