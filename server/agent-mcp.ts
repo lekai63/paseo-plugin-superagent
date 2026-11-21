@@ -11,6 +11,9 @@ import { WATCHDOG_AGENT_LABEL_VALUE } from "../shared/model";
  * (mcp.injectIntoAgents)连带给关掉,这条不会。
  *
  * 普通 agent 拿 superagent_dispatch，Worker 拿退订和转回。推理回读由插件直接执行。
+ * 所有 MCP 能力的 provider(含 pi 家族)走同一条 mcpServers 注入:pi 侧 MCP 工具
+ * 以 pi 默认的 codemode 档暴露(经 codemode 脚本按需调用),server instructions
+ * 承载角色说明,遵从 pi 的懒加载设计。
  */
 
 /** 注入的 MCP server 名(定义在 mcp-server;不能叫 `paseo`,daemon 保留名)。 */
@@ -19,18 +22,17 @@ export { DISPATCH_MCP_SERVER_NAME } from "./mcp-server";
 /**
  * 默认注入的 provider:已知声明 supportsMcpServers 的内置 provider。其余(ACP 系
  * cursor/kimi/kiro/trae、未来的未知 provider)注入会让会话启动直接失败,故跳过;
- * 可用设置 agentToolProviders 覆盖(增删任意 provider id)。pi 家族不在此列:
- * 它不经 mcpServers 注入,走 env + pi 扩展通道(见 PI_MCP_URL_ENV)。
+ * 可用设置 agentToolProviders 覆盖(增删任意 provider id,含 pi)。
  */
 const DEFAULT_MCP_PROVIDERS = ["claude", "codex", "opencode", "omp", "copilot"];
 
-/** pi 系会话经 env 下发的角色 MCP URL 与角色名,由 pi-extension/superagent.js 读取。 */
-export const PI_MCP_URL_ENV = "SUPERAGENT_PI_MCP_URL";
-export const PI_ROLE_ENV = "SUPERAGENT_PI_ROLE";
-
-function isPiProvider(provider: string): boolean {
-  return provider.split("/")[0] === "pi";
-}
+/**
+ * Worker 角色工具的家族门控:默认名单 ∪ 用户配置 ∪ pi。pi 是受支持的 Worker
+ * provider(pi ≥ 1.5 自带 MCP,daemon 探测到后经内置通道注入),不依赖「注入
+ * provider」那份名单——它只管普通会话的委派注入(pi 默认不含在内,需显式 opt-in,
+ * 避免在老 pi 主机上弄坏用户自己的交互式会话)。
+ */
+const WORKER_MCP_EXTRA_FAMILIES = ["pi"];
 
 export function resolveMcpProviders(configured: string): string[] {
   const list = configured
@@ -51,36 +53,6 @@ export function mcpCapableProvider(provider: string, extraFamilies: readonly str
   return DEFAULT_MCP_PROVIDERS.includes(family) || extraFamilies.includes(family);
 }
 
-/**
- * pi 系会话不做 mcpServers 注入:Paseo→pi 的配置转换不透传 exposure,pi 的 MCP 工具
- * 会以默认 codemode 暴露。改经 env 把角色 URL 交给随插件发行的 pi 扩展注册。
- */
-function piEnvRequest(
-  request: PluginSessionOpenRequest,
-  url: string,
-  role: "worker" | null,
-): PluginSessionOpenRequest {
-  return {
-    ...request,
-    env: {
-      ...request.env,
-      [PI_MCP_URL_ENV]: url,
-      ...(role ? { [PI_ROLE_ENV]: role } : {}),
-    },
-  };
-}
-
-/** pi 编排会话的扩展安装提示(检测不到扩展是否装了,每个插件进程只提示一次)。 */
-let piExtensionHintShown = false;
-function hintPiExtension(): void {
-  if (piExtensionHintShown) return;
-  piExtensionHintShown = true;
-  console.warn(
-    "[superagent] install the bundled pi extension to expose Superagent tools " +
-      "(pi-extension/superagent.js -> ~/.pi/agent/extensions/, see README)",
-  );
-}
-
 /** session_open 转换:编排 agent 注入各自角色工具;普通 agent 按设置注入委派工具。 */
 export function createSessionOpenTransform(
   resolveEndpoint: () => SuperagentMcpEndpoint | null,
@@ -96,11 +68,7 @@ export function createSessionOpenTransform(
     const ticketId = request.labels[TICKET_LABEL];
     if (ticketId) {
       const url = endpoint.workerUrl(ticketId);
-      if (isPiProvider(request.provider)) {
-        hintPiExtension();
-        return piEnvRequest(request, url, "worker");
-      }
-      if (mcpCapableProvider(request.provider, providers())) {
+      if (mcpCapableProvider(request.provider, [...providers(), ...WORKER_MCP_EXTRA_FAMILIES])) {
         return {
           ...request,
           mcpServers: {
@@ -113,11 +81,6 @@ export function createSessionOpenTransform(
     }
     if (!enabled()) return undefined;
     if (isOrchestrationAgent(request.labels)) return undefined;
-    if (isPiProvider(request.provider)) {
-      // 普通委派注入:pi 家族同样经 env(需在「注入 provider」里显式加 pi)。
-      if (!providers().some((entry) => isPiProvider(entry))) return undefined;
-      return piEnvRequest(request, endpoint.urlFor(request.agentId), null);
-    }
     if (!providers().includes(request.provider)) return undefined;
     return {
       ...request,

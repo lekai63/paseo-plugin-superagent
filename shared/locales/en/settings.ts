@@ -162,7 +162,7 @@ export const settings = {
     },
     providers: {
       label: "Providers to inject into",
-      hint: "Comma-separated. Injecting into a provider that doesn't support MCP (such as ACP-based ones) makes the session fail to start; pi uses the pi extension channel, so install the extension before adding pi (see the README)",
+      hint: "Comma-separated. Injecting into a provider that doesn't support MCP (such as ACP-based ones) makes the session fail to start. Add pi to inject into pi sessions; its tools arrive through the codemode channel (see the README)",
     },
   },
   im: {

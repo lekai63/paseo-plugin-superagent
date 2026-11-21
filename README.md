@@ -47,9 +47,9 @@ The daemon clones the repository and installs the locked dependencies with `npm 
 
 See [Development and releases](docs/development-EN.md).
 
-### Optional: pi extension
+### Pi as a Worker provider
 
-For Pi Workers or delegation, copy `pi-extension/superagent.js` to `~/.pi/agent/extensions/`. Copy it again when the extension changes. [Pi integration](docs/pi-EN.md)
+Pi Workers and pi sessions with delegation injection use the same standard MCP injection as other providers; the tools are exposed through pi's codemode channel. No extension is needed. [Pi integration](docs/pi-EN.md)
 
 ## Quick start
 
@@ -79,7 +79,7 @@ The plugin UI follows Paseo's language setting (**Settings → General → Langu
 | [Settings](docs/configuration-EN.md) | What each setting means, its range, and when changes take effect |
 | [Usage](docs/usage-EN.md) | Chat page, tabs, message stream, sidebar, Command Center, sidebar status, interface language |
 | [IM triggers](docs/im-EN.md) | Setup and behavior for Feishu, DingTalk, WeCom, WeChat and QQ |
-| [pi integration](docs/pi-EN.md) | Installing the extension and its constraints when pi is the Router, a Worker or a delegation entry point |
+| [Pi integration](docs/pi-EN.md) | Pi Workers and delegation without any extension: standard MCP injection, codemode tool exposure, and Worker modes |
 | [Development and releases](docs/development-EN.md) | Local development and tests, translation conventions, tagging a release, the iOS crash investigation |
 
 ## License

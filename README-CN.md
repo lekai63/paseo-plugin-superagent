@@ -47,9 +47,9 @@ daemon 克隆仓库后按 manifest 执行 `npm ci --omit=dev --ignore-scripts` �
 
 见 [开发与发布](docs/development.md)。
 
-### 可选:pi 扩展
+### pi 作为 Worker provider
 
-使用 Pi 执行任务或注入委派工具时，将随附的 `pi-extension/superagent.js` 复制到 `~/.pi/agent/extensions/`。扩展更新后重新复制。[Pi 集成](docs/pi.md)
+pi Worker 与开启委派注入的 pi 会话和其他 provider 走同一条标准 MCP 注入，工具经 pi 的 codemode 通道暴露，无需安装扩展。[Pi 集成](docs/pi.md)
 
 ## 快速开始
 
@@ -79,7 +79,7 @@ daemon 克隆仓库后按 manifest 执行 `npm ci --omit=dev --ignore-scripts` �
 | [设置项](docs/configuration.md) | 设置页每一项的含义、取值范围与生效时机 |
 | [界面细节](docs/usage.md) | 对话页、标签、消息流、右侧栏、命令中心、侧栏状态、界面语言 |
 | [IM 触发源](docs/im.md) | 飞书、钉钉、企业微信、微信、QQ 的接入步骤与行为 |
-| [pi 集成](docs/pi.md) | pi 担任 Router / Worker / 委派入口时的扩展安装与约束 |
+| [Pi 集成](docs/pi.md) | pi 担任 Worker / 委派入口：无需扩展的标准 MCP 注入、codemode 工具暴露与 Worker 模式 |
 | [开发与发布](docs/development.md) | 本地开发与测试、翻译约定、打发布 Tag、iOS 闪退排查 |
 
 ## 许可证

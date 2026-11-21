@@ -16,6 +16,10 @@ import { t } from "./i18n";
  * 同一 endpoint 按调用方角色下发不同工具集(URL query 区分):
  *   普通 agent      superagent_dispatch(委派入口)
  *   Worker          superagent_unsubscribe / superagent_handback(退订与转回)
+ * 工具集之外还按角色下发 server instructions:pi 家族经 Paseo 注入后 MCP 工具落
+ * codemode 档(不声明给模型),pi 在系统提示的 mcp_servers 区段以 instructions
+ * 首行描述该 server——它是 codemode 脚本世界里唯一的发现入口,故承载角色的
+ * 完整调用说明(何时用、怎么调)。其他 provider 不受影响。
  *
  * SDK v2 的 createMcpHandler 同时服务 2026-07-28 与 legacy stateless 协议,每个请求
  * 创建独立的 MCP server,由 SDK 回收。安全模型:仅绑 127.0.0.1,URL 带
@@ -66,6 +70,27 @@ const DISPATCH_TOOL_DESCRIPTION =
   "dedicated worker agent executes it in an isolated workspace. The router's final answer is " +
   "delivered back into this conversation. Use for substantial, self-contained work " +
   "(implementation, investigation, review) that can run independently of this conversation.";
+
+/**
+ * 按角色的 server instructions(pi 的 codemode 档以首行作为 mcp_servers 列表描述,
+ * 故首行必须是自含的一句总览;正文给出调用时机与方式,随 tools/list 一并下发)。
+ */
+const DISPATCH_INSTRUCTIONS = [
+  "Delegate substantial, self-contained work (implementation, investigation, review) to the super-agent orchestrator:",
+  "the router evaluates the request and a dedicated worker executes it in an isolated workspace;",
+  "the router's final answer is delivered back into this conversation.",
+  "Call the tool superagent_dispatch with {title, task}; task must be complete and self-contained.",
+].join(" ");
+
+const WORKER_INSTRUCTIONS = [
+  "Session control for the super-agent orchestration layer (your ticket):",
+  "superagent_unsubscribe — stop routing future follow-up messages directly to you; the Router evaluates them instead.",
+  "Call it when later messages are no longer yours to answer (for example a one-shot task once its report is delivered);",
+  "pass {threadId} to leave only one followed conversation.",
+  "superagent_handback — return a message you received to the Router because it belongs elsewhere",
+  "(off-topic for your ticket, another worker's domain, or needs a human-facing reply);",
+  "call it with {text, unsubscribe} quoting or summarizing the message, then continue with your own ticket.",
+].join(" ");
 
 function registerDispatchTool(mcp: McpServer, engine: DispatchMcpEngine, callerAgentId: string | null): void {
   mcp.registerTool(
@@ -180,7 +205,7 @@ function registerWorkerTools(mcp: McpServer, engine: DispatchMcpEngine, ticketId
   );
 }
 
-/** 按 URL 角色选择工具集:role=worker&ticket=…,缺省为普通委派。 */
+/** 按 URL 角色选择工具集与 instructions:role=worker&ticket=…,缺省为普通委派。 */
 function registerToolsFor(
   mcp: McpServer,
   engine: DispatchMcpEngine,
@@ -228,13 +253,17 @@ export async function startDispatchMcpServer(
     if (!requestInfo) throw new Error("MCP HTTP request context is missing");
     const url = new URL(requestInfo.url);
     const roleParam = url.searchParams.get("role");
-    const role = roleParam === "worker" ? roleParam : null;
-    const mcp = new McpServer({ name: "superagent-dispatch", version: "1.0.0" });
-    registerToolsFor(mcp, engine, {
+    const role: "worker" | null = roleParam === "worker" ? roleParam : null;
+    const caller: { agentId: string | null; role: "worker" | null; ticketId: string | null } = {
       agentId: url.searchParams.get("callerAgentId"),
       role,
       ticketId: role === "worker" ? url.searchParams.get("ticket") : null,
-    });
+    };
+    const mcp = new McpServer(
+      { name: "superagent-dispatch", version: "1.0.0" },
+      { instructions: caller.role === "worker" ? WORKER_INSTRUCTIONS : DISPATCH_INSTRUCTIONS },
+    );
+    registerToolsFor(mcp, engine, caller);
     return mcp;
   }, { legacy: "stateless", maxRequestBodySize: MAX_BODY_BYTES, onerror });
   const serveMcp = toNodeHandler(handler, { maxRequestBodySize: MAX_BODY_BYTES, onerror });

@@ -334,7 +334,9 @@ export function composeRouterInstructions(
   return lines.join("\n");
 }
 
-/** 评估输入由本轮触发、工单状态与有界线程上下文构成。 */
+/** 评估输入由本轮触发、工单状态与有界线程上下文组成。
+ *  布局面向前缀缓存:头部与线程窗口跨轮字节稳定构成最长公共前缀;
+ *  summary/memory 与票据快照等每轮可变内容集中在历史之后的动态区。 */
 export function composeEvalPrompt({
   thread, batch, state, worker, routerInstructions,
   includeInstructions = true, includeHistory = true, contextTriggers = [], chatter = [], options = {},
@@ -355,18 +357,24 @@ export function composeEvalPrompt({
   const lines: string[] = [];
   if (includeInstructions) lines.push(composeRouterInstructions(worker, routerInstructions, options), "", "---", "");
   // 标题通常就是用户消息首行;默认只带 ID,线程窗口中保留有独立含义的标题。
+  // 去重只看持久状态(首条已评估/直通触发的截断首行),不看本批文本:批次每轮不同,
+  // 若随其消失/重现,title 行会打断头部前缀。
+  const derivedTitle = titleDerivedFrom(state, thread.id);
   lines.push(`# Thread: ${thread.id}`);
-  if (includeHistory && thread.title && !events.some((event) => event.text.startsWith(thread.title))) lines.push(`title: ${thread.title}`);
+  if (includeHistory && thread.title && thread.title !== derivedTitle) lines.push(`title: ${thread.title}`);
   lines.push(worker.issue ? `PROBLEM: ${worker.issue}. Dispatching will fail until this is fixed.` : "Worker environment: ready.");
-  if (includeHistory && thread.summary && !events.some((event) => event.text.startsWith(thread.summary!))) lines.push(`summary: ${thread.summary}`);
-  if (includeHistory && thread.routerMemory?.length) {
-    lines.push("", "## Saved thread memory (context only)", JSON.stringify(thread.routerMemory));
-  }
   lines.push("");
   if (history.length > 0) {
     lines.push("## Recent thread history (stubs)");
     lines.push(...history);
     lines.push("");
+  }
+  // 动态区:summary/memory 每轮可被覆写,排在追加式历史之后,不打断历史前缀。
+  if (includeHistory && thread.summary && !events.some((event) => event.text.startsWith(thread.summary!))) {
+    lines.push(`summary: ${thread.summary}`, "");
+  }
+  if (includeHistory && thread.routerMemory?.length) {
+    lines.push("## Saved thread memory (context only)", JSON.stringify(thread.routerMemory), "");
   }
   if (activeTickets.length > 0) {
     lines.push("## Active tickets on this thread");
@@ -440,7 +448,20 @@ export function composeEvalPrompt({
   return lines.join("\n");
 }
 
-/** 线程窗口:最近 8 条事件,每条一行存根(旧事件只保留极短摘要,spill 思路)。 */
+/** 消息派生标题:线程首条已评估/直通触发的截断首行(intake 同源规则)。状态压缩裁掉
+ *  旧触发前它持续命中,标题行稳定省略;持久来源(state.triggers)与本轮批次无关。 */
+function titleDerivedFrom(state: SuperagentState, threadId: string): string | null {
+  const first = state.triggers
+    .filter((trigger) => trigger.threadId === threadId && ["evaluated", "delivered"].includes(trigger.status))
+    .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt))[0];
+  return first ? (first.text.split("\n")[0] || "task").slice(0, 120) : null;
+}
+
+/** 线程窗口:每条事件一行存根。平时只追加——跨轮字节稳定,与头部一起构成前缀缓存的
+ *  最长公共前缀;超过上限才一次裁剪到保留数,用一轮 miss 换之后多轮全量命中。 */
+const THREAD_WINDOW_MAX = 40;
+const THREAD_WINDOW_KEEP = 24;
+
 function threadWindow(state: SuperagentState, threadId: string, currentEvents: Trigger[]): string[] {
   interface Event {
     at: string;
@@ -477,12 +498,13 @@ function threadWindow(state: SuperagentState, threadId: string, currentEvents: T
     if (ticket.threadId !== threadId || !ticket.report || reportTickets.has(ticket.id)) continue;
     events.push({
       at: ticket.updatedAt,
-      line: `- [worker report ${ticket.status}] "${ticket.title}": ${truncate(ticket.report, 240)}`,
+      // 不带 ticket.status:状态随后续轮次变化,会让已进窗口的行字节漂移、打断历史前缀;
+      // 当前状态以快照区(active/finished tickets)为准。
+      line: `- [worker report] "${ticket.title}": ${truncate(ticket.report, 240)}`,
     });
   }
-  return events
-    .sort((a, b) => a.at.localeCompare(b.at))
-    .slice(-8)
+  const ordered = events.sort((a, b) => a.at.localeCompare(b.at));
+  return (ordered.length > THREAD_WINDOW_MAX ? ordered.slice(-THREAD_WINDOW_KEEP) : ordered)
     .map((event) => event.line);
 }
 

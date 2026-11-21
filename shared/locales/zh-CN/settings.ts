@@ -162,7 +162,7 @@ export const settings: Translation<typeof en> = {
     },
     providers: {
       label: "注入的 provider",
-      hint: "逗号分隔。不支持 MCP 的 provider(如 ACP 系)注入会导致会话启动失败;pi 走 pi 扩展通道,填 pi 前先安装扩展(见 README)",
+      hint: "逗号分隔。不支持 MCP 的 provider(如 ACP 系)注入会导致会话启动失败。填 pi 可向 pi 会话注入,工具经 codemode 通道到达(见 README)",
     },
   },
   im: {

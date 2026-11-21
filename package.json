@@ -41,8 +41,7 @@
     "index.server.ts",
     "client/",
     "server/",
-    "shared/",
-    "pi-extension/"
+    "shared/"
   ],
   "scripts": {
     "test": "node --import ./tests/register-typescript.mjs --test tests/*.test.mjs",

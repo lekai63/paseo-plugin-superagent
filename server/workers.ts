@@ -15,7 +15,9 @@ import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 /**
  * Worker 角色与汇报要求。systemPrompt 之外也放进首条 prompt:ACP 系 provider 不会把
  * systemPrompt 交给模型,否则 Worker 不知道最终消息就是交给编排层的汇报。
- * 会话控制工具(退订/转回)只在 provider 支持 MCP 注入时存在,故注明"缺失时跳过"。
+ * 会话控制工具(退订/转回)只在 provider 支持 MCP 注入时存在;pi 家族下它们以
+ * codemode 形态提供(经 codemode 脚本调用 mcp__superagent__ 工具,系统提示的
+ * mcp_servers 区段有使用说明),故措辞同时覆盖两种形态。
  */
 const WORKER_ROLE = [
   "You are a Worker agent executing one ticket of a super-agent orchestration layer.",
@@ -31,7 +33,9 @@ const WORKER_ROLE = [
   "repeat the request or treat an unrelated follow-up as approval.",
   "Follow-up messages may arrive while you work. One prefixed \"[thread thr_…]\" comes from another",
   "conversation the Router asked you to follow as well; your report reaches that conversation too.",
-  "Your session may provide two orchestration tools (skip them if they are absent):",
+  "Your session may provide two orchestration tools (skip them if they are absent; with the pi",
+  "provider they are MCP tools reached through a codemode script, listed under the mcp_servers",
+  "section of your system prompt):",
   "- superagent_unsubscribe — stop routing future follow-up messages directly to you; the Router",
   "  evaluates them instead. Call it when later messages are no longer yours to answer (for",
   "  example a one-shot task once its report is delivered). Pass `threadId` to leave only one",

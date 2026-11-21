@@ -38,6 +38,27 @@ test("a distinct task title survives first-thread recovery while a message-deriv
   assert.doesNotMatch(composeEvalPrompt({ ...context, includeHistory: false }), /title:/);
 });
 
+test("the title line stays present or absent independent of this batch's texts", () => {
+  // 去重不再看本批触发文本(那会随每轮批次变化,让 title 行消失/重现、打断前缀),
+  // 而是看持久状态:首条已评估触发的截断首行即消息派生标题。
+  const state = emptyState();
+  const first = { id: "trg_first", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
+    text: "if u can recieve the msg, pls respones with 'pong'", status: "evaluated", context: false, receivedAt: "2026-01-01T00:00:00.000Z" };
+  state.triggers.push(first);
+  const context = { thread: { id: "thread", title: first.text.slice(0, 120), summary: null }, state,
+    worker: { workingDir: "/repo", isolation: "worktree", issue: null }, includeInstructions: false };
+  const derived = composeEvalPrompt({ ...context,
+    batch: [{ id: "b1", sender: "user", kind: "manual", text: "switch back to Chinese", status: "pending" }] });
+  assert.doesNotMatch(derived, /title:/, "a message-derived title is not repeated while its trigger is retained");
+  const exact = composeEvalPrompt({ ...context,
+    batch: [{ id: "b1", sender: "user", kind: "manual", text: first.text, status: "pending" }] });
+  assert.doesNotMatch(exact, /title:/, "still suppressed when this batch repeats the first line verbatim");
+  state.triggers = state.triggers.filter((trigger) => trigger.id !== "trg_first");
+  const resurfaced = composeEvalPrompt({ ...context,
+    batch: [{ id: "b1", sender: "user", kind: "manual", text: "switch back to Chinese", status: "pending" }] });
+  assert.match(resurfaced, /title: if u can recieve/, "the title returns only when its trigger is gone from state");
+});
+
 test("Router preferences support old settings, multiline text and a bounded size", () => {
   assert.equal(SETTINGS_DEFAULTS.routerInstructions, "");
   const legacy = superagentSettings.schema.parse({ workingDir: "/repo", routerProvider: "zcode-acp" });
@@ -376,6 +397,25 @@ test("history stubs keep trigger and decision ids for recall", () => {
   });
   assert.match(prompt, /- \[trigger trg_old manual evaluated\] u: old request/);
   assert.match(prompt, /- \[router dec_old reply\] reply="old answer"/);
+  // worker report 存根不再内嵌票据状态:状态变化不应漂移已进窗口的行(前缀缓存)。
+  state.tickets.push({
+    id: "tkt_r", threadId: "t", title: "Report job", mandate: "m", status: "completed", workerAgentId: "ag",
+    workspaceId: null, branchName: null, startedAt: null, attempts: 1, subscribed: false,
+    report: "work finished", lastError: null, createdAt: "", updatedAt: "2026-01-01T00:00:02.000Z",
+  });
+  const withReport = composeEvalPrompt({
+    thread, batch: [trigger], state,
+    worker: { workingDir: "/repo", isolation: "worktree", issue: null }, includeHistory: true, includeInstructions: false,
+  });
+  assert.match(withReport, /- \[worker report\] "Report job": work finished/);
+  const statusFlipped = structuredClone(state);
+  statusFlipped.tickets[0].status = "failed";
+  const afterFlip = composeEvalPrompt({
+    thread, batch: [trigger], state: statusFlipped,
+    worker: { workingDir: "/repo", isolation: "worktree", issue: null }, includeHistory: true, includeInstructions: false,
+  });
+  const prefixOf = (text) => text.slice(0, text.indexOf("summary:") >= 0 ? text.indexOf("summary:") : text.indexOf("## Recently finished tickets"));
+  assert.equal(prefixOf(withReport), prefixOf(afterFlip), "a ticket status change does not rewrite history bytes");
 });
 
 test("IM-origin threads get channel reply-style guidance; manual threads do not", () => {
@@ -433,7 +473,7 @@ test("Router static rules and examples stay ahead of variable configuration", ()
   assert.ok(first.indexOf('"action":"stop"') < first.indexOf("用中文回答"));
 });
 
-test("fresh evaluation history stays within eight stubs and excludes other threads", () => {
+test("fresh evaluation history grows append-only and excludes other threads", () => {
   const state = emptyState();
   for (let i = 0; i < 15; i++) state.triggers.push({
     id: `old-${i}`, threadId: "thread", status: "evaluated", kind: "manual", sender: "user",
@@ -443,7 +483,38 @@ test("fresh evaluation history stays within eight stubs and excludes other threa
   const prompt = composeEvalPrompt({ thread: { id: "thread", title: "topic" },
     batch: [{ id: "current", text: "current event", sender: "user", kind: "manual" }], state,
     worker: { workingDir: "/repo", isolation: "worktree", issue: null }, includeInstructions: false });
-  assert.equal(prompt.match(/^- \[trigger /gm).length, 8);
+  assert.equal(prompt.match(/^- \[trigger /gm).length, 15, "the window is append-only: every past event is kept");
   assert.match(prompt, /old message 7/);
-  assert.doesNotMatch(prompt, /old message 6|other thread secret/);
+  assert.match(prompt, /old message 0/);
+  assert.doesNotMatch(prompt, /other thread secret/);
+});
+
+test("the thread window trims in batches only past its cap", () => {
+  const state = emptyState();
+  for (let i = 0; i < 41; i++) state.triggers.push({
+    id: `old-${i}`, threadId: "thread", status: "evaluated", kind: "manual", sender: "user",
+    text: `old message ${i}`, receivedAt: String(i).padStart(2, "0"),
+  });
+  const prompt = composeEvalPrompt({ thread: { id: "thread", title: "topic" },
+    batch: [{ id: "current", text: "current event", sender: "user", kind: "manual" }], state,
+    worker: { workingDir: "/repo", isolation: "worktree", issue: null }, includeInstructions: false });
+  assert.equal(prompt.match(/^- \[trigger /gm).length, 24, "over the cap the window trims once to the keep size");
+  assert.match(prompt, /old message 40/);
+  assert.doesNotMatch(prompt, /old message 16/);
+});
+
+test("the eval prompt keeps a byte-stable prefix across turns and parks churn after the history", () => {
+  const state = emptyState();
+  const thread = { id: "t", key: "k", title: "t", state: "active", summary: null, createdAt: "", updatedAt: "" };
+  const base = { thread, batch: [{ id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "x", status: "pending", context: false, receivedAt: "" }], state,
+    worker: { workingDir: "/repo", isolation: "worktree", issue: null }, includeHistory: true, includeInstructions: false };
+  const first = composeEvalPrompt(base);
+  // 第一轮已有一条已评估事件:第二轮窗口只追加,头部+历史字节不变。
+  state.triggers.push({ id: "g0", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "earlier", status: "evaluated", context: false, receivedAt: "2020-01-01T00:00:00.000Z" });
+  const later = composeEvalPrompt(base);
+  const grown = composeEvalPrompt({ ...base, thread: { ...thread, summary: "先前的总结", routerMemory: [{ text: "文档优先", triggerId: "g0" }] } });
+  // summary/memory 变化不打断前缀:历史之前的头部与历史本身字节稳定。
+  assert.ok(grown.startsWith(later.slice(0, later.indexOf("## New triggers"))), "the prefix through the history survives summary and memory changes");
+  assert.ok(grown.indexOf("## Recent thread history") < grown.indexOf("summary: 先前的总结"));
+  assert.ok(grown.indexOf("## Recent thread history") < grown.indexOf("## Saved thread memory"));
 });

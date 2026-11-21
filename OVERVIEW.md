@@ -16,7 +16,7 @@ Superagent turns Paseo into an event-driven orchestrator. The Router evaluates m
 - Open **Settings → Plugins → Superagent** and set the working directory, an absolute path on the daemon host. `worktree` isolation needs it to be inside a git repository; `shared` isolation does not.
 - Under Model, set a Chat Completions API base URL with function calling and the Router model ID. Set `SUPERAGENT_INFERENCE_API_KEY` in the daemon environment if required. Worker providers are selected separately.
 - Each IM channel is off by default. Enabling one needs that platform's bot credentials and an allowlist of senders or chats; a channel with an empty allowlist does not start. WeChat logs in by scanning a QR code shown in settings.
-- The bundled Pi extension supplies Superagent tools for Pi Workers and delegation.
+- Pi Workers and pi delegation use the standard MCP injection; tools arrive through pi's codemode channel. No extension is needed.
 
 The interface is in English, or in Simplified Chinese when Paseo is set to Simplified Chinese.
 
@@ -39,4 +39,4 @@ The interface is in English, or in Simplified Chinese when Paseo is set to Simpl
 - Router evaluations run one at a time.
 - The orchestrator starts on the first hook or RPC after the daemon starts; IM messages that arrive earlier are queued on disk.
 - DingTalk and WeCom replies cannot be threaded by quote; WeChat supports direct messages only.
-- The pi extension is a manual copy and is not updated with the plugin.
+- On pi, Superagent tools are exposed through the codemode channel (lazy loading): the model reaches them via codemode scripts rather than direct tool declarations.

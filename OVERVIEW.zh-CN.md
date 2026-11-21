@@ -16,7 +16,7 @@ Superagent 让 Paseo 成为事件驱动的编排器。Router 通过独立推理 
 - 打开 **Settings → Plugins → Superagent**,填写工作目录(daemon 主机上的绝对路径)。`worktree` 隔离要求它位于 git 仓库内,`shared` 隔离不需要。
 - 在「模型」中设置支持函数调用的 Chat Completions API 基础地址和 Router 模型 ID。需要鉴权时，在 daemon 环境设置 `SUPERAGENT_INFERENCE_API_KEY`。Worker 仍从 Paseo 选 provider。
 - 各 IM 通道默认关闭。开启时需要对应平台的机器人凭据,以及发送者或会话白名单;白名单为空的通道不会启动。微信通过扫描设置页里的二维码登录。
-- 使用 Pi 执行任务或注入委派工具时，可安装随附的 Pi 扩展。
+- pi Worker 与 pi 委派走标准 MCP 注入,工具经 pi 的 codemode 通道暴露,无需安装扩展。
 
 界面为英文;Paseo 设为简体中文时显示简体中文。
 
@@ -39,4 +39,4 @@ Superagent 让 Paseo 成为事件驱动的编排器。Router 通过独立推理 
 - Router 评估逐个串行执行。
 - daemon 启动后,编排引擎在第一个 hook 或 RPC 到来时启动;在此之前到达的 IM 消息先落盘排队。
 - 钉钉与企业微信的回复无法按引用归入线程;微信只支持私聊。
-- pi 扩展是手动复制的副本,不随插件更新。
+- pi 上 Superagent 工具经 codemode 通道暴露(懒加载):模型通过 codemode 脚本调用,而非直接的工具声明。
