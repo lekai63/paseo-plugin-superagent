@@ -85,17 +85,43 @@ test("feishu group messages without a mention drop with a record, or become cont
   assert.ok(inbound.text.includes("群里闲聊"));
 
   // 被 @ 的群消息与私聊行为不变:正常触发、非上下文。
+  let lookups = 0;
+  observing.client = {
+    request: async ({ method, url }) => {
+      lookups++;
+      assert.equal(method, "GET");
+      assert.equal(url, "/open-apis/bot/v3/info");
+      return { code: 0, bot: { open_id: "ou_bot" } };
+    },
+  };
   const mentioned = await observing.translate(
     feishuEvent({ content: JSON.stringify({ text: "@_user_1 帮我查一下" }), mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" } }] }),
     () => {},
   );
   assert.equal(mentioned.context, undefined);
   assert.equal(mentioned.text, "帮我查一下");
+  const mentionedHuman = await observing.translate(feishuEvent({
+    content: JSON.stringify({ text: "@_user_1 /approve abc123" }),
+    mentions: [{ key: "@_user_1", id: { open_id: "ou_human" } }],
+  }));
+  assert.equal(mentionedHuman.context, true);
+  assert.equal(lookups, 1);
   const direct = await observing.translate(
     feishuEvent({ chat_type: "p2p" }),
     () => {},
   );
   assert.equal(direct.context, undefined);
+});
+
+test("Feishu treats group approvals as context while the bot identity is unavailable", async () => {
+  const source = new FeishuSource({ appId: "a", appSecret: "b", allowUsers: [], allowChats: ["oc_group"], observeGroups: true });
+  source.client = { request: async () => ({ code: 1 }) };
+  const command = {
+    content: JSON.stringify({ text: "@_user_1 /approve abc123" }),
+    mentions: [{ key: "@_user_1", id: { open_id: "ou_bot" } }],
+  };
+  assert.equal((await source.translate(feishuEvent(command))).context, true);
+  assert.equal((await source.translate(feishuEvent({ ...command, chat_type: "p2p" }))).context, undefined);
 });
 
 test("qq group messages without a mention drop with a record, or become context in observe mode", () => {

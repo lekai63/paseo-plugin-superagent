@@ -37,7 +37,7 @@ Superagent 本身不需要 API key,它使用你在 Paseo 里已经配置好的 p
 paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 ```
 
-也可以把仓库地址填进 **Settings → Plugins → Plugin source**,选择 **Install plugin**。用 `--ref v0.1.1` 固定到某个发布。升级用 `paseo plugin update superagent`。
+也可以把仓库地址填进 **Settings → Plugins → Plugin source**,选择 **Install plugin**。用 `--ref v0.2.0` 固定到某个发布。升级用 `paseo plugin update superagent`。
 
 以本地目录开发安装见 [README](../README-CN.md#安装)。
 
@@ -47,7 +47,7 @@ paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 
 1. 打开 **Settings → Plugins → Superagent**。设置页分为五个标签:基础、模型、规则、执行、IM 触发源。
 2. 在**基础**里填写**工作目录**:daemon 主机上的绝对路径。选择**Worker 隔离**方式:按 Ticket 独立 worktree(默认)或共享目录。
-3. 在**模型**里填写独立推理 API 地址和 Router 模型 ID。需要鉴权时，在 daemon 环境设置 `SUPERAGENT_INFERENCE_API_KEY`。默认 Worker provider 可以留空自动选择。
+3. 在**模型**里填写独立推理 API 地址和 Router 模型 ID。需要鉴权时，在同一页面填写推理 API 密钥。远程地址须使用 HTTPS。默认 Worker provider 可以留空自动选择。
 4. 点击**保存**。
 5. 点侧栏的 **Superagent**,描述一个任务。
 

@@ -110,6 +110,19 @@ test("direct inference returns actionable HTTP errors without returning upstream
     async () => assert.fail("invalid URL reached fetch")), /without credentials/);
 });
 
+test("plaintext inference requests are restricted to loopback IP addresses", async t => {
+  for (const host of ["inference.example", "127.example", "10.0.0.1", "[2001:db8::1]"]) {
+    await assert.rejects(runInference(options(t, {}, { baseUrl: `http://${host}/v1` }),
+      async () => assert.fail("an insecure endpoint reached fetch")), /requires HTTPS/);
+  }
+  const result = await runInference(options(t, {}, { baseUrl: "http://[::1]:8000/v1" }), async (url, init) => {
+    assert.equal(url.hostname, "[::1]");
+    assert.equal(init.redirect, "error");
+    return Response.json(payload(okText));
+  });
+  assert.equal(result.verdict.actions[0].reply, "done");
+});
+
 test("an API without JSON mode can fall back to a locally validated JSON verdict", async t => {
   const bodies = [];
   const result = await runInference(options(t), async (_url, init) => {

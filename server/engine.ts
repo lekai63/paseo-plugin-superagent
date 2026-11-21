@@ -681,11 +681,12 @@ export class SuperagentEngine {
         }
       }
       for (const request of added) {
-        for (const threadId of this.reportThreads(target)) {
+        const approval = needsHumanApproval(request);
+        const recipients = approval ? [target.threadId] : this.reportThreads(target);
+        for (const threadId of recipients) {
           const thread = next.threads.find((item) => item.id === threadId && item.state === "active");
           if (!thread) continue;
           const workerRequest = { ticketId: target.id, agentId, requestId: request.id };
-          const approval = needsHumanApproval(request);
           const origin = next.triggers.filter((item) => item.threadId === threadId && !item.workerRequest)
             .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
             .find((item) => item.status !== "filtered" && (item.origin || item.replyToAgentId));
@@ -736,26 +737,22 @@ export class SuperagentEngine {
     });
   }
 
-  /**
-   * 人能处理的待批请求。IM 发送者只能处理在同一聊天里通知过的请求(票据的汇报线程
-   * 收过该聊天的消息);对话页与斜杠命令来自 Paseo 的使用者本人,不限对话。
-   */
   private approvalCandidates(origin: TriggerOrigin | null | undefined): { ticket: Ticket; request: WorkerRequest; code: string }[] {
-    const state = this.store.get();
-    const conversation = origin ? imConversationKey(origin) : null;
-    const candidates: { ticket: Ticket; request: WorkerRequest; code: string }[] = [];
-    for (const ticket of state.tickets) {
-      if (!ticket.workerAgentId || TERMINAL_TICKET_STATUSES.includes(ticket.status)) continue;
-      const requests = (ticket.pendingRequests ?? []).filter((request) => needsHumanApproval(request));
-      if (!requests.length) continue;
-      if (conversation) {
-        const threads = new Set([ticket.threadId, ...followsOf(ticket)]);
-        const sameChat = state.threads.some((thread) => threads.has(thread.id) && thread.imConversationKey === conversation)
-          || state.triggers.some((trigger) => trigger.threadId && threads.has(trigger.threadId)
-            && trigger.origin && imConversationKey(trigger.origin) === conversation);
-        if (!sameChat) continue;
+    if (origin) {
+      const received = new Map<string, { ticket: Ticket; request: WorkerRequest; code: string }>();
+      for (const { ticket, request } of this.deliveredImRequests(origin)) {
+        if (!needsHumanApproval(request)) continue;
+        received.set(JSON.stringify([ticket.id, request.id]), { ticket, request, code: approvalCode(ticket.id, request.id) });
       }
-      for (const request of requests) candidates.push({ ticket, request, code: approvalCode(ticket.id, request.id) });
+      return [...received.values()];
+    }
+
+    const candidates: { ticket: Ticket; request: WorkerRequest; code: string }[] = [];
+    for (const ticket of this.store.get().tickets) {
+      if (!ticket.workerAgentId || TERMINAL_TICKET_STATUSES.includes(ticket.status)) continue;
+      for (const request of ticket.pendingRequests ?? []) {
+        if (needsHumanApproval(request)) candidates.push({ ticket, request, code: approvalCode(ticket.id, request.id) });
+      }
     }
     return candidates;
   }
@@ -775,19 +772,28 @@ export class SuperagentEngine {
     return request ? { ticket, request } : null;
   }
 
+  /** 授权类请求只在工单原线程投递的聊天内有效，包括历史版本留下的卡片。 */
+  private *deliveredImRequests(origin: TriggerOrigin) {
+    const conversation = imConversationKey(origin);
+    for (const delivery of this.store.get().imDeliveries) {
+      const ref = delivery.workerRequest;
+      if (delivery.status !== "sent" || !ref || imConversationKey(delivery.origin) !== conversation) continue;
+      const current = this.pendingImRequest(ref);
+      if (!current) continue;
+      const allowed = needsHumanApproval(current.request) ? current.ticket.threadId === delivery.threadId
+        : this.reportThreads(current.ticket).includes(delivery.threadId);
+      if (allowed) yield { ...current, delivery, ref };
+    }
+  }
+
   private async executeImRequest(trigger: Trigger, command: NonNullable<ReturnType<typeof imRequestCommand>>): Promise<string> {
     const origin = trigger.origin!;
     const card = "deliveryId" in command ? command : null;
     const code = "code" in command ? command.code : null;
     const candidates = new Map<string, { ticket: Ticket; request: WorkerRequest; threadId: string }>();
-    for (const delivery of this.store.get().imDeliveries) {
-      const ref = delivery.workerRequest;
-      if (!ref || imConversationKey(origin) !== imConversationKey(delivery.origin)) continue;
+    for (const { ticket, request, delivery, ref } of this.deliveredImRequests(origin)) {
       if (card ? delivery.id !== card.deliveryId : !code || approvalCode(ref.ticketId, ref.requestId) !== code) continue;
-      const current = this.pendingImRequest(ref);
-      if (current && this.reportThreads(current.ticket).includes(delivery.threadId) && (card || current.request.kind === "question")) {
-        candidates.set(JSON.stringify(ref), { ...current, threadId: delivery.threadId });
-      }
+      if (card || request.kind === "question") candidates.set(JSON.stringify(ref), { ticket, request, threadId: delivery.threadId });
     }
     const candidate = candidates.size === 1 ? candidates.values().next().value : undefined;
     let note = candidates.size > 1 ? "ambiguous IM request" : "IM request is no longer pending";
@@ -2844,7 +2850,7 @@ Return the full patrol JSON with summary and actions.`,
     return {
       baseUrl: settings.inferenceBaseUrl,
       model: (role === "watchdog" ? settings.watchdogModel : "") || settings.routerModel,
-      apiKey: process.env.SUPERAGENT_INFERENCE_API_KEY?.trim(),
+      apiKey: settings.inferenceApiKey,
     };
   }
 

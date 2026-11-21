@@ -103,10 +103,11 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 16,
+  version: 17,
   schema: z.object({
     /** 推理 API 的服务根地址（包含 API 版本路径），并由服务端添加 /chat/completions。 */
     inferenceBaseUrl: z.string().trim().max(1000).default(""),
+    inferenceApiKey: z.string().trim().max(8192).default(""),
     routerModel: z.string().trim().max(200).default(""),
     /** 规则放入每次推理评估的系统消息。 */
     routerInstructions: z.string().trim().max(MAX_ROUTER_INSTRUCTIONS_CHARS).default(""),
@@ -242,7 +243,8 @@ export const superagentSettings = defineSettings({
    * v12 → v13:新增 imInboxDir(留空 = 默认收件目录,行为与旧版一致);
    * v13 → v14:新增 Router 评估/空闲、Thread 空闲与 Worker 待命超时;
    * v14 → v15:新增 workerBackground(默认关闭,Worker 照旧显示在 Paseo 中);
-   * v15 → v16:独立推理 API 使用新地址和模型字段，旧 Paseo provider 选择不作为 API 模型 ID。
+   * v15 → v16:独立推理 API 使用新地址和模型字段，旧 Paseo provider 选择不作为 API 模型 ID;
+   * v16 → v17:推理 API 密钥从插件设置读取，默认为空。
    */
   migrate: (values) => values,
 });

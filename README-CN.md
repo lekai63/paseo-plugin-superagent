@@ -41,7 +41,7 @@ paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 
 daemon 克隆仓库后按 manifest 执行 `npm ci --omit=dev --ignore-scripts` 安装锁定的依赖。加 `--ref v<版本>` 可固定到某个发布 Tag。也可以把仓库地址填进 **Settings → Plugins → Plugin source**。
 
-- 用 `--ref v0.1.1` 固定到某个发布 Tag;升级用 `paseo plugin update superagent`。
+- 用 `--ref v0.2.0` 固定到某个发布 Tag;升级用 `paseo plugin update superagent`。
 
 ### 从本地目录安装(开发)
 
@@ -53,7 +53,7 @@ pi Worker 与开启委派注入的 pi 会话和其他 provider 走同一条标�
 
 ## 快速开始
 
-1. 打开 **Settings → Plugins → Superagent → 模型**，设置推理 API 基础地址（例如 `https://inference.example/v1`）和 Router 模型 ID。服务要求鉴权时，在 daemon 环境设置 `SUPERAGENT_INFERENCE_API_KEY`。需要派发 Worker 时，在**基础**页填写工作目录。[设置项](docs/configuration.md)
+1. 打开 **Settings → Plugins → Superagent → 模型**，设置推理 API 基础地址（例如 `https://inference.example/v1`）和 Router 模型 ID。服务要求鉴权时，在同一页面填写推理 API 密钥。远程地址须使用 HTTPS。需要派发 Worker 时，在**基础**页填写工作目录。[设置项](docs/configuration.md)
 2. 点侧栏的 **Superagent**,在底部输入框描述任务。Router 会直接答复,或派发 Worker 执行并把结果写回对话。
 3. 在任意 agent 会话里输入 `/superagent <任务>`,把工作委派给编排层;Router 的答复回到该会话。
 4. 想从聊天工具下达指令时,按 [IM 触发源](docs/im.md) 打开对应通道并填写白名单。

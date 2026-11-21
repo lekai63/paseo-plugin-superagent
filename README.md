@@ -41,7 +41,7 @@ paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 
 The daemon clones the repository and installs the locked dependencies with `npm ci --omit=dev --ignore-scripts`, as declared in the manifest. Add `--ref v<version>` to pin a release tag. You can also paste the URL into **Settings → Plugins → Plugin source**.
 
-- Pin a release with `--ref v0.1.1`; upgrade with `paseo plugin update superagent`.
+- Pin a release with `--ref v0.2.0`; upgrade with `paseo plugin update superagent`.
 
 ### From a local directory (development)
 
@@ -53,7 +53,7 @@ Pi Workers and pi sessions with delegation injection use the same standard MCP i
 
 ## Quick start
 
-1. In **Settings → Plugins → Superagent → Model**, enter the inference API base URL (for example, `https://inference.example/v1`) and Router model ID. Set `SUPERAGENT_INFERENCE_API_KEY` in the daemon environment if required. Set a working directory under **Basics** to dispatch Workers. [Settings](docs/configuration-EN.md)
+1. In **Settings → Plugins → Superagent → Model**, enter the inference API base URL (for example, `https://inference.example/v1`) and Router model ID. Enter an inference API key on the same tab if required. Use HTTPS for remote endpoints. Set a working directory under **Basics** to dispatch Workers. [Settings](docs/configuration-EN.md)
 2. Click **Superagent** in the sidebar and describe a task in the composer. The Router either replies directly or dispatches a Worker and writes the result back into the conversation.
 3. In any agent session, type `/superagent <task>` to delegate work to the orchestrator; the Router's reply comes back to that session.
 4. To take instructions from a chat app, enable the channel and fill in its allowlist as described in [IM triggers](docs/im-EN.md).

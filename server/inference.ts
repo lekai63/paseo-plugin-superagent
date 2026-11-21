@@ -1,3 +1,4 @@
+import { isIPv4 } from "node:net";
 import { z } from "zod";
 import { truncate, type InferenceTrace } from "../shared/model";
 import { DECISION_REPEAT_LIMIT, DECISION_TOOL_LIMIT } from "./decision-budget";
@@ -90,6 +91,10 @@ function completionsUrl(baseUrl: string): URL {
   }
   if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new Error("Superagent inference API base URL must be HTTP(S) without credentials, query, or fragment");
+  }
+  const loopback = url.hostname === "[::1]" || (isIPv4(url.hostname) && url.hostname.startsWith("127."));
+  if (url.protocol === "http:" && !loopback) {
+    throw new Error("Superagent inference API requires HTTPS unless the URL uses a loopback IP address");
   }
   url.pathname = url.pathname.replace(/\/+$/, "") + "/chat/completions";
   return url;

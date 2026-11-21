@@ -251,6 +251,7 @@ function fakeFeishuClient({ resources = {}, messages = {} }) {
     downloads,
     lookups,
     lookupParams,
+    request: async () => ({ code: 0, bot: { open_id: "ou_bot" } }),
     im: { v1: {
       messageResource: { get: async (payload) => {
         downloads.push(payload);

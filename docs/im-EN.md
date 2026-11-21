@@ -31,7 +31,7 @@ Non-text: for rich text (post) it takes the title, text, links and code blocks, 
 - **WeChat, QQ and DingTalk's current sessionWebhook integration** use text prompts. If a platform rejects a card, the plugin sends the text fallback.
 - Reply with `/answer <code> <answer>`. Enter option numbers, use commas for multiple selections, and use one `question number: answer` line per question in a set. If the channel returns quoted message IDs, you can also quote the prompt and reply with the answer. Use `/approve <code>` or `/deny <code> [reason]` for permissions.
 
-Answers and permissions are bound to the bot account, chat, and pending request. Text replies in a group follow the channel's mention rules.
+Answers and permissions are bound to the bot account, chat, and pending request. A permission request can be approved in IM after it is delivered to the chat that started the ticket. Feishu group text commands must mention the bot itself.
 
 ## DingTalk (official Stream mode, no public endpoint)
 

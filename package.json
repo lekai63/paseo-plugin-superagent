@@ -1,6 +1,6 @@
 {
   "name": "@0_0/paseo-plugin-superagent",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Event-driven Router/Worker orchestration for Paseo: a lightweight Router per thread triages events, isolated Workers execute tickets, with IM triggers (Feishu, DingTalk, WeCom, WeChat, QQ) and a watchdog",
   "keywords": [
     "paseo",

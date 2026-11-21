@@ -213,13 +213,13 @@ function fixture(t, status = "running", subscribed = true) {
     onChange: () => () => {},
   };
   const values = {
-    ...SETTINGS_DEFAULTS, workingDir: "/mock/repo", inferenceBaseUrl: "http://inference.example/v1", routerModel: "test-router", workerProvider: "codex/test",
+    ...SETTINGS_DEFAULTS, workingDir: "/mock/repo", inferenceBaseUrl: "https://inference.example/v1", routerModel: "test-router", workerProvider: "codex/test",
   };
   const inferenceRequest = async (url, init) => {
     const body = JSON.parse(init.body);
     const isPatrol = body.messages[1].content.startsWith("# Patrol");
     const prompt = body.messages.at(-1).content;
-    calls.requests.push({ url: String(url), body, signal: init.signal });
+    calls.requests.push({ url: String(url), body, signal: init.signal, authorization: init.headers.authorization });
     (isPatrol ? calls.patrols : calls.prompts).push(prompt);
     const scripted = isPatrol ? controls.runWatchdog : controls.runRouter;
     const result = scripted
@@ -513,6 +513,7 @@ test("IM approvals only resolve requests announced in the same chat and ignore o
   f.engine.setReplySink({ send: async () => {} });
   f.controls.pendingPermissions.set("worker", [toolRequest]);
   await f.engine.syncWorkerPermissions("worker");
+  await until(() => f.state.imDeliveries[0]?.status === "sent");
   const otherChat = { ...origin, chatId: "other-chat" };
   await f.engine.dispatch({ task: `/approve ${toolCode}`, origin: otherChat });
   assert.equal(f.calls.permissionResponses.length, 0);
@@ -521,6 +522,44 @@ test("IM approvals only resolve requests announced in the same chat and ignore o
   assert.equal(f.calls.permissionResponses.length, 0);
   assert.equal(f.state.triggers.find(trigger => trigger.id === overheard.triggerId).status, "pending");
   await f.engine.dispatch({ task: `@bot /approve ${toolCode}`, origin });
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "allow" } }]);
+});
+
+test("IM permission commands and cards require a delivered request from the ticket's original thread", async t => {
+  const f = fixture(t);
+  const origin = { channel: "feishu", accountId: "bot", chatId: "original", senderId: "owner" };
+  const follower = { ...origin, chatId: "follower", senderId: "other-user" };
+  f.state.threads.push({ ...f.state.threads[0], id: "follower", key: "manual:follower" });
+  f.ticket.follows = ["follower"];
+  for (const [threadId, recipient] of [["thread", origin], ["follower", follower]]) {
+    f.state.triggers.push({ id: `message-${threadId}`, threadId, threadKey: "manual:test", kind: "feishu", sender: recipient.senderId,
+      text: "message", origin: recipient, status: "delivered", receivedAt: oldTime });
+  }
+  f.engine.setReplySink({ send: async (_origin, text) => {
+    if (text.includes(`/approve ${toolCode}`)) throw new Error("delivery unavailable");
+    return null;
+  } });
+  f.controls.pendingPermissions.set("worker", [toolRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  await until(() => f.state.imDeliveries[0]?.status === "failed");
+  const [delivery] = f.state.imDeliveries;
+  assert.deepEqual(f.state.imDeliveries.filter(item => item.workerRequest).map(item => item.origin), [origin]);
+  await f.engine.dispatch({ task: `/approve ${toolCode}`, origin });
+  assert.deepEqual(f.calls.permissionResponses, []);
+
+  const legacyCard = { ...delivery, id: "legacy-follower-card", threadId: "follower", origin: follower,
+    status: "sent", nextPart: delivery.parts.length };
+  f.state.imDeliveries.push(legacyCard);
+  await f.engine.dispatch({ task: `/approve ${toolCode}`, origin: follower });
+  await f.engine.dispatch({ task: "card submission", origin: follower,
+    imCardSubmission: { deliveryId: legacyCard.id, behavior: "allow" } });
+  assert.deepEqual(f.calls.permissionResponses, []);
+
+  f.engine.setReplySink({ send: async () => null });
+  await f.engine.retryImDelivery(delivery.id);
+  await f.engine.dispatch({ task: `/approve ${toolCode}`, origin: { ...origin, accountId: "other-bot" } });
+  assert.deepEqual(f.calls.permissionResponses, []);
+  await f.engine.dispatch({ task: `/approve ${toolCode}`, origin });
   assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "allow" } }]);
 });
 
@@ -772,6 +811,22 @@ test("direct inference receives current configuration and temporary issues stay 
   assert.match(ready, /Worker environment: ready/);
   assert.doesNotMatch(ready, /PROBLEM:|Superagent Router instructions/);
   assert.equal(f.calls.requests.at(-1).body.messages[0].content, stableSystem);
+});
+
+test("inference uses only the API key configured in Superagent settings", async t => {
+  const previous = process.env.SUPERAGENT_INFERENCE_API_KEY;
+  process.env.SUPERAGENT_INFERENCE_API_KEY = "legacy-key";
+  t.after(() => {
+    if (previous === undefined) delete process.env.SUPERAGENT_INFERENCE_API_KEY;
+    else process.env.SUPERAGENT_INFERENCE_API_KEY = previous;
+  });
+  const f = fixture(t, "waiting");
+  await evaluateRouter(f);
+  assert.equal(f.calls.requests.at(-1).authorization, undefined);
+  f.controls.settingsChanged({ status: "ready", values: { ...f.values, inferenceApiKey: "plugin-key" } });
+  await evaluateRouter(f);
+  assert.equal(f.calls.requests.at(-1).authorization, "Bearer plugin-key");
+  assert.doesNotMatch(JSON.stringify(f.calls.requests.at(-1).body), /plugin-key|legacy-key/);
 });
 
 test("a new thread gets recovery context without resending the Router protocol", async (t) => {
@@ -2233,7 +2288,7 @@ test("transient eval errors keep requeueing well past the unparsed circuit break
   assert.equal(f.state.triggers[0].status, "pending", "触发保留待重试");
 
   // 看门狗重排门控:异常未达上限继续重排;unparsed 3 次与异常达上限都停。
-  f.values.inferenceBaseUrl = "http://inference.example/v1";
+  f.values.inferenceBaseUrl = "https://inference.example/v1";
   f.engine.evalErrors.set("thread", 3);
   f.state.threads[0].evalRetry.nextAt = oldTime;
   f.calls.evals.length = 0;
@@ -2946,7 +3001,7 @@ test("direct Router uses configured inference without an Agent or Worker directo
   const first = await evaluateRouter(f, "Only change documentation");
   assert.match(first, /Worker working directory is not configured/);
   const [request] = f.calls.requests;
-  assert.equal(request.url, "http://inference.example/v1/chat/completions");
+  assert.equal(request.url, "https://inference.example/v1/chat/completions");
   assert.equal(request.body.model, "test-router");
   assert.equal(f.calls.creates, 0);
   assert.deepEqual(f.state.threads[0].routerMemory, f.controls.verdict.memory);

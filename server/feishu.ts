@@ -97,6 +97,8 @@ export interface FeishuContent {
 const SEEN_LIMIT = 1000;
 const MERGE_FORWARD_LISTED = 50;
 const MERGE_FORWARD_LINE_CHARS = 300;
+const BOT_INFO_TIMEOUT_MS = 5_000;
+const BOT_INFO_RETRY_MS = 30_000;
 
 type LarkClient = InstanceType<LarkModule["Client"]>;
 type LarkWsClient = InstanceType<LarkModule["WSClient"]>;
@@ -396,6 +398,8 @@ export class FeishuSource implements ImSource {
   private seen = new Set<string>();
   private inbound = new InboundQueue("feishu");
   private abort: AbortController | null = null;
+  private botOpenId: string | null = null;
+  private nextBotLookupAt = 0;
 
   constructor(private readonly config: FeishuConfig) {}
 
@@ -404,8 +408,8 @@ export class FeishuSource implements ImSource {
     const abort = new AbortController();
     this.abort = abort;
     const lark = await loadLark();
-    // 说明:SDK 未包装 GET /bot/v3/info,群聊判定退化为"任意 @"——
-    // mentions 仅在有人被 @ 时出现,叠加 chat 白名单,误触发面可接受。
+    this.botOpenId = null;
+    this.nextBotLookupAt = 0;
     this.client = new lark.Client({
       appId: this.config.appId,
       appSecret: this.config.appSecret,
@@ -484,6 +488,27 @@ export class FeishuSource implements ImSource {
   private requireClient(): LarkClient {
     if (!this.client) throw new Error("feishu source is not started");
     return this.client;
+  }
+
+  /** 使用当前应用的租户凭证查询机器人身份，群消息只信任事件提供的 open_id。 */
+  private async resolveBotOpenId(signal?: AbortSignal): Promise<string | null> {
+    const client = this.client;
+    if (this.botOpenId || !client || signal?.aborted || Date.now() < this.nextBotLookupAt) return this.botOpenId;
+    this.nextBotLookupAt = Date.now() + BOT_INFO_RETRY_MS;
+    try {
+      const response = await withTimeout(client.request<{ code: number; bot?: { open_id?: string } }>({
+        method: "GET", url: "/open-apis/bot/v3/info", timeout: BOT_INFO_TIMEOUT_MS, signal,
+      }), BOT_INFO_TIMEOUT_MS);
+      if (this.client !== client || signal?.aborted) return null;
+      if (response.code === 0 && typeof response.bot?.open_id === "string" && response.bot.open_id.trim()) {
+        this.botOpenId = response.bot.open_id;
+        return this.botOpenId;
+      }
+    } catch {
+      if (this.client !== client || signal?.aborted) return null;
+    }
+    console.warn("[superagent] could not resolve Feishu bot identity; group mentions remain unverified");
+    return null;
   }
 
   /** message.get:失败返回 null(调用方降级为说明文字)。卡片取原始内容(含字段标签与 @ 的人名)。 */
@@ -622,8 +647,10 @@ export class FeishuSource implements ImSource {
       ...parsed.resources.map((resource) => describePendingAttachment("feishu", resource)),
     ]);
 
-    // 群聊准入:被 @ 直接放行;未 @ 时观察模式作上下文候选,否则留痕丢弃。
-    const observe = isGroup && mentions.length === 0;
+    // 未验证为 @ 本机器人时，只按观察模式或过滤留痕处理。
+    const botOpenId = isGroup && mentions.length > 0 ? await this.resolveBotOpenId(signal) : null;
+    if (this.stopped || signal?.aborted) return null;
+    const observe = isGroup && !(botOpenId && mentions.some((mention) => mention.id?.open_id === botOpenId));
     if (observe && !this.config.observeGroups) {
       if (summary) {
         onDrop?.({

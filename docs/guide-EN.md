@@ -37,7 +37,7 @@ Run everything on the **daemon host**, as the user that runs Paseo.
 paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 ```
 
-Or paste the repository URL into **Settings → Plugins → Plugin source** and choose **Install plugin**. Pin a release with `--ref v0.1.1`. Upgrades are `paseo plugin update superagent`.
+Or paste the repository URL into **Settings → Plugins → Plugin source** and choose **Install plugin**. Pin a release with `--ref v0.2.0`. Upgrades are `paseo plugin update superagent`.
 
 A local checkout for development is described in the [README](../README.md#installation).
 
@@ -47,7 +47,7 @@ When the install finishes, **Superagent** appears in the Paseo sidebar.
 
 1. Open **Settings → Plugins → Superagent**. The settings page is split into five tabs: Basics, Models, Rules, Execution and IM triggers.
 2. On **Basics**, fill in the **Working directory**: an absolute path on the daemon host. Choose **Worker isolation**: per-ticket worktree (default) or shared directory.
-3. On **Model**, enter the inference API base URL and Router model ID. Set `SUPERAGENT_INFERENCE_API_KEY` in the daemon environment if required. Leave the default Worker provider empty for automatic selection.
+3. On **Model**, enter the inference API base URL and Router model ID. Enter an inference API key on the same tab if required. Use HTTPS for remote endpoints. Leave the default Worker provider empty for automatic selection.
 4. Click **Save**.
 5. Open **Superagent** in the sidebar and describe a task.
 

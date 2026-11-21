@@ -10,7 +10,7 @@
 | 对话空闲过期 | `threadIdleTimeoutMin`,默认 1440 分钟(24 小时),可设 5–43200 分钟。没有待处理工作时自动关闭 Thread 并回收遗留会话;有效入站、Worker 汇报与实际会话活动续期,巡检不续期。运行任务、待处理审批、跨线程活动或未送达回复会暂缓关闭。关闭后的新消息可重新激活仍被保留的线程;历史沿用现有保留上限。IM 跨日收口规则继续生效 |
 | Worker 待命回收 | `workerIdleTimeoutMin`,默认 1440 分钟(24 小时),可设 1–43200 分钟。长期空闲的 waiting 票据完结并退订全部线程,保留汇报,归档 Worker 与其独占工作区;共享工作区保留。回收意图落盘,失败后看门狗继续清理。有新消息、待执行动作、实际运行或审批时暂缓;Worker 本轮结束后仍留着后台 shell/监控(Paseo 0.16 上报的 `backgroundWork`)时也暂缓,等它们结束再回收。审批/问题等待超过 24 小时提醒一次,保留请求供人工处理 |
 | 工作目录 | daemon 上的绝对路径。派发默认 Worker 时需要填写。共享隔离按目录复用工作区，worktree 隔离要求路径位于 Git 仓库内。 |
-| 推理 API 基础地址和 Router 模型 | `inferenceBaseUrl` 与 `routerModel`。使用支持函数调用的 Chat Completions API，地址包含版本路径，例如 `https://inference.example/v1`。插件补上 `/chat/completions`。需要 Bearer 鉴权时，在 daemon 环境设置 `SUPERAGENT_INFERENCE_API_KEY`。 |
+| 推理 API 基础地址和 Router 模型 | `inferenceBaseUrl` 与 `routerModel`。使用支持函数调用的 Chat Completions API，地址包含版本路径，例如 `https://inference.example/v1`。插件补上 `/chat/completions`。需要 Bearer 鉴权时，在「推理 API 密钥」字段（`inferenceApiKey`）填写密钥。远程地址须使用 HTTPS，`127.0.0.1` 和 `[::1]` 等回环 IP 地址可使用 HTTP。 |
 | thinking 档位（可选） | 默认 Worker 和具名档位可独立设置，候选来自 Paseo provider。 |
 | Router 自定义规则 | `routerInstructions`，支持多行，最多 12000 字符。随每次评估的系统消息发送。 |
 | IM 附件收件目录 | `imInboxDir`,daemon 主机上的绝对路径;留空为 `$PASEO_HOME/plugin-data/superagent/inbox`。聊天里收到的文件存到 `<目录>/<通道>/<北京时间日期>/<消息 id>/` 下,改后对下一条消息立即生效,不重连通道。各 Worker 档位的工作目录有自己的归档规则时,宜设成它们之外的中立目录,由 Worker 按规则移入任务目录 |
@@ -25,7 +25,3 @@
 | LLM 看门狗 | 在「主动与巡检」里开启，默认关闭。`watchdogModel` 留空时沿用 Router 模型。间隔 5–240 分钟，默认 30。无异常且无需要关注的工单时跳过推理。 |
 | 注入委派 MCP | 开启后所有普通 agent 的会话注入 `superagent_dispatch` 工具。走**插件自持的本地 MCP server**(`127.0.0.1` 随机端口 + 随机密钥路径),不受宿主 "Paseo tools"(`mcp.injectIntoAgents`)开关影响。同一 endpoint 还给 Worker 会话下发 `superagent_unsubscribe`/`superagent_handback`(会话控制)——这部分不受本开关控制。角色工具在**每次会话启动时经 session_open 注入**——不能写进 agent 保存配置:同名 mcpServer 与插件注入冲突会被 daemon 拒绝,`toolPolicy` 预授权引用的 server 又必须出现在同一请求里,两条都走不通。Router 与看门狗不再经此通道:它们的只读回读由推理循环直接执行 |
 | 注入 provider | 允许注入上述 MCP 的 provider 家族,逗号分隔(如 `codex,claude`);留空 = claude,codex,opencode,omp,copilot。不支持 MCP server 的 provider(如 ACP 系)注入会导致会话启动失败,默认排除;在此填 `pi` 即向普通 pi 会话注入委派工具(工具经 pi 的 codemode 通道暴露,见 [Pi 集成](pi.md))。Router/Worker 的角色工具注入同样按「默认名单 ∪ 此名单」的家族门控(provider 带 model 限定时按 `/` 前的家族判断;插件型 provider 如 zcode-acp 由 daemon 统一声明支持 MCP,想给它注入就在此配置) |
-
-## 从旧版升级
-
-旧的 Paseo Router 与看门狗 provider 选择不会转换为推理模型 ID。配置推理地址和模型后，程序对账会解除存量 Worker 与旧裁决会话的父子关系，再归档已空闲的旧会话。线程、工单、回复与巡检记录继续保留。

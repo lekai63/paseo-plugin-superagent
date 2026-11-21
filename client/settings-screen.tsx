@@ -373,6 +373,8 @@ function SettingsForm({ settings, hostId, theme, tab }: { settings: Ready; hostI
         <SettingsCard>
           <TextField {...field} name="inferenceBaseUrl" label={t("settings.model.inferenceBaseUrl")}
             hint={t("settings.model.inferenceBaseUrlHint")} placeholder="https://your-inference-host/v1" />
+          <TextField {...field} name="inferenceApiKey" label={t("settings.model.inferenceApiKey")}
+            hint={t("settings.model.inferenceApiKeyHint")} secret />
           <TextField {...field} name="routerModel" label={t("settings.model.routerModel")}
             hint={t("settings.model.routerHint")} />
           <ModelField
