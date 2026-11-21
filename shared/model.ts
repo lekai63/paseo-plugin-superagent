@@ -42,6 +42,20 @@ export const TriggerOriginSchema = z.object({
 });
 export type TriggerOrigin = z.infer<typeof TriggerOriginSchema>;
 
+export const ImCardSubmissionSchema = z.object({
+  deliveryId: z.string().min(1),
+  behavior: z.enum(["allow", "deny", "answer"]),
+  text: z.string().max(16000).optional(),
+  fields: z.record(z.string(), z.string().max(16000)).optional(),
+  selections: z.record(z.string(), z.array(z.string())).optional(),
+}).strict();
+export type ImCardSubmission = z.infer<typeof ImCardSubmissionSchema>;
+
+/** 下拉题里「其他（自由输入）」选项的值；与选项编号区分，自由文本放在配套的 `qN_other` 字段。 */
+export const OTHER_CHOICE_VALUE = "other";
+
+const WorkerRequestRefSchema = z.object({ ticketId: z.string(), agentId: z.string(), requestId: z.string() });
+
 export const TRIGGER_STATUSES = ["pending", "filtered", "evaluated", "delivered", "failed"] as const;
 export type TriggerStatus = (typeof TRIGGER_STATUSES)[number];
 
@@ -65,7 +79,8 @@ export const TriggerSchema = z.object({
   note: z.string().nullish(),
   threadId: z.string().nullish(),
   /** 权限通知的关联键:用于去重、撤销已解决的通知,不与普通汇报混淆。 */
-  workerRequest: z.object({ ticketId: z.string(), agentId: z.string(), requestId: z.string() }).nullish(),
+  workerRequest: WorkerRequestRefSchema.nullish(),
+  imCardSubmission: ImCardSubmissionSchema.optional(),
   /**
    * IM 消息引用(回复)的那条消息(§3.3 Inline):在本地记录里找到时内联其摘要与 ID,
    * 找不到时只保留平台消息 id。text 已截断,全文按 triggerId 回读。
@@ -171,6 +186,19 @@ export const WorkerResponseSchema = z.discriminatedUnion("behavior", [
 ]);
 export type WorkerResponse = z.infer<typeof WorkerResponseSchema>;
 
+/** ACP can offer persistent choices or several different choices with the same behavior. */
+export function canRespondToWorkerPermission(request: WorkerRequest, behavior: "allow" | "deny"): boolean {
+  if (request.kind === "question") return false;
+  const metadata = request.metadata as { options?: unknown } | undefined;
+  if (!Array.isArray(metadata?.options)) return true;
+  const kinds = metadata.options.flatMap((option) =>
+    typeof option?.optionId === "string" && typeof option.kind === "string" ? [option.kind] : []);
+  if (!kinds.some((kind) => ["allow_once", "allow_always", "reject_once", "reject_always"].includes(kind))) return true;
+  if (behavior === "allow") return kinds.filter((kind) => kind === "allow_once").length === 1;
+  const rejects = kinds.filter((kind) => kind === "reject_once").length;
+  return rejects === 1 || (rejects === 0 && !kinds.includes("reject_always"));
+}
+
 export const TicketSchema = z.object({
   id: z.string().min(1),
   threadId: z.string().min(1),
@@ -242,6 +270,8 @@ export const DecisionSchema = z.object({
   reply: z.string().nullish(),
   rationale: z.string().nullish(),
   ticketId: z.string().nullish(),
+  /** 批准码通知留给原来的回传通道,对话页用实时请求卡片。 */
+  workerApprovalNotice: z.literal(true).optional(),
   /** 解析失败时保留的原始回复存根(排障用)。 */
   raw: z.string().nullish(),
   createdAt: z.string(),
@@ -392,6 +422,7 @@ export const ImDeliverySchema = z.object({
   id: z.string(),
   threadId: z.string(),
   origin: TriggerOriginSchema,
+  workerRequest: WorkerRequestRefSchema.optional(),
   parts: z.array(z.string()).min(1),
   nextPart: z.number().int().nonnegative(),
   status: z.enum(["pending", "failed", "sent"]),

@@ -16,6 +16,8 @@ import {
   type PendingAttachment,
 } from "./im-attachments";
 import { t } from "./i18n";
+import { readWecomRequestAction, wecomRequestCard } from "./im-cards";
+import type { ImRequestCard } from "./im-requests";
 
 /**
  * 企业微信触发源:官方 @wecom/aibot-node-sdk(智能机器人 WebSocket 长连接,免公网)。
@@ -149,6 +151,14 @@ export class WecomSource implements ImSource {
         if (inbound) onTrigger(inbound);
       });
     });
+    client.on("event.template_card_event", (frame) => {
+      const action = readWecomRequestAction(frame.body);
+      if (this.stopped || !action || !(this.config.allowUsers.includes(action.senderId)
+        || (action.group && this.config.allowChats.includes(action.chatId)))) return;
+      onTrigger({ origin: { channel: "wecom", accountId: this.config.botId, chatId: action.chatId, senderId: action.senderId },
+        threadKey: `wecom:chat:${action.chatId}`, sender: `wecom:${action.senderId}`, text: t("server.engine.imCardSubmission"),
+        title: t("server.engine.imCardSubmission"), imCardSubmission: action.submission });
+    });
     this.client = client;
     client.connect();
   }
@@ -170,6 +180,15 @@ export class WecomSource implements ImSource {
     if (!client) throw new Error("wecom source is not started");
     const result = await client.sendMessage(origin.chatId, { msgtype: "markdown", markdown: { content: text } });
     if (result.errcode !== 0) throw new Error(`wecom send rejected (${result.errcode})`);
+    return null;
+  }
+
+  async sendRequestCard(origin: TriggerOrigin, card: ImRequestCard): Promise<null | undefined> {
+    const template_card = wecomRequestCard(card);
+    if (!template_card) return undefined;
+    if (!this.client) throw new Error("wecom source is not started");
+    const result = await this.client.sendMessage(origin.chatId, { msgtype: "template_card", template_card });
+    if (result.errcode !== 0) throw new Error(`wecom card rejected (${result.errcode})`);
     return null;
   }
 

@@ -126,9 +126,15 @@ async function persist(state: SuperagentState): Promise<void> {
 }
 
 function trim(state: SuperagentState): void {
+  const liveRequests = new Set(state.tickets.flatMap((ticket) => (ticket.pendingRequests ?? [])
+    .map((request) => JSON.stringify([ticket.id, ticket.workerAgentId, request.id]))));
+  const keepDelivery = (delivery: SuperagentState["imDeliveries"][number]) => {
+    const ref = delivery.workerRequest;
+    return delivery.status !== "sent" || (ref && liveRequests.has(JSON.stringify([ref.ticketId, ref.agentId, ref.requestId])));
+  };
   state.imDeliveries = [
-    ...state.imDeliveries.filter((item) => item.status !== "sent"),
-    ...state.imDeliveries.filter((item) => item.status === "sent")
+    ...state.imDeliveries.filter(keepDelivery),
+    ...state.imDeliveries.filter((item) => !keepDelivery(item))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 40),
   ];
   if (state.triggers.length > MAX_TRIGGERS) {

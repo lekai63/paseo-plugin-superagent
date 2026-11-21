@@ -5,7 +5,8 @@ export function threadResult(thread: Thread, state: SuperagentState): ThreadResu
   if (thread.latestResult) return thread.latestResult;
   const reports = state.triggers.filter((trigger) => trigger.threadId === thread.id && trigger.kind === "report")
     .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
-  const reply = state.decisions.filter((decision) => decision.threadId === thread.id && decision.outcome === "reply" && decision.reply?.trim())
+  const reply = state.decisions.filter((decision) => decision.threadId === thread.id && decision.outcome === "reply"
+    && !decision.workerApprovalNotice && decision.reply?.trim())
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   const report = reports[0];
   if (reply?.reply && (!report || reply.createdAt >= report.receivedAt)) {

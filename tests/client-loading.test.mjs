@@ -27,12 +27,16 @@ let fontBundle;
 let clientBundle;
 let webBundle;
 let queryBundle;
+let requestCardBundle;
+let chatMessagesBundle;
 before(async () => {
-  [fontBundle, clientBundle, webBundle, queryBundle] = await Promise.all([
+  [fontBundle, clientBundle, webBundle, queryBundle, requestCardBundle, chatMessagesBundle] = await Promise.all([
     compile("../client/host-font-scale.ts"),
     compile("../index.client.tsx"),
     compile("../client/web.ts"),
     compile("../client/query.ts"),
+    compile("../client/worker-request-card.tsx"),
+    compile("../client/chat-messages.tsx"),
   ]);
 });
 
@@ -81,6 +85,101 @@ function load(code, platform, { turbo = null, legacy = null, storage = null, pas
   runInNewContext(code, sandbox);
   return { exports: sandbox.module.exports, reads };
 }
+
+test("Worker cards submit answers and permission decisions and can open the native session", async () => {
+  const calls = [];
+  const pendingRequests = [{ id: "request" }, { id: "other-request" }];
+  let snapshot = { tickets: [{ id: "ticket", workerAgentId: "worker", pendingRequests }] };
+  let questionDraft;
+  const jsx = (component, props) => ({ ...props, component });
+  const { exports } = load(requestCardBundle, "ios", { modules: {
+    react: { useState: (value) => typeof value === "object" && value && "active" in value
+      ? [questionDraft ?? value, (update) => { questionDraft = update(questionDraft ?? value); }]
+      : [value, () => {}] },
+    "react/jsx-runtime": { jsx, jsxs: jsx },
+    "@getpaseo/plugin/client": { useRpc: (contract) => async (input) => {
+      calls.push({ name: contract.name, ...input });
+      return { ok: true };
+    } },
+    "@getpaseo/plugin/client/ui": { useToast: () => ({ error: assert.fail }) },
+    "@tanstack/react-query": {
+      useQueryClient: () => ({
+        cancelQueries: async () => {}, invalidateQueries: () => {},
+        setQueriesData: (_key, update) => { snapshot = update(snapshot); },
+      }),
+      useMutation: (options) => ({ isPending: false, mutate: async (input) => {
+        await options.mutationFn(input);
+        await options.onSuccess(undefined, input);
+      } }),
+    },
+  } });
+  function card(kind, input) {
+    return exports.WorkerRequestCard({
+      hostId: "host", threadId: "thread", ticket: { id: "ticket", title: "Worker task" }, agentId: "worker",
+      request: { id: "request", name: kind, kind, input },
+      theme: { colors: {
+        surface0: "#ffffff", surface1: "#f8fafc", surface2: "#f1f5f9", border: "#cbd5e1",
+        foreground: "#0f172a", foregroundMuted: "#475569", accent: "#2563eb",
+      } },
+      navigation: { openAgent: (input) => calls.push(input) },
+    });
+  }
+  const buttons = (tree) => Array.from(tree.children.at(-1).children).filter((child) => child?.onPress);
+  const question = card("question", { questions: [{ header: "color", question: "Which color?", options: [{ label: "Blue" }] }] });
+  const [openQuestion] = buttons(question);
+  assert.equal(openQuestion.label, "Answer in Worker session");
+  openQuestion.onPress();
+  const answers = [{ header: "color", selections: ["Blue"], text: "" }];
+  const fields = question.children[1];
+  assert.equal(fields.questions[0].question, "Which color?");
+  const firstForm = fields.component(fields);
+  assert.equal(firstForm.children.at(-1).children.at(-1).disabled, true);
+  const singleQuestion = firstForm.children[0];
+  const choice = singleQuestion.children.flat().find((child) => child?.accessibilityRole === "radio");
+  choice.onPress();
+  const secondForm = fields.component(fields);
+  const submit = secondForm.children.at(-1).children.at(-1);
+  assert.equal(submit.disabled, false);
+  await submit.onPress();
+  assert.deepEqual(Array.from(snapshot.tickets[0].pendingRequests), [pendingRequests[1]]);
+  const [allow, deny, open] = buttons(card("tool"));
+  assert.equal(open.label, "Open Worker session");
+  await allow.onPress();
+  await deny.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    { agentId: "worker" },
+    { name: "superagent.respond_to_permission", threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: "request", behavior: "answer", answers },
+    { name: "superagent.respond_to_permission", threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: "request", behavior: "allow" },
+    { name: "superagent.respond_to_permission", threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: "request", behavior: "deny" },
+  ]);
+});
+
+test("pending questions stay outside the Router's scrollable transcript and disappear when resolved", () => {
+  const jsx = (type, props) => ({ type, props });
+  const { exports } = load(chatMessagesBundle, "ios", { modules: {
+    react: {
+      useMemo: (compute) => compute(), useRef: (current) => ({ current }), useState: (value) => [value, () => {}],
+    },
+    "react/jsx-runtime": { jsx, jsxs: jsx },
+    "@getpaseo/plugin/client/ui": { ScrollView: "ScrollView" },
+  } });
+  const question = { id: "q1", kind: "question", name: "Pi select", input: { questions: [{ question: "Which color?" }] } };
+  const permission = { id: "p1", kind: "tool", name: "shell" };
+  const render = (pendingRequests) => exports.ChatMessages({
+    hostId: "host", threadId: "thread", entries: [],
+    tickets: [{ id: "ticket", workerAgentId: "worker", status: "running", pendingRequests }],
+    theme: { colors: { border: "#ccc" } }, metrics: { compact: true, maxWidth: 820 },
+  }).props.children;
+
+  const [transcript, questions] = render([question, permission]);
+  const [permissionRow] = transcript.props.children.props.children.at(-1);
+  assert.equal(permissionRow.props.children.props.request, permission);
+  assert.equal(questions.props.testID, "worker-questions");
+  const [questionCard] = questions.props.children.props.children;
+  assert.equal(questionCard.props.request, question);
+  assert.equal(questionCard.props.agentId, "worker");
+  assert.equal(render([permission])[1], null);
+});
 
 test("plugin Router status includes background sessions, filters archived sessions, and retains the remembered fallback", async () => {
   const records = [

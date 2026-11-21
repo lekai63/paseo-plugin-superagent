@@ -11,7 +11,7 @@ import {
 import type { PluginHostProps, PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, Markdown, ScrollView } from "@getpaseo/plugin/client/ui";
 import type { Ticket } from "../shared/model";
-import { userStatusLabel, type ChatEntry } from "../shared/chat";
+import { pendingWorkerRequests, userStatusLabel, type ChatEntry } from "../shared/chat";
 import { TYPE, bubbleStep, proseScale, type ProseScale, type TypeStep } from "../shared/design";
 import { elapsedTime } from "../shared/execution";
 import { fullStamp, markdownPreview, stampTime, ticketStatusLabel, type Tone } from "../shared/labels";
@@ -20,9 +20,10 @@ import { RunningDot } from "./agent-status-icon";
 import { FileLinkList, FilePreviewModal, useFileKinds, type FileTarget } from "./file-preview";
 import type { FileKind } from "../shared/file-preview";
 import { useHostAppearance } from "./host-font-scale";
-import { ROW, TOUCH, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
+import { HAIRLINE, ROW, TOUCH, WEB_TRANSITION, chatTokens, radius, space, type Theme } from "./theme-tokens";
 import { CopyButton, TextButton, toneColor } from "./ui";
 import { useT } from "./i18n";
+import { WorkerRequestCard } from "./worker-request-card";
 
 /**
  * 对话消息流,版式取自 better-paseo 重绘的 agent 会话:
@@ -87,6 +88,7 @@ function gapBefore(previous: ChatEntry | undefined, entry: ChatEntry): number {
 
 export function ChatMessages({
   hostId,
+  threadId,
   entries,
   tickets,
   pendingText,
@@ -99,6 +101,7 @@ export function ChatMessages({
 }: {
   /** 文件预览按宿主隔离缓存。 */
   hostId: string;
+  threadId: string | null;
   entries: ChatEntry[];
   tickets: Ticket[];
   /** 已提交、尚未出现在快照里的消息。 */
@@ -143,7 +146,10 @@ export function ChatMessages({
   const fileKinds = useFileKinds(hostId, fileLinks.values());
   const files = (id: string): FileRefs => ({ links: fileLinks.get(id) ?? NO_LINKS, kinds: fileKinds, onOpen: setPreview });
   const ticketById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
-  const hasContent = entries.length > 0 || Boolean(pendingText);
+  const requests = threadId ? pendingWorkerRequests(tickets) : [];
+  const questions = requests.filter(({ request }) => request.kind === "question");
+  const permissions = requests.filter(({ request }) => request.kind !== "question");
+  const hasContent = entries.length > 0 || Boolean(pendingText) || requests.length > 0;
   const last = entries[entries.length - 1];
   return (
     <>
@@ -191,12 +197,32 @@ export function ChatMessages({
             </View>
           ) : null}
           {working ? (
-            <View style={{ marginTop: !hasContent ? 0 : pendingText || last?.kind === "user" ? space.lg : last?.kind === "event" ? ROW.stackGap : space.md }}>
+            <View style={{ marginTop: !last && !pendingText ? 0 : pendingText || last?.kind === "user" ? space.lg : last?.kind === "event" ? ROW.stackGap : space.md }}>
               <WorkingRow working={working} theme={theme} metrics={metrics} />
             </View>
           ) : null}
+          {threadId && permissions.map(({ ticket, agentId, request }) => (
+            <View key={JSON.stringify([ticket.id, agentId, request.id])} style={{ marginTop: space.md }}>
+              <WorkerRequestCard hostId={hostId} threadId={threadId} ticket={ticket} agentId={agentId} request={request}
+                theme={theme} navigation={navigation} />
+            </View>
+          ))}
         </View>
       </ScrollView>
+      {threadId && questions.length > 0 ? (
+        <ScrollView testID="worker-questions"
+          style={{ flexGrow: 0, maxHeight: "45%", borderTopWidth: HAIRLINE, borderTopColor: theme.colors.border }}
+          contentContainerStyle={{ paddingHorizontal: metrics.compact ? space.md : space.lg, paddingVertical: space.sm }}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={{ width: "100%", maxWidth: metrics.maxWidth, alignSelf: "center", paddingHorizontal: space.sm, gap: space.sm }}>
+            {questions.map(({ ticket, agentId, request }) => (
+              <WorkerRequestCard key={JSON.stringify([ticket.id, agentId, request.id])}
+                hostId={hostId} threadId={threadId} ticket={ticket} agentId={agentId} request={request} theme={theme} navigation={navigation} />
+            ))}
+          </View>
+        </ScrollView>
+      ) : null}
       <FilePreviewModal target={preview} hostId={hostId} theme={theme} wide={Platform.OS === "web" && !metrics.compact}
         onClose={() => setPreview(null)} />
     </>

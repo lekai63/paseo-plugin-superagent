@@ -14,6 +14,8 @@ import {
   type PendingAttachment,
 } from "./im-attachments";
 import { t } from "./i18n";
+import { feishuRequestCard, readFeishuRequestAction } from "./im-cards";
+import type { ImRequestCard } from "./im-requests";
 
 /**
  * 飞书触发源:官方 SDK 长连接(WSClient),无需公网回调。
@@ -424,6 +426,13 @@ export class FeishuSource implements ImSource {
           if (inbound) onTrigger(inbound);
         });
       },
+      "card.action.trigger": async (data: unknown) => {
+        const action = readFeishuRequestAction(data);
+        if (this.stopped || !action || !(this.config.allowUsers.includes(action.senderId) || this.config.allowChats.includes(action.chatId))) return;
+        onTrigger({ origin: { channel: "feishu", accountId: this.config.appId, chatId: action.chatId, senderId: action.senderId,
+          messageId: action.messageId }, threadKey: `feishu:chat:${action.chatId}`, sender: `feishu:${action.senderId}`,
+          title: t("server.engine.imCardSubmission"), text: t("server.engine.imCardSubmission"), imCardSubmission: action.submission });
+      },
     });
     await this.wsClient.start({ eventDispatcher: dispatcher });
   }
@@ -441,11 +450,21 @@ export class FeishuSource implements ImSource {
   }
 
   async send(origin: TriggerOrigin, text: string): Promise<string | null> {
+    return this.sendMessage(origin, "text", { text });
+  }
+
+  async sendRequestCard(origin: TriggerOrigin, card: ImRequestCard): Promise<string | null | undefined> {
+    const body = feishuRequestCard(card);
+    return body ? this.sendMessage(origin, "interactive", body) : undefined;
+  }
+
+  private async sendMessage(origin: TriggerOrigin, msg_type: "text" | "interactive", body: object): Promise<string | null> {
     const client = this.requireClient();
+    const content = JSON.stringify(body);
     if (origin.messageId) {
       const result = await client.im.v1.message.reply({
         path: { message_id: origin.messageId },
-        data: { msg_type: "text", content: JSON.stringify({ text }) },
+        data: { msg_type, content },
       });
       if (result.code !== 0) throw new Error(`feishu reply rejected (${result.code})`);
       return result.data?.message_id ?? null;
@@ -454,8 +473,8 @@ export class FeishuSource implements ImSource {
       params: { receive_id_type: "chat_id" },
       data: {
         receive_id: origin.chatId,
-        msg_type: "text",
-        content: JSON.stringify({ text }),
+        msg_type,
+        content,
       },
     });
     if (result.code !== 0) throw new Error(`feishu send rejected (${result.code})`);

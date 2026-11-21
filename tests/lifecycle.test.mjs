@@ -13,6 +13,8 @@ import { imDay, imConversationKey, dailyImThreadKey } from "../shared/im-threads
 import { RECALL_EXHAUSTED_MARKER, ROUTER_CONTEXT_LIMIT, ROUTER_EVALUATION_LIMIT } from "../server/router.ts";
 import { BACKGROUND_WORKSPACE_TITLE, workspaceTitles } from "../server/workspace.ts";
 import { approvalCode } from "../server/approvals.ts";
+import { createRespondToPermissionHandler } from "../server/handlers.ts";
+import { superagentRespondToPermissionRpc } from "../shared/rpc.ts";
 
 const oldTime = "2020-01-01T00:00:00.000Z";
 
@@ -127,7 +129,11 @@ function fixture(t, status = "running", subscribed = true) {
       },
       respondToPermission: async (options) => {
         calls.permissionResponses.push({ id, ...options });
+        const wasPending = controls.pendingPermissions.get(id)?.some(request => request.id === options.requestId);
         await controls.respond(id, options);
+        if (wasPending && !controls.pendingPermissions.get(id)?.some(request => request.id === options.requestId)) {
+          await engine.workerPermissionResolved(id, { requestId: options.requestId, resolution: options.response });
+        }
       },
       run: async (prompt) => {
         if (id.includes("watchdog")) {
@@ -278,7 +284,7 @@ const questionRequest = {
 
 const toolCode = approvalCode("ticket", toolRequest.id);
 
-test("Worker permissions are announced to the human once and questions go to the Router", async t => {
+test("IM Worker permissions and questions each produce one durable notification", async t => {
   const f = fixture(t);
   const origin = { channel: "qq", chatId: "chat", senderId: "user" };
   f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user", text: "original task", origin, status: "delivered", receivedAt: oldTime });
@@ -287,21 +293,64 @@ test("Worker permissions are announced to the human once and questions go to the
   f.controls.pendingPermissions.set("worker", [toolRequest, questionRequest]);
   await Promise.all([f.engine.syncWorkerPermissions("worker"), f.engine.syncWorkerPermissions("worker")]);
   assert.deepEqual(f.ticket.pendingRequests, [toolRequest, questionRequest]);
-  // 提问照旧交 Router;授权请求不经 Router,由引擎原样告诉人并附批准码。
-  const notifications = f.state.triggers.filter(trigger => trigger.workerRequest);
-  assert.equal(notifications.length, 1);
-  assert.equal(notifications[0].workerRequest.requestId, questionRequest.id);
-  assert.deepEqual(notifications[0].origin, origin);
-  assert.match(notifications[0].text, /Which color\?[\s\S]*Green/);
+  assert.equal(f.state.triggers.some(trigger => trigger.workerRequest), false);
   const notices = f.state.decisions.filter(decision => decision.outcome === "reply" && decision.ticketId === "ticket");
-  assert.equal(notices.length, 1);
+  assert.equal(notices.length, 2);
   assert.match(notices[0].reply, /git status/);
   assert.match(notices[0].reply, new RegExp(`/approve ${toolCode}`));
   assert.match(notices[0].reply, /Router cannot approve/);
-  await until(() => sent.length === 1);
+  await until(() => sent.length === 2);
   assert.deepEqual(sent[0].target, origin);
   assert.match(sent[0].text, new RegExp(`/deny ${toolCode}`));
-  assert.deepEqual(f.calls.evals, ["thread"]);
+  assert.match(sent[1].text, /Which color\?[\s\S]*Green[\s\S]*\/answer/);
+  assert.deepEqual(f.calls.evals, []);
+});
+
+test("IM answer codes and quoted replies target the exact waiting Worker in the originating chat", async t => {
+  for (const quoted of [false, true]) {
+    const f = fixture(t);
+    const origin = { channel: "qq", accountId: "bot", chatId: "chat", senderId: "user" };
+    f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "qq", sender: "user",
+      text: "task", origin, status: "delivered", receivedAt: oldTime });
+    f.engine.setReplySink({ send: async () => "question-message" });
+    f.controls.pendingPermissions.set("worker", [questionRequest]);
+    await f.engine.syncWorkerPermissions("worker");
+    await until(() => f.state.imDeliveries[0]?.status === "sent");
+    const command = `/answer ${approvalCode("ticket", questionRequest.id)}`;
+    await f.engine.dispatch({ origin: { ...origin, accountId: "different-bot" }, task: `${command} 2` });
+    await f.engine.dispatch({ origin, task: `${command} 99` });
+    assert.deepEqual(f.calls.permissionResponses, []);
+    await f.engine.dispatch(quoted ? { origin, replyTo: ["question-message"], task: "2" } : { origin, task: `${command} 2` });
+    assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: questionRequest.id,
+      response: { behavior: "allow", updatedInput: { ...questionRequest.input, answers: { Color: "Green" } } } }]);
+    assert.deepEqual(f.calls.evals, []);
+  }
+});
+
+test("IM card callbacks are checked against the persisted delivery and cannot authorize a different chat", async t => {
+  const f = fixture(t);
+  const origin = { channel: "wecom", accountId: "bot", chatId: "chat", senderId: "user" };
+  f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "wecom", sender: "user",
+    text: "task", origin, status: "delivered", receivedAt: oldTime });
+  const messages = [], cards = [];
+  f.engine.setReplySink({ send: async (_origin, text) => { messages.push(text); },
+    sendRequestCard: async (recipient, card) => { cards.push({ recipient, card }); return null; } });
+  f.controls.pendingPermissions.set("worker", [toolRequest, questionRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  await until(() => f.state.imDeliveries.length === 2 && f.state.imDeliveries.every(delivery => delivery.status === "sent"));
+  assert.equal(cards.length, 2);
+  assert.equal(messages.length, 0);
+  const permission = { deliveryId: cards[0].card.deliveryId, behavior: "allow" };
+  await f.engine.dispatch({ origin: { ...origin, chatId: "different" }, task: "card submission", imCardSubmission: permission });
+  await f.engine.dispatch({ origin, context: true, task: "card submission", imCardSubmission: permission });
+  assert.deepEqual(f.calls.permissionResponses, []);
+  await Promise.all([1, 2].map(() => f.engine.dispatch({ origin, task: "card submission", imCardSubmission: permission })));
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "allow" } }]);
+  await f.engine.dispatch({ origin, task: "card submission", imCardSubmission: {
+    deliveryId: cards[1].card.deliveryId, behavior: "answer", selections: { q1: ["1"] },
+  } });
+  assert.equal(f.calls.permissionResponses[1]?.response.updatedInput.answers.Color, "Blue");
+  assert.deepEqual(f.ticket.pendingRequests, []);
 });
 
 test("a permission wait releases its watcher and the human's approval reattaches it", async t => {
@@ -325,6 +374,93 @@ test("a permission wait releases its watcher and the human's approval reattaches
   f.finishes[1].resolve({ status: "idle" });
   await until(() => f.state.triggers.some(trigger => trigger.kind === "report"));
   assert.equal(f.ticket.report, "work completed");
+});
+
+test("permission cards answer only the selected request and wait for Paseo to confirm it", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [toolRequest, questionRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  const handle = createRespondToPermissionHandler(f.engine);
+  const input = { threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: toolRequest.id, behavior: "deny" };
+  const apply = f.controls.respond;
+  f.controls.respond = async () => {};
+
+  const response = handle(input);
+  await until(() => f.calls.permissionResponses.length === 1);
+  assert.deepEqual(f.calls.permissionResponses[0], {
+    id: "worker", requestId: toolRequest.id, response: { behavior: "deny", message: "Denied by the human" },
+  });
+  assert.equal(f.state.decisions.some(d => d.reply?.includes("Denied for Worker")), false);
+  assert.equal((await handle({ ...input, behavior: "allow" })).ok, false, "the first response is still in flight");
+  await apply("worker", { requestId: toolRequest.id });
+  await f.engine.workerPermissionResolved("worker", { requestId: toolRequest.id, resolution: { behavior: "deny" } });
+  assert.deepEqual(await response, { ok: true, error: null });
+  assert.deepEqual(f.ticket.pendingRequests, [questionRequest]);
+  assert.match(f.state.decisions.at(-1).reply, /Denied for Worker/);
+  assert.equal((await handle(input)).ok, false, "a stale card cannot answer again");
+  assert.equal(f.calls.permissionResponses.length, 1);
+});
+
+test("the permission card RPC rejects unrelated sessions, questions and ambiguous provider options", async t => {
+  const f = fixture(t);
+  const persistent = { ...toolRequest, id: "persistent", metadata: { options: [
+    { optionId: "remember", kind: "allow_always" }, { optionId: "reject", kind: "reject_once" },
+  ] } };
+  f.controls.pendingPermissions.set("worker", [toolRequest, questionRequest, persistent]);
+  await f.engine.syncWorkerPermissions("worker");
+  const handle = createRespondToPermissionHandler(f.engine);
+  const input = { threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: toolRequest.id, behavior: "allow" };
+  assert.equal(superagentRespondToPermissionRpc.input.safeParse({ ...input, selectedActionId: "remember" }).success, false);
+  assert.equal((await handle({ ...input, threadId: "another-thread" })).ok, false);
+  assert.equal((await handle({ ...input, agentId: "old-worker" })).ok, false);
+  assert.equal((await handle({ ...input, requestId: questionRequest.id })).ok, false);
+  assert.equal((await handle({ ...input, requestId: persistent.id })).ok, false);
+  assert.deepEqual(f.calls.permissionResponses, []);
+  assert.deepEqual(await handle(input), { ok: true, error: null });
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: toolRequest.id, response: { behavior: "allow" } }]);
+});
+
+test("the question card sends validated answers in Paseo format without answering another permission", async t => {
+  const f = fixture(t);
+  const question = { ...questionRequest, input: { questions: [
+    { ...questionRequest.input.questions[0], multiSelect: true, allowOther: true },
+    { header: "Notes", question: "Anything else?", options: [], allowEmpty: true },
+  ], providerField: "preserved" } };
+  f.controls.pendingPermissions.set("worker", [toolRequest, question]);
+  await f.engine.syncWorkerPermissions("worker");
+  const handle = createRespondToPermissionHandler(f.engine);
+  const input = {
+    threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: question.id, behavior: "answer",
+    answers: [{ header: "Color", selections: ["Blue", "Green"], text: " Violet " }, { header: "Notes", selections: [], text: "" }],
+  };
+  assert.equal(superagentRespondToPermissionRpc.input.safeParse(input).success, true);
+  assert.equal((await handle({ ...input, requestId: toolRequest.id })).ok, false);
+  assert.equal((await handle({ ...input, answers: input.answers.slice(0, 1) })).ok, false);
+  assert.equal((await handle({ ...input, answers: [{ ...input.answers[0], selections: ["missing"] }, input.answers[1]] })).ok, false);
+  assert.deepEqual(f.calls.permissionResponses, []);
+  assert.deepEqual(await handle(input), { ok: true, error: null });
+  assert.deepEqual(f.calls.permissionResponses, [{ id: "worker", requestId: question.id, response: {
+    behavior: "allow", updatedInput: { ...question.input, answers: { Color: "Blue, Green, Violet", Notes: "" } },
+  } }]);
+  assert.deepEqual(f.ticket.pendingRequests, [toolRequest]);
+  assert.match(f.state.decisions.at(-1).reply, /Answer sent to Worker/);
+  assert.equal((await handle(input)).ok, false);
+});
+
+test("a different answer resolved in the native session is not credited to a card submission", async t => {
+  const f = fixture(t);
+  f.controls.pendingPermissions.set("worker", [questionRequest]);
+  await f.engine.syncWorkerPermissions("worker");
+  f.controls.respond = async () => {};
+  const handle = createRespondToPermissionHandler(f.engine);
+  const reply = handle({ threadId: "thread", ticketId: "ticket", agentId: "worker", requestId: questionRequest.id,
+    behavior: "answer", answers: [{ header: "Color", selections: ["Blue"], text: "" }] });
+  await until(() => f.calls.permissionResponses.length === 1);
+  f.controls.pendingPermissions.set("worker", []);
+  await f.engine.workerPermissionResolved("worker", { requestId: questionRequest.id,
+    resolution: { behavior: "allow", updatedInput: { answers: { Color: "Green" } } } });
+  assert.equal((await reply).ok, false);
+  assert.equal(f.state.decisions.some(d => d.reply?.includes("Answer sent to Worker")), false);
 });
 
 test("the Router can never approve a permission request; the engine asks the human instead", async t => {

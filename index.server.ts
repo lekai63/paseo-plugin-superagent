@@ -6,6 +6,7 @@ import {
   createCloseThreadHandler,
   createDispatchHandler,
   createForceEvalHandler,
+  createRespondToPermissionHandler,
   createRetryTicketHandler,
   createRetryImDeliveryHandler,
   createSaveChatTabsHandler,
@@ -30,6 +31,7 @@ import {
   superagentDispatchRpc,
   superagentForceEvalRpc,
   superagentReadFileRpc,
+  superagentRespondToPermissionRpc,
   superagentRetryTicketRpc,
   superagentRetryImDeliveryRpc,
   superagentPiModesRpc,
@@ -90,6 +92,7 @@ export default function contribute(server: PluginServerContext) {
   });
   server.handle(superagentForceEvalRpc, withPrime(createForceEvalHandler(engine)));
   server.handle(superagentCancelTicketRpc, withPrime(createCancelTicketHandler(engine)));
+  server.handle(superagentRespondToPermissionRpc, withPrime(createRespondToPermissionHandler(engine)));
   server.handle(superagentRetryTicketRpc, withPrime(createRetryTicketHandler(engine)));
   server.handle(superagentRetryImDeliveryRpc, withPrime(createRetryImDeliveryHandler(engine)));
   server.handle(superagentCloseThreadRpc, withPrime(createCloseThreadHandler(engine)));
@@ -147,6 +150,7 @@ export default function contribute(server: PluginServerContext) {
         threadKey: message.threadKey,
         context: message.context,
         replyTo: message.replyTo,
+        imCardSubmission: message.imCardSubmission,
       })
       .catch((error) => {
         console.error("[superagent] IM trigger dispatch failed", error);
@@ -424,10 +428,10 @@ export default function contribute(server: PluginServerContext) {
     }
   });
 
-  const removePermissionResolvedHook = server.addHook("agent.permission.after", async ({ agent }, context) => {
+  const removePermissionResolvedHook = server.addHook("agent.permission.after", async ({ agent, requestId, resolution }, context) => {
     engine.prime(context.paseo);
     await store.ready;
-    if (engine.orchestrationRole(agent.id) === "worker") await engine.workerPermissionResolved(agent.id);
+    await engine.workerPermissionResolved(agent.id, { requestId, resolution });
   });
 
   // hook 仅用于 prime(无头重启后到首个 RPC 之间保持引擎活着)。
