@@ -72,6 +72,7 @@ export const chat = {
     multiSelect: "Select any that apply",
     writeAnswer: "Write your answer",
     otherAnswer: "Other answer",
+    otherChoice: "Other (free input)",
     submitAnswer: "Submit answer",
     questionProgress: "Question {{current}} of {{count}}",
     previousQuestion: "Previous question",

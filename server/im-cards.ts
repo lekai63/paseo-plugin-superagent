@@ -1,5 +1,5 @@
 import type { TemplateCard } from "@wecom/aibot-node-sdk";
-import { ImCardSubmissionSchema } from "../shared/model";
+import { ImCardSubmissionSchema, OTHER_CHOICE_VALUE } from "../shared/model";
 import type { ImRequestCard } from "./im-requests";
 import { t } from "./i18n";
 
@@ -15,13 +15,24 @@ export function feishuRequestCard(card: ImRequestCard) {
   const fields = card.questions?.map((question, index) => {
     const name = `q${index + 1}`;
     const required = !question.allowEmpty && !question.allowOther;
-    if (question.options.length && !question.allowOther && !question.multiSelect) {
-      return { tag: "select_static", name, required, placeholder: plain(question.question),
-        options: question.options.map(({ label }, i) => ({ text: plain(label), value: String(i + 1) })) };
+    if (question.options.length && !question.multiSelect) {
+      // Single-choice questions render as a dropdown. With allowOther, the list gains an
+      // "Other" entry and a companion free-text input (qN_other): parseImQuestionAnswers maps
+      // that pair back to the "+ custom text" answer syntax, so both card and text replies share one parser.
+      const choices = question.options.map(({ label }, i) => ({ text: plain(label), value: String(i + 1) }));
+      if (!question.allowOther) {
+        return [{ tag: "select_static" as const, name, required, placeholder: plain(question.question), options: choices }];
+      }
+      return [
+        { tag: "select_static" as const, name, required: !question.allowEmpty, placeholder: plain(question.question),
+          options: [...choices, { text: plain(t("chat.requests.otherChoice")), value: OTHER_CHOICE_VALUE }] },
+        { tag: "input" as const, name: `${name}_other`, required: false,
+          placeholder: plain(question.placeholder ?? t("chat.requests.otherAnswer")) },
+      ];
     }
-    return { tag: "input", name, required, label: plain(question.question),
-      placeholder: plain(question.options.length ? t("server.engine.imOptionPlaceholder") : question.placeholder ?? t("chat.requests.writeAnswer")) };
-  });
+    return [{ tag: "input" as const, name, required, label: plain(question.question),
+      placeholder: plain(question.options.length ? t("server.engine.imOptionPlaceholder") : question.placeholder ?? t("chat.requests.writeAnswer")) }];
+  }).flatMap((field) => field);
   const actions = [card.allow ? button("allow", t("chat.requests.allow")) : null,
     card.deny ? button("deny", t("chat.requests.deny")) : null].filter(Boolean);
   if (!fields && !actions.length) return undefined;
@@ -40,7 +51,7 @@ export function readFeishuRequestAction(data: unknown) {
   const value = record(action.value);
   const context = record(event.context);
   const form = record(action.form_value);
-  const fields = Object.fromEntries(Object.entries(form).filter(([key]) => /^q[1-9]\d*$/.test(key)));
+  const fields = Object.fromEntries(Object.entries(form).filter(([key]) => /^q[1-9]\d*(?:_other)?$/.test(key)));
   const parsed = ImCardSubmissionSchema.safeParse({ deliveryId: value.superagent, behavior: value.behavior,
     ...(value.behavior === "answer" ? { fields } : {}) });
   const senderId = record(event.operator).open_id;

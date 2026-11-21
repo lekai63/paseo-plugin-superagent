@@ -51,6 +51,9 @@ export const ImCardSubmissionSchema = z.object({
 }).strict();
 export type ImCardSubmission = z.infer<typeof ImCardSubmissionSchema>;
 
+/** 下拉题里「其他（自由输入）」选项的值；与选项编号区分，自由文本放在配套的 `qN_other` 字段。 */
+export const OTHER_CHOICE_VALUE = "other";
+
 const WorkerRequestRefSchema = z.object({ ticketId: z.string(), agentId: z.string(), requestId: z.string() });
 
 export const TRIGGER_STATUSES = ["pending", "filtered", "evaluated", "delivered", "failed"] as const;

@@ -1,4 +1,4 @@
-import type { ImCardSubmission } from "../shared/model";
+import { OTHER_CHOICE_VALUE, type ImCardSubmission } from "../shared/model";
 import { buildWorkerQuestionAnswers, type WorkerQuestion, type WorkerQuestionAnswer } from "../shared/worker-questions";
 import { t } from "./i18n";
 
@@ -33,8 +33,23 @@ export function parseImQuestionAnswers(
   const values = new Map<number, string>();
   if (submission.selections || submission.fields) {
     for (const [key, value] of Object.entries(submission.selections ?? submission.fields ?? {})) {
-      if (!/^q[1-9]\d*$/.test(key)) return null;
+      if (!/^q[1-9]\d*$/.test(key)) continue;
       values.set(Number(key.slice(1)), typeof value === "string" ? value : value.join(","));
+    }
+    // Dropdown "Other" entries (select_static) carry the free text in a companion qN_other field;
+    // fold it into the "<choice> + <custom>" syntax shared with plain-text replies.
+    const others = submission.selections ? null : submission.fields ?? {};
+    if (others) {
+      for (const [key, value] of Object.entries(others)) {
+        const match = /^q([1-9]\d*)_other$/.exec(key);
+        if (!match || typeof value !== "string" || !value.trim()) continue;
+        const index = Number(match[1]);
+        const current = values.get(index)?.trim() ?? "";
+        const custom = value.trim();
+        // "other" itself is a placeholder, not an answer: fold to "+custom". A concrete choice plus
+        // custom text stays "N+custom" and is rejected downstream for single-select questions.
+        values.set(index, !current || current === OTHER_CHOICE_VALUE ? `+${custom}` : `${current}+${custom}`);
+      }
     }
   } else if (questions.length === 1) {
     const text = submission.text ?? "";

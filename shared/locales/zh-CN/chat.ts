@@ -72,6 +72,7 @@ export const chat: Translation<typeof en> = {
     multiSelect: "可选择多项",
     writeAnswer: "输入答案",
     otherAnswer: "其他答案",
+    otherChoice: "其他（自由输入）",
     submitAnswer: "提交答案",
     questionProgress: "第 {{current}} 题，共 {{count}} 题",
     previousQuestion: "上一题",
