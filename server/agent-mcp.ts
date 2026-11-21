@@ -10,8 +10,7 @@ import { WATCHDOG_AGENT_LABEL_VALUE } from "../shared/model";
  * 替代早期 defineAgentTool 的 tools 注入——那条通道会被宿主的 "Paseo tools" 开关
  * (mcp.injectIntoAgents)连带给关掉,这条不会。
  *
- * 注入按调用方分三档:普通 agent 拿 superagent_dispatch(受设置开关控制);编排自身的
- * Router 拿回读工具、Worker 拿退订/转回工具(编排内部机制,不受设置开关控制)。
+ * 普通 agent 拿 superagent_dispatch，Worker 拿退订和转回。推理回读由插件直接执行。
  */
 
 /** 注入的 MCP server 名(定义在 mcp-server;不能叫 `paseo`,daemon 保留名)。 */
@@ -42,7 +41,7 @@ export function resolveMcpProviders(configured: string): string[] {
 }
 
 /**
- * 编排 agent(Router/Worker)的 provider 门控:provider 可能带 model 限定
+ * Worker 的 provider 门控:provider 可能带 model 限定
  * (如 codex/test),按 family 匹配。默认五家之外,用户在「注入 provider」里显式
  * 配置过的 family 也放行(如本机 zcode-acp——插件型 provider 在 daemon 侧统一声明
  * supportsMcpServers,注入不支持的 provider 才会导致会话启动失败)。
@@ -54,14 +53,12 @@ export function mcpCapableProvider(provider: string, extraFamilies: readonly str
 
 /**
  * pi 系会话不做 mcpServers 注入:Paseo→pi 的配置转换不透传 exposure,pi 的 MCP 工具
- * 会以默认 codemode 暴露(模型不能直接调用)。改经 env 把角色 URL 交给随插件发行的
- * pi 扩展注册(direct exposure),Router/看门狗并由扩展裁剪工具(只裁决)。扩展未
- * 安装时 env 无副作用:会话照常,只是没有角色工具与硬约束。
+ * 会以默认 codemode 暴露。改经 env 把角色 URL 交给随插件发行的 pi 扩展注册。
  */
 function piEnvRequest(
   request: PluginSessionOpenRequest,
   url: string,
-  role: "router" | "watchdog" | "worker" | null,
+  role: "worker" | null,
 ): PluginSessionOpenRequest {
   return {
     ...request,
@@ -79,8 +76,8 @@ function hintPiExtension(): void {
   if (piExtensionHintShown) return;
   piExtensionHintShown = true;
   console.warn(
-    "[superagent] pi orchestration session: install the bundled pi extension for role tools and " +
-      "decision-only enforcement (pi-extension/superagent.js -> ~/.pi/agent/extensions/, see README)",
+    "[superagent] install the bundled pi extension to expose Superagent tools " +
+      "(pi-extension/superagent.js -> ~/.pi/agent/extensions/, see README)",
   );
 }
 
@@ -94,22 +91,14 @@ export function createSessionOpenTransform(
     const endpoint = resolveEndpoint();
     if (!endpoint) return undefined;
     if (request.mcpServers[DISPATCH_MCP_SERVER_NAME]) return undefined;
-    const role: "router" | "watchdog" | "worker" | null =
-      request.labels[ROUTER_LABEL] === ROUTER_LABEL_VALUE
-        ? "router"
-        : request.labels[ROUTER_LABEL] === WATCHDOG_AGENT_LABEL_VALUE
-          ? "watchdog"
-          : request.labels[TICKET_LABEL]
-            ? "worker"
-            : null;
-    // Router/Worker 的角色工具是编排自身机制:不受 agentToolEnabled 影响,但同样
-    // 只注入声明支持 MCP servers 的 provider 家族(默认名单 ∪ 用户配置,否则会话启动失败);
-    // pi 家族改走 env + pi 扩展(扩展负责 direct exposure 注册与只裁决裁剪)。
-    if (role) {
-      const url = role === "worker" ? endpoint.workerUrl(request.labels[TICKET_LABEL]) : endpoint.routerUrl(request.agentId);
+    const role = request.labels[ROUTER_LABEL];
+    if (role === ROUTER_LABEL_VALUE || role === WATCHDOG_AGENT_LABEL_VALUE) return undefined;
+    const ticketId = request.labels[TICKET_LABEL];
+    if (ticketId) {
+      const url = endpoint.workerUrl(ticketId);
       if (isPiProvider(request.provider)) {
         hintPiExtension();
-        return piEnvRequest(request, url, role);
+        return piEnvRequest(request, url, "worker");
       }
       if (mcpCapableProvider(request.provider, providers())) {
         return {
@@ -147,7 +136,7 @@ export function createSessionOpenTransform(
 
 /** 编排自身的 MCP 工具名(各 provider 的工具名形态不同:mcp__superagent__superagent_read 等)。 */
 function isOrchestrationTool(name: string): boolean {
-  return /(?:^|[^a-z0-9])superagent_(?:read|list|search|unsubscribe|handback)$/i.test(name) || /^superagent_[a-z]+$/i.test(name);
+  return /(?:^|[^a-z0-9])superagent_(?:unsubscribe|handback)$/i.test(name);
 }
 
 export type OrchestrationPermission =
@@ -156,8 +145,7 @@ export type OrchestrationPermission =
 
 /**
  * 编排 agent 的权限策略(agent.permission.before):
- *   Router/看门狗只裁决不执行(§2.1 "甚至可以不配备 Bash")——自身的只读回读工具放行,
- *   其余工具、计划与模式切换一律拒绝,避免 Router 停在权限等待里堵住评估队列;
+ *   旧版 Router/看门狗挂起时拒绝新增工具权限，等待归档。
  *   Worker 的会话控制工具(退订/转回)放行,其余由引擎通知 Router 决策/转告人。
  * 返回 null 表示不干预。
  */
@@ -167,12 +155,11 @@ export function orchestrationPermission(
 ): OrchestrationPermission | null {
   if (!role) return null;
   const own = request.kind === "tool" && isOrchestrationTool(request.name);
-  if (own) return { behavior: "allow" };
-  if (role === "worker") return null;
+  if (role === "worker") return own ? { behavior: "allow" } : null;
   return {
     behavior: "deny",
     message: role === "router"
       ? "The Router is decision-only: do not run tools. Answer with the JSON verdict; dispatch a Worker for anything that needs tools."
-      : "The Watchdog acts only through its JSON actions; apart from the superagent recall tools it does not run tools.",
+      : "The watchdog evaluates tickets through the inference API.",
   };
 }

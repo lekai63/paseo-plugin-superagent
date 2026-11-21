@@ -10,8 +10,8 @@ Superagent 在 [Paseo](https://paseo.sh) 之上实现事件驱动的「超级 ag
 
 ## 功能概览
 
-- **Router 只裁决**:每个 Thread 一个 Router 会话,以 JSON 动作给出裁决(派发、转向、处理请求、取消、重试、订阅、答复、忽略、结束)。插件提供只读回读与检索工具（Chain of Recall），并拒绝 provider 通过 Paseo 发出的其他工具请求。Codex 担任 Router 和 LLM 看门狗时使用只读沙箱，仍可读取工作区。Pi 的工具限制依赖随附扩展。
-- **Worker 按 Ticket 执行**:每个 Ticket 一个独立 worktree,或在共享目录里工作;可配置多个具名 Worker 档位(不同 provider、模型、工作目录),Router 按用途为每个任务选择。Worker 挂在 Router 名下,在 app 的 Subagents 里可见,随时可人工接管。
+- **Router 只裁决**。插件直接调用独立的推理 API，用当前触发、线程记忆和只读回读生成 JSON 裁决。工作区操作交给 Worker。
+- **Worker 按 Ticket 执行**。每个 Ticket 一个 Paseo Worker，在独立 worktree 或共享目录工作。可配置具名档位，按模型、用途与目录分工。在 Superagent 的任务侧栏可打开 Worker 会话。
 - **订阅直通**:线程里已有在干活的 Worker 时,后续消息绕过 Router 直接送达(不调用模型);一个 Worker 可以跟随多个线程。
 - **权限请求由你批准**。在 Superagent 的卡片上可以允许一次、拒绝或回答 Worker 的提问。打开 Worker 的 Paseo 原生会话可以查看 provider 提供的全部选项。IM 通知继续提供 `/approve <批准码>` 和 `/deny <批准码>` 命令。Router 可以依据上下文回答 Worker 的提问。请求落盘，重启后会重新同步。
 - **IM 触发源**:飞书、钉钉、企业微信(官方长连接,免公网)、微信(腾讯官方 ClawBot / iLink,扫码登录)、QQ(OneBot 11 / NapCat)。白名单准入;图片、文件、语音、视频下载到本机并写进消息。
@@ -26,7 +26,7 @@ Superagent 在 [Paseo](https://paseo.sh) 之上实现事件驱动的「超级 ag
 
 - Paseo daemon 与各端客户端 **0.16.0** 或更新版本,并已在 daemon 上开启插件(**Settings → Plugins → Enable plugins**)。
 - daemon 主机:Node.js 20 或更新版本,`npm` 在 PATH 上(安装依赖用)。
-- 至少一个可用的 agent provider(如 claude、codex、opencode、pi)。Router 配轻量模型、Worker 配强模型最划算。
+- 支持函数调用的 Chat Completions 推理 API。执行任务另需至少一个可用的 Paseo Worker provider。
 - `worktree` 隔离要求工作目录位于 git 仓库内;`shared` 隔离不需要 git。
 
 ## 安装
@@ -49,11 +49,11 @@ daemon 克隆仓库后按 manifest 执行 `npm ci --omit=dev --ignore-scripts` �
 
 ### 可选:pi 扩展
 
-用 pi 担任 Router、Worker 或接收委派时,把随包发行的 `pi-extension/superagent.js` 复制到 `~/.pi/agent/extensions/`。这是手动副本,插件升级后要重新复制。详见 [pi 集成](docs/pi.md)。
+使用 Pi 执行任务或注入委派工具时，将随附的 `pi-extension/superagent.js` 复制到 `~/.pi/agent/extensions/`。扩展更新后重新复制。[Pi 集成](docs/pi.md)
 
 ## 快速开始
 
-1. 在 Paseo app 打开 **Settings → Plugins → Superagent**,填写**工作目录**(必填,daemon 主机上的绝对路径),按需选择 Router 与 Worker 的 provider 与模型,点「保存」。每一项的说明见 [设置项](docs/configuration.md)。
+1. 打开 **Settings → Plugins → Superagent → 模型**，设置推理 API 基础地址（例如 `https://inference.example/v1`）和 Router 模型 ID。服务要求鉴权时，在 daemon 环境设置 `SUPERAGENT_INFERENCE_API_KEY`。需要派发 Worker 时，在**基础**页填写工作目录。[设置项](docs/configuration.md)
 2. 点侧栏的 **Superagent**,在底部输入框描述任务。Router 会直接答复,或派发 Worker 执行并把结果写回对话。
 3. 在任意 agent 会话里输入 `/superagent <任务>`,把工作委派给编排层;Router 的答复回到该会话。
 4. 想从聊天工具下达指令时,按 [IM 触发源](docs/im.md) 打开对应通道并填写白名单。

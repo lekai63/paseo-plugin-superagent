@@ -3,6 +3,7 @@ export class DeadlineError extends Error {}
 
 export class Deadline {
   private canceled = false;
+  private controller = new AbortController();
   private listeners = new Set<(error: Error) => void>();
   readonly expiresAt: number;
 
@@ -10,9 +11,16 @@ export class Deadline {
     this.expiresAt = Date.now() + timeoutMs;
   }
 
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
   cancel(): void {
+    if (this.canceled) return;
     this.canceled = true;
-    for (const reject of this.listeners) reject(new DeadlineError(`${this.label} timed out or was canceled`));
+    const error = new DeadlineError(`${this.label} timed out or was canceled`);
+    for (const reject of this.listeners) reject(error);
+    this.controller.abort();
   }
 
   check(): void {

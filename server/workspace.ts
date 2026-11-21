@@ -1,11 +1,10 @@
-import type { PaseoApi, PaseoAgent, PaseoWorkspaceHandle } from "@getpaseo/client";
+import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
 import { resolve } from "node:path";
 import { allTranslations, type MessageKey } from "../shared/i18n";
 import { t } from "./i18n";
 
 /**
- * 持久目录工作区:同一个基础目录分别保留普通与后台 workspace。Router/看门狗
- * 使用后台工作区,shared 隔离的 Worker 使用普通工作区,避免一起隐藏 Worker。
+ * 持久目录工作区按目录与前后台属性区分，供 shared 隔离的 Worker 使用。
  *
  * 复用顺序:kv 记住的 id(daemon 的 workspace 跨重启持久)→ 按「标题 + 目录」在
  * 活跃工作区里找回 → 新建。标题匹配限定在同一目录,避免误并入人在其他目录
@@ -21,14 +20,6 @@ export const BACKGROUND_WORKSPACE_TITLE = "labels.workspace.background" satisfie
 export function workspaceTitles(key: "labels.workspace.default" | "labels.workspace.background"): string[] {
   const current = t(key);
   return [current, ...allTranslations(key).filter((title) => title !== current)];
-}
-
-/** 后台属性只在创建工作区时指定;旧前台角色会话在下次使用时换建。 */
-export async function agentUsesBackgroundWorkspace(paseo: PaseoApi, agent: PaseoAgent): Promise<boolean> {
-  if (!agent.workspaceId) return false;
-  const workspace = await paseo.workspaces.ref(agent.workspaceId).refresh();
-  if (!workspace) throw new Error(`agent workspace ${agent.workspaceId} is unavailable`);
-  return workspace.background === true;
 }
 
 /**

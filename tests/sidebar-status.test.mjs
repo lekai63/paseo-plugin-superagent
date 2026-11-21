@@ -27,32 +27,15 @@ test("startup uses running Ticket state until live observations arrive without i
   assert.deepEqual(sidebarWorkerCounts(tickets, { starting: { status: "initializing" }, running: null }), { running: 1, done: 0 });
 });
 
-test("router mark maps the live session state onto the five dots", () => {
-  assert.deepEqual(routerStatusMark([{ status: "running" }]), { kind: "running", count: 1 });
-  assert.deepEqual(routerStatusMark([{ status: "initializing" }]), { kind: "running", count: 1 });
-  assert.deepEqual(routerStatusMark([{ status: "idle", requiresAttention: true, attentionReason: "finished" }]), { kind: "finished", count: 1 });
-  assert.deepEqual(routerStatusMark([{ status: "idle", pendingPermissions: [{}] }]), { kind: "permission", count: 1 });
-  assert.deepEqual(routerStatusMark([{ status: "idle", requiresAttention: true, attentionReason: "permission" }]), { kind: "permission", count: 1 });
-  assert.deepEqual(routerStatusMark([{ status: "error" }]), { kind: "error", count: 1 });
-  assert.deepEqual(routerStatusMark([{ status: "idle", requiresAttention: true, attentionReason: "error" }]), { kind: "error", count: 1 });
-  assert.deepEqual(routerStatusMark([{ status: "idle", providerUnavailable: true }]), { kind: "error", count: 1 });
-  assert.deepEqual(routerStatusMark([{ status: "idle" }]), { kind: "idle", count: 1 });
-});
-
-test("router mark stays blank for closed, archived and missing sessions", () => {
-  assert.equal(routerStatusMark([{ status: "closed" }]), null);
-  assert.equal(routerStatusMark([{ status: "idle", archivedAt: "2026-01-01" }]), null);
-  assert.equal(routerStatusMark([null, undefined]), null);
-  assert.equal(routerStatusMark([]), null);
-  // 关闭的会话不把唯一可显示的状态挤掉。
-  assert.deepEqual(routerStatusMark([{ status: "closed" }, { status: "running" }]), { kind: "running", count: 1 });
-});
-
-test("router mark prefers the most urgent state and counts only routers in that state", () => {
-  // 优先级沿用宿主 agent 状态序:权限 > 出错 > 运行 > 完成待查看 > 空闲。
-  assert.deepEqual(routerStatusMark([{ status: "running" }, { status: "error" }]), { kind: "error", count: 1 });
-  assert.deepEqual(routerStatusMark([{ status: "running" }, { status: "idle", pendingPermissions: [{}] }]), { kind: "permission", count: 1 });
-  assert.deepEqual(routerStatusMark([{ status: "running" }, { status: "initializing" }]), { kind: "running", count: 2 });
-  assert.deepEqual(routerStatusMark([{ status: "idle" }, { status: "idle" }]), { kind: "idle", count: 2 });
-  assert.deepEqual(routerStatusMark([{ status: "idle" }, { status: "running" }]), { kind: "running", count: 1 });
+test("the sidebar uses Router inference activity and outstanding evaluation errors", () => {
+  const running = { engine: { evalInFlight: true }, threads: [] };
+  assert.deepEqual(routerStatusMark(running), { kind: "running", count: 1 });
+  const error = { pendingTriggers: 1, state: "active", lastDecision: { outcome: "error" } };
+  const unparsed = { ...error, lastDecision: { outcome: "unparsed" } };
+  const closed = { ...error, state: "closed" };
+  const consumed = { ...error, pendingTriggers: 0 };
+  const idle = { engine: { evalInFlight: false }, threads: [closed, consumed] };
+  assert.equal(routerStatusMark(idle), null);
+  assert.equal(routerStatusMark(undefined), null);
+  assert.deepEqual(routerStatusMark({ ...idle, threads: [...idle.threads, error, unparsed] }), { kind: "error", count: 2 });
 });

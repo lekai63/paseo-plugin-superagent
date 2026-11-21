@@ -29,6 +29,7 @@ export const chat: Translation<typeof en> = {
     loadingConversation: "正在读取对话",
     statusUnavailable: "状态不可用,请先重试",
     loadingConfig: "正在读取配置",
+    needInference: "请先在 Superagent 设置中配置推理 API 和 Router 模型",
     needWorkingDir: "先在设置里填写工作目录",
     workingDirUnavailable: "工作目录不可用,Worker 暂时无法启动",
   },

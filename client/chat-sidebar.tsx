@@ -14,6 +14,7 @@ import {
   threadStatus,
   ticketStatusLabel,
   ticketStatusTone,
+  outcomeLabel,
   watchdogNoteLabel,
   patrolSummaryLabel,
   type StatusLabel,
@@ -69,6 +70,7 @@ export interface ChatSidebarProps {
   onTab(tab: SidebarTab): void;
   /** 全部线程(含已关闭)与 Ticket,不含消息正文。 */
   snapshot: SuperagentSnapshot | undefined;
+  routerDecisions?: SuperagentSnapshot["decisions"];
   threadId: string | null;
   onSelectThread(threadId: string | null): void;
   /** 手动关闭对话成功后调用:顺带关掉它的标签。 */
@@ -164,28 +166,20 @@ function observationStatus(observation: AgentObservation | undefined, t: Transla
   return agentStatus(observation.agent, t);
 }
 
-function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, hostId, navigation }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
+function TasksTab({ snapshot, routerDecisions = snapshot.decisions, threadId, onSelectThread, onThreadClosed, theme, hostId, navigation }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
   const t = useT();
   const thread = threadId ? snapshot.threads.find((item) => item.id === threadId) : undefined;
   const tickets = thread
     ? snapshot.tickets.filter((ticket) => ticket.threadId === thread.id || followsOf(ticket).includes(thread.id))
     : currentTickets(snapshot.tickets);
-  const routerAgentId = thread ? thread.router?.agentId ?? null : snapshot.routerAgentId;
-  const routerSnapshot = thread ? { ...snapshot, routerAgentId, routerProvider: thread.router?.provider ?? snapshot.routerProvider,
-    engine: { ...snapshot.engine, evalInFlight: snapshot.engine.evalInFlight && snapshot.engine.currentEvalThreadId === thread.id },
-  } : snapshot;
-  // 按正在查看的线程观察其 Router,不串到其他线程的最后一次评估。
-  const ids = [routerAgentId, ...currentTickets(tickets).map((ticket) => ticket.workerAgentId)]
-    .filter((id): id is string => Boolean(id));
-  const agents = useExecutionAgents(hostId, ids);
+  const agents = useExecutionAgents(hostId, currentTickets(tickets).flatMap((ticket) => ticket.workerAgentId ? [ticket.workerAgentId] : []));
   const observe = (ticket: Ticket) => (ticket.workerAgentId ? agents[ticket.workerAgentId] : undefined);
   const ordered = [...tickets].sort((a, b) => ticketPriority(a, observe(a)?.agent) - ticketPriority(b, observe(b)?.agent)
     || b.createdAt.localeCompare(a.createdAt));
   const directs = thread ? directTickets(tickets, thread.id) : [];
   return (
     <>
-      <RouterCard snapshot={routerSnapshot} observation={routerAgentId ? agents[routerAgentId] : undefined}
-        theme={theme} navigation={navigation} />
+      <RouterCard snapshot={snapshot} routerDecisions={routerDecisions} threadId={thread?.id} theme={theme} />
       <View style={{ gap: space.sm }}>
         <GroupLabel theme={theme}>{t(thread ? "sidebar.tasks.workersInThread" : "sidebar.tasks.workersActive", { count: tickets.length })}</GroupLabel>
         {ordered.length === 0 ? (
@@ -206,38 +200,43 @@ function TasksTab({ snapshot, threadId, onSelectThread, onThreadClosed, theme, h
   );
 }
 
-function RouterCard({ snapshot, observation, theme, navigation }: {
+function RouterCard({ snapshot, routerDecisions, threadId, theme }: {
   snapshot: SuperagentSnapshot;
-  observation?: AgentObservation;
+  routerDecisions: SuperagentSnapshot["decisions"];
+  threadId?: string;
   theme: Theme;
-  navigation: Navigation;
 }) {
   const t = useT();
-  const evaluating = snapshot.engine.evalInFlight ? snapshot.threads.find((thread) => thread.id === snapshot.engine.currentEvalThreadId) : undefined;
-  const state: StatusLabel = snapshot.engine.evalInFlight ? { label: t("sidebar.router.evaluating"), tone: "warning" }
-    : { label: t(snapshot.routerAgentId ? "sidebar.router.standby" : "sidebar.router.waiting"), tone: "muted" };
-  const session = snapshot.routerAgentId ? observationStatus(observation, t) : null;
-  const routerAgentId = snapshot.routerAgentId;
+  const active = snapshot.engine.evalInFlight && (!threadId || snapshot.engine.currentEvalThreadId === threadId);
+  const evaluating = active ? snapshot.threads.find((thread) => thread.id === snapshot.engine.currentEvalThreadId) : undefined;
+  const latest = routerDecisions.find((decision) => decision.inference && (!threadId || decision.threadId === threadId));
+  const actions = latest ? routerDecisions.filter((decision) => decision.id === latest.id ||
+    (decision.threadId === latest.threadId && latest.triggerIds.length > 0 &&
+      latest.triggerIds.length === decision.triggerIds.length && latest.triggerIds.every((id, i) => id === decision.triggerIds[i]) &&
+      decision.createdAt >= latest.createdAt && decision.outcome !== "unparsed" && decision.outcome !== "error")) : [];
+  const trace = latest?.inference;
+  const state: StatusLabel = active ? { label: t("sidebar.router.evaluating"), tone: "warning" }
+    : { label: t(snapshot.inferenceConfigured ? "sidebar.router.standby" : "sidebar.status.notConfigured"), tone: "muted" };
   return (
     <SidebarCard theme={theme}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
         <View style={{ width: 16, alignItems: "center" }}>
-          {snapshot.engine.evalInFlight ? <RunningDot color={chatTokens(theme).status.running} accessibilityLabel={t("sidebar.router.evaluatingA11y")} />
+          {active ? <RunningDot color={chatTokens(theme).status.running} accessibilityLabel={t("sidebar.router.evaluatingA11y")} />
             : <Icon name="Route" size={15} color={theme.colors.foregroundMuted} />}
         </View>
         <Text style={{ flex: 1, color: theme.colors.foreground, fontSize: TYPE.body.size, lineHeight: TYPE.body.lineHeight, fontWeight: "600" }}>Router</Text>
         <StatusBadge theme={theme} {...state} />
       </View>
-      {session && session.tone !== "muted" && session.label !== t("labels.agentStatus.running") ? (
-        <View style={{ flexDirection: "row" }}><StatusBadge theme={theme} {...session} /></View>
-      ) : null}
-      <CardMeta theme={theme} lines={2}>{snapshot.routerProvider || t("sidebar.router.autoModel")}</CardMeta>
+      {snapshot.routerProvider ? <CardMeta theme={theme} lines={2}>{snapshot.routerProvider}</CardMeta> : null}
       {evaluating ? <CardMeta theme={theme} lines={2}>{t("sidebar.router.evaluatingThread", { title: evaluating.title })}</CardMeta> : null}
-      {routerAgentId && navigation ? (
-        <View style={{ flexDirection: "row" }}>
-          <Button theme={theme} size="xs" variant="outline" icon="ArrowUpRight" label={t("sidebar.router.openSession")}
-            onPress={() => navigation.openAgent({ agentId: routerAgentId })} />
-        </View>
+      {latest && trace ? (
+        <>
+          <CardMeta theme={theme} lines={2}>{latest.id}</CardMeta>
+          <CardMeta theme={theme} lines={2}>{t("sidebar.status.inferenceTrace", { model: trace.model, ms: trace.durationMs, calls: trace.recallCalls })}</CardMeta>
+          <CardMeta theme={theme} lines={2}>{actions.slice().reverse().map((decision) => outcomeLabel(decision.outcome, t)).join(" · ")}</CardMeta>
+          {latest.rationale ? <CardMeta theme={theme} lines={2}>{latest.rationale}</CardMeta> : null}
+          {latest.triggerIds.length ? <CardMeta theme={theme} lines={2}>{latest.triggerIds.join(", ")}</CardMeta> : null}
+        </>
       ) : null}
     </SidebarCard>
   );
@@ -476,7 +475,7 @@ const CHANNEL_LABELS: [keyof SuperagentSettingsValues, "feishu" | "qq" | "dingta
   ["weixinEnabled", "weixin"],
 ];
 
-function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
+function StatusTab({ snapshot, theme, hostId, openSettings }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
   const t = useT();
   const settingsState = useSettings(superagentSettings);
   const settings = settingsState.status === "ready" ? settingsState.values : null;
@@ -501,7 +500,6 @@ function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSi
       patrolText = t("sidebar.status.patrolResult", { time: clockTime(patrol.lastRunAt), result: patrol.lastError ? t("sidebar.status.patrolError", { error: patrol.lastError }) : patrolSummaryLabel(patrol.lastSummary, t) });
     } else patrolText = t("sidebar.status.patrolWaiting", { minutes: settings?.watchdogIntervalMin ?? 30 });
   }
-  const patrolAgentId = patrol?.agentId ?? null;
   return (
     <>
       <View style={{ gap: space.sm }}>
@@ -517,7 +515,7 @@ function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSi
       </View>
       <View style={{ gap: space.md }}>
         <GroupLabel theme={theme}>{t("sidebar.status.components")}</GroupLabel>
-        <InfoRow theme={theme} label="Router" value={snapshot.routerProvider || t("sidebar.status.auto")} />
+        <InfoRow theme={theme} label="Router" value={snapshot.routerProvider || t("sidebar.status.notConfigured")} />
         <InfoRow theme={theme} label={snapshot.workerProfiles.length ? t("sidebar.ticket.defaultWorker") : "Worker"}
           value={`${snapshot.workerProvider || t("sidebar.status.auto")} · ${settings?.workerIsolation === "shared" ? t("sidebar.status.sharedDir") : t("sidebar.status.isolatedWorktree")}`} />
         {snapshot.workerProfiles.length ? (
@@ -532,11 +530,9 @@ function StatusTab({ snapshot, theme, hostId, navigation, openSettings }: ChatSi
         {patrolText ? (
           <InfoRow theme={theme} label={t("sidebar.status.llmPatrol")} value={patrolText} tone={patrol?.lastError ? "warning" : undefined} />
         ) : null}
-        {patrolAgentId && navigation ? (
-          <View style={{ flexDirection: "row" }}>
-            <Button theme={theme} variant="outline" size="xs" icon="ShieldCheck" label={t("sidebar.status.openPatrol")}
-              onPress={() => navigation.openAgent({ agentId: patrolAgentId })} />
-          </View>
+        {patrol?.enabled && patrol.inference ? (
+          <InfoRow theme={theme} label={t("sidebar.status.inferenceTraceLabel")}
+            value={t("sidebar.status.inferenceTrace", { model: patrol.inference.model, ms: patrol.inference.durationMs, calls: patrol.inference.recallCalls })} />
         ) : null}
       </View>
       {undelivered.length ? (

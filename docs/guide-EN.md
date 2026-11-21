@@ -47,7 +47,7 @@ When the install finishes, **Superagent** appears in the Paseo sidebar.
 
 1. Open **Settings → Plugins → Superagent**. The settings page is split into five tabs: Basics, Models, Rules, Execution and IM triggers.
 2. On **Basics**, fill in the **Working directory**: an absolute path on the daemon host. Choose **Worker isolation**: per-ticket worktree (default) or shared directory.
-3. On **Models**, pick a lightweight model for the Router and a stronger one for the default Worker. Leave either empty to let the engine choose the first available provider.
+3. On **Model**, enter the inference API base URL and Router model ID. Set `SUPERAGENT_INFERENCE_API_KEY` in the daemon environment if required. Leave the default Worker provider empty for automatic selection.
 4. Click **Save**.
 5. Open **Superagent** in the sidebar and describe a task.
 
@@ -130,7 +130,7 @@ The five tabs share one draft: switch tabs freely, then **Save** once. Invalid f
 
 **Basics** — working directory, Worker isolation, background Workers, delegation injection.
 
-**Models** — Router provider/model/thinking level, default Worker provider/model/mode/thinking level, default Worker purpose, and named Worker profiles.
+**Model** — inference API, Router model, default Worker provider and mode, and named Worker profiles.
 
 ![Settings, Models tab](../assets/screenshots/superagent-settings-models.png)
 
@@ -179,7 +179,7 @@ Per-platform setup steps are in [IM triggers](im-EN.md).
 
 **Keep answering in one Worker.** While a Worker is subscribed to a conversation, follow-up messages go straight to it with no model call. The composer hint reads *Direct to Worker*.
 
-**Let it watch itself.** Turn on the LLM watchdog in **Rules**. At each interval a separate `Superagent Watchdog` session reviews unfinished Workers, judges whether they are making progress, and nudges, interrupts, cancels or retries as needed. You can open that session and ask it what it saw.
+**Let it watch itself.** Enable the LLM watchdog under **Rules**. It calls the inference API to assess progress on an interval. The plugin rechecks ticket state before applying actions and shows the latest result under Status.
 
 ## Troubleshooting
 

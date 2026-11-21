@@ -53,28 +53,23 @@ test("missing catalogs fall through to Paseo's creation-time validation", () => 
   validateProviderThinkingOption("pi/not-in-snapshot", "high", ENTRIES); // 模型 id 不在快照(如 ACP 动态模型)
 });
 
-test("settings v12: thinking fields default empty, parse, trim and round-trip", () => {
-  assert.equal(SETTINGS_DEFAULTS.routerThinkingOptionId, "");
+test("Worker thinking fields default empty, parse, trim and round-trip", () => {
   assert.equal(SETTINGS_DEFAULTS.workerThinkingOptionId, "");
   assert.deepEqual(SETTINGS_DEFAULTS.workerProfiles, []);
   // v11 旧值照常解析,新字段补默认空串。
   const legacy = superagentSettings.schema.parse({ workerProvider: "pi/glm-5.3" });
-  assert.equal(legacy.routerThinkingOptionId, "");
   assert.equal(legacy.workerThinkingOptionId, "");
   const configured = superagentSettings.schema.parse({
-    routerThinkingOptionId: " high ",
     workerThinkingOptionId: "max",
     workerProfiles: [{ name: "code", provider: "pi/glm-5.3", description: "code", thinkingOptionId: "low" }],
   });
-  assert.equal(configured.routerThinkingOptionId, "high");
   assert.equal(configured.workerThinkingOptionId, "max");
   assert.equal(configured.workerProfiles[0].thinkingOptionId, "low");
   assert.equal(configured.workerProfiles[0].modeId, "");
   assert.deepEqual(superagentSettings.schema.parse(configured), configured);
 });
 
-test("settings v12 rejects malformed thinking ids", () => {
-  assert.equal(superagentSettings.schema.safeParse({ routerThinkingOptionId: "High" }).success, false);
+test("Worker settings reject malformed thinking ids", () => {
   assert.equal(superagentSettings.schema.safeParse({ workerThinkingOptionId: "a b" }).success, false);
   const issues = (values) =>
     superagentSettings.schema.safeParse(values).error?.issues.map((issue) => issue.path.join("."));
@@ -127,8 +122,6 @@ test("compact snapshot: queryFn expands thinkingSets and ThinkingPicker offers t
   const settings = {
     status: "ready", revision: 1, saving: false,
     values: superagentSettings.schema.parse({
-      routerProvider: "pi/zcode-local/glm-5.3-flash",
-      routerThinkingOptionId: "high",
       workerProvider: "pi/zcode-local/glm-5.3",
       workerThinkingOptionId: "max",
       workerProfiles: [{ name: "codex-advisor", provider: "codex/gpt-6.1-sol", thinkingOptionId: "high", description: "x" }],
@@ -202,10 +195,7 @@ test("compact snapshot: queryFn expands thinkingSets and ThinkingPicker offers t
   query = { data: expanded };
   const leaves = render();
   const selects = leaves.filter((node) => node.type === "SettingsSelect" && /thinking/i.test(String(node.props.label ?? "")));
-  assert.ok(selects.length >= 3, "Router/默认 Worker/档位三处 thinking 选择器都在");
-  const routerPicker = selects.find((node) => node.props.label.includes("Router"));
-  assert.deepEqual(routerPicker.props.options && Array.from(routerPicker.props.options.map((option) => option.value)), ["", "low", "high", "max"]);
-  assert.equal(routerPicker.props.value, "high");
+  assert.equal(selects.length, 2, "Worker and profile thinking pickers");
   const workerPicker = selects.find((node) => node.props.label.includes("默认 Worker"));
   assert.deepEqual(Array.from(workerPicker.props.options.map((option) => option.value)), ["", "low", "high", "max"]);
   assert.equal(workerPicker.props.value, "max");
@@ -236,9 +226,9 @@ test("ThinkingPicker falls back to free-text input when no catalog is reported",
   const settings = {
     status: "ready", revision: 1, saving: false,
     values: superagentSettings.schema.parse({
-      routerProvider: "bare-acp/m",
-      routerThinkingOptionId: "turbo",
-      workerProvider: "pi/glm-5.3",
+      workerProvider: "bare-acp/m",
+      workerThinkingOptionId: "turbo",
+      workerProfiles: [{ name: "pi-worker", provider: "pi/glm-5.3", description: "Pi" }],
     }),
     save: async () => {},
   };
@@ -285,11 +275,7 @@ test("ThinkingPicker falls back to free-text input when no catalog is reported",
     visit(node.props?.children);
   };
   visit(sandbox.module.exports.SuperagentModelSettingsScreen({ host: { id: "host" }, theme: { colors: {} } }));
-  const routerThinking = leaves.find((node) => node.type === "SettingsInput" && node.props.label === "Router thinking 档位(可选)");
-  assert.ok(routerThinking, "无清单时 Router thinking 退化为手工输入");
-  assert.equal(routerThinking.props.initialValue, "turbo");
-  assert.ok(/手工填写/.test(routerThinking.props.hint), "提示含手工填写指引");
-  // 有清单的默认 Worker 仍是下拉。
-  const workerThinking = leaves.find((node) => node.type === "SettingsSelect" && node.props.label === "默认 Worker thinking 档位(可选)");
-  assert.deepEqual(Array.from(workerThinking.props.options.map((option) => option.value)), ["", "high"]);
+  const workerThinking = leaves.find((node) => node.type === "SettingsInput" && node.props.label === "默认 Worker thinking 档位(可选)");
+  assert.equal(workerThinking.props.initialValue, "turbo");
+  assert.match(workerThinking.props.hint, /手工填写/);
 });

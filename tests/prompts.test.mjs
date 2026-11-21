@@ -61,7 +61,7 @@ test("Router preferences enter the eval prompt without changing Worker instructi
   assert.ok(prompt.indexOf(rules) < prompt.indexOf("# Thread:"));
   assert.match(prompt, /keep the decision-only role, configured worker profiles, action limit/);
   assert.match(prompt, /These replace any preferences from earlier evaluations/);
-  assert.match(prompt, /Reply with exactly one fenced/);
+  assert.match(prompt, /Reply with exactly one JSON object/);
   assert.equal(composeEvalPrompt({ ...context, routerInstructions: " \n " }), composeEvalPrompt(context));
   assert.doesNotMatch(composeWorkerPrompt({ id: "ticket", title: "test", mandate: "work" }, "/repo", "worktree"), /面向用户使用中文/);
 });
@@ -352,9 +352,9 @@ test("router rules carry the memory discipline and reconciliation guardrail", ()
   const thread = { id: "t", key: "k", title: "t", state: "active", summary: null, createdAt: "", updatedAt: "" };
   const trigger = { id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "x", status: "pending", context: false, receivedAt: "" };
   const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null } });
-  assert.match(prompt, /this conversation is not durable storage/);
-  assert.match(prompt, /belongs in a ticket mandate or in your reply text, never only\s+in your working memory/);
-  assert.match(prompt, /before stop, or any steer\/cancel\/retry against another thread when\s+the target is not certain from the stubs, reconcile the full picture with superagent_list/);
+  assert.match(prompt, /only the supplied thread memory and records carry facts across evaluations/);
+  assert.match(prompt, /Keep open commitments in a ticket mandate,\s+a reply, or sourced thread memory/);
+  assert.match(prompt, /Before stop, or any steer\/cancel\/retry against another thread when\s+the target is not certain from the stubs, reconcile the full picture with superagent_list/);
   assert.match(prompt, /superagent_search when you remember only fragments of the target/);
 });
 

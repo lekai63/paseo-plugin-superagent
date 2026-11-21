@@ -51,11 +51,12 @@ export const settings: Translation<typeof en> = {
   },
   model: {
     title: "模型",
-    info: "从 daemon 的 provider 快照中选取(与启动时校验同源),model id 由选项原样带入,不会出现反斜杠转义或笔误;清单读取失败时可退回手工填写 provider 或 provider/model。留空可自动选择模型。",
-    routerHint: "自动选择时按 Claude、Codex、OpenCode 的顺序优先选择。Codex 使用只读沙箱。使用 Pi 需安装随附扩展以限制工具。",
+    info: "Router 和看门狗使用推理 API。Worker 模型从 Paseo 宿主选择。",
+    inferenceBaseUrl: "推理 API 基础地址",
+    inferenceBaseUrlHint: "包含 API 版本路径，例如 /v1。若服务需要鉴权，请在 daemon 环境设置 SUPERAGENT_INFERENCE_API_KEY。",
+    routerModel: "Router 模型",
+    routerHint: "填写推理 API 接受的模型 ID，模型需支持函数调用。",
     auto: "自动选择",
-    routerThinking: "Router thinking 档位(可选)",
-    routerThinkingFallback: "用于新建或重建的 Router 会话,不影响运行中的会话",
     defaultWorker: "默认 Worker",
     worker: "Worker",
     defaultWorkerHint: "Router 没有指定档位、或指定的档位不存在时使用",
@@ -110,10 +111,6 @@ export const settings: Translation<typeof en> = {
       label: "Router 评估超时(分钟)",
       hint: "准备和裁决共享的总时限；准备阶段最多 1 分钟",
     },
-    routerIdleTimeout: {
-      label: "Router 空闲回收(分钟)",
-      hint: "归档空闲 Router，保留对话，下次评估自动重建",
-    },
     threadIdleTimeout: {
       label: "对话空闲过期(分钟)",
       hint: "默认 1440 分钟；有运行任务、待处理消息或审批时暂缓关闭",
@@ -144,11 +141,11 @@ export const settings: Translation<typeof en> = {
     },
     watchdog: {
       label: "LLM 看门狗",
-      hint: "独立巡检会话,判断 Worker 的进展与偏离",
+      hint: "判断 Worker 是否有实质进展、是否偏离工单",
     },
     watchdogModel: {
       label: "看门狗模型",
-      hint: "留空沿用 Router 的模型。Codex 使用只读沙箱。使用 Pi 需安装随附扩展以限制工具。",
+      hint: "填写推理 API 模型 ID，留空沿用 Router 模型。",
       empty: "同 Router",
     },
     interval: {

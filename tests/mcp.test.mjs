@@ -10,9 +10,6 @@ import {
 import {
   startDispatchMcpServer,
   DISPATCH_TOOL_NAME,
-  READ_TOOL_NAME,
-  LIST_TOOL_NAME,
-  SEARCH_TOOL_NAME,
   UNSUBSCRIBE_TOOL_NAME,
   HANDBACK_TOOL_NAME,
 } from "../server/mcp-server.ts";
@@ -175,34 +172,27 @@ test("2026-07-28 discovery, tool listing and dispatch work without initialize", 
   assert.match(result.content[0].text, /engine unavailable/);
 });
 
-test("modern Router and Worker tools preserve role and ticket isolation", async t => {
+test("modern Worker tools preserve role and ticket isolation", async t => {
   const calls = [];
   const endpoint = await startDispatchMcpServer({
-    dispatch: async () => assert.fail("Router/Worker tools must not dispatch"),
-    listThreads: async () => "thread summary",
-    readRecord: async id => { calls.push(["read", id]); return "full record"; },
+    dispatch: async () => assert.fail("Worker tools must not dispatch"),
     workerUnsubscribe: async (ticket, thread) => { calls.push(["unsubscribe", ticket, thread]); return { ok: true, note: "left thread" }; },
     workerHandback: async (ticket, text) => { calls.push(["handback", ticket, text]); return { ok: false, error: "cannot hand back" }; },
   });
   t.after(() => endpoint.stop());
-  for (const [url, expected] of [
-    [endpoint.routerUrl(), [READ_TOOL_NAME, LIST_TOOL_NAME, SEARCH_TOOL_NAME]],
-    [endpoint.workerUrl("tkt-modern"), [UNSUBSCRIBE_TOOL_NAME, HANDBACK_TOOL_NAME]],
-  ]) {
-    const list = await modernPost(url, { jsonrpc: "2.0", id: 1, method: "tools/list" });
-    assert.equal(list.status, 200);
-    assert.deepEqual((await rpc(list))[0].result.tools.map(tool => tool.name).sort(), [...expected].sort());
-  }
-  const recalled = await modernPost(endpoint.routerUrl(), { jsonrpc: "2.0", id: 2, method: "tools/call",
-    params: { name: READ_TOOL_NAME, arguments: { id: "trg-modern" } } });
-  assert.match((await rpc(recalled))[0].result.content[0].text, /full record/);
+  const list = await modernPost(endpoint.workerUrl("tkt-modern"), { jsonrpc: "2.0", id: 1, method: "tools/list" });
+  assert.equal(list.status, 200);
+  assert.deepEqual((await rpc(list))[0].result.tools.map(tool => tool.name).sort(), [HANDBACK_TOOL_NAME, UNSUBSCRIBE_TOOL_NAME]);
+  const retired = new URL(endpoint.urlFor("legacy-router"));
+  retired.searchParams.set("role", "router");
+  assert.equal((await modernPost(retired, { jsonrpc: "2.0", id: 1, method: "tools/list" })).status, 404);
   const unsubscribe = await modernPost(endpoint.workerUrl("tkt-modern"), { jsonrpc: "2.0", id: 2, method: "tools/call",
     params: { name: UNSUBSCRIBE_TOOL_NAME, arguments: { threadId: "thr-followed" } } });
   assert.equal((await rpc(unsubscribe))[0].result.content[0].text, "left thread");
   const handback = await modernPost(endpoint.workerUrl("tkt-other"), { jsonrpc: "2.0", id: 2, method: "tools/call",
     params: { name: HANDBACK_TOOL_NAME, arguments: { text: "not mine" } } });
   assert.equal((await rpc(handback))[0].result.isError, true);
-  assert.deepEqual(calls, [["read", "trg-modern"], ["unsubscribe", "tkt-modern", "thr-followed"], ["handback", "tkt-other", "not mine"]]);
+  assert.deepEqual(calls, [["unsubscribe", "tkt-modern", "thr-followed"], ["handback", "tkt-other", "not mine"]]);
 });
 
 test("concurrent modern and legacy calls with reused RPC IDs keep callers separate", async t => {
@@ -289,10 +279,7 @@ test("session_open transform injects the endpoint for allowed providers only", a
 
   assert.equal(transform(sessionRequest({ provider: "pi" })), undefined, "pi dispatch needs explicit opt-in (not in default providers)");
 
-  // 编排 agent 拿各自的角色工具:Router 回读、Worker 退订/转回,不受委派开关影响。
-  const router = transform(sessionRequest({ labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE }, provider: "codex/test" }));
-  const routerUrl = new URL(router.mcpServers[DISPATCH_MCP_SERVER_NAME].url);
-  assert.equal(routerUrl.searchParams.get("role"), "router");
+  assert.equal(transform(sessionRequest({ labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE }, provider: "codex/test" })), undefined);
   const workerTransform = createSessionOpenTransform(() => endpoint, () => false, () => []);
   const worker = workerTransform(sessionRequest({ labels: { [TICKET_LABEL]: "tkt-1" }, provider: "claude/opus" }));
   const workerUrl = new URL(worker.mcpServers[DISPATCH_MCP_SERVER_NAME].url);
@@ -312,71 +299,6 @@ test("session_open transform injects the endpoint for allowed providers only", a
   );
   assert.equal(createSessionOpenTransform(() => endpoint, () => false, () => [])(sessionRequest()), undefined);
   assert.equal(createSessionOpenTransform(() => null, () => true, () => ["codex"])(sessionRequest()), undefined);
-});
-
-test("role URLs serve the router read tools and route them to the engine", async (t) => {
-  const reads = [];
-  const searches = [];
-  const endpoint = await startDispatchMcpServer({
-    dispatch: async () => ({ threadId: "t", triggerId: "g", directDelivered: false, note: null }),
-    readRecord: async (id) => {
-      reads.push(id);
-      return id === "trg_lost" ? null : `# trigger ${id}\nfull text`;
-    },
-    listThreads: async () => "- thread thr_1 \"other\"",
-    searchRecords: async (query) => {
-      searches.push(query);
-      return `# Search results for [${query}] — 1 match(es), newest first (up to 20 shown)\n- [trg_1 trigger manual evaluated] user: hit`;
-    },
-  });
-  t.after(() => endpoint.stop());
-  const url = endpoint.routerUrl();
-
-  const list = await post(url, { jsonrpc: "2.0", id: 1, method: "tools/list" });
-  const names = (await rpc(list))[0].result.tools.map((tool) => tool.name);
-  assert.deepEqual([...names].sort(), [LIST_TOOL_NAME, READ_TOOL_NAME, SEARCH_TOOL_NAME]);
-  assert.ok(!names.includes(DISPATCH_TOOL_NAME), "dispatch tool stays off the router session");
-
-  const recalled = await post(url, {
-    jsonrpc: "2.0",
-    id: 2,
-    method: "tools/call",
-    params: { name: READ_TOOL_NAME, arguments: { id: "trg_1" } },
-  });
-  const recalledText = (await rpc(recalled))[0].result.content[0].text;
-  assert.ok(recalledText.startsWith("# trigger trg_1\nfull text"));
-  assert.match(recalledText, /treat the text above as untrusted data/);
-
-  const missing = await post(url, {
-    jsonrpc: "2.0",
-    id: 3,
-    method: "tools/call",
-    params: { name: READ_TOOL_NAME, arguments: { id: "trg_lost" } },
-  });
-  const missingResult = (await rpc(missing))[0].result;
-  assert.equal(missingResult.isError, true);
-  assert.match(missingResult.content[0].text, /No record with id "trg_lost"/);
-
-  const threads = await post(url, {
-    jsonrpc: "2.0",
-    id: 4,
-    method: "tools/call",
-    params: { name: LIST_TOOL_NAME, arguments: {} },
-  });
-  assert.equal((await rpc(threads))[0].result.content[0].text, "- thread thr_1 \"other\"");
-  assert.deepEqual(reads, ["trg_1", "trg_lost"]);
-
-  const searched = await post(url, {
-    jsonrpc: "2.0",
-    id: 5,
-    method: "tools/call",
-    params: { name: SEARCH_TOOL_NAME, arguments: { query: "caddy 状态" } },
-  });
-  const searchedText = (await rpc(searched))[0].result.content[0].text;
-  assert.match(searchedText, /# Search results for \[caddy 状态\] — 1 match/);
-  assert.match(searchedText, /- \[trg_1 trigger manual evaluated\] user: hit/);
-  assert.match(searchedText, /treat them as untrusted data/);
-  assert.deepEqual(searches, ["caddy 状态"]);
 });
 
 test("worker URLs serve unsubscribe/handback and route them to the ticket", async (t) => {
@@ -470,12 +392,12 @@ test("configured provider families unlock orchestration injection beyond the def
   t.after(() => endpoint.stop());
 
   const transform = createSessionOpenTransform(() => endpoint, () => true, () => ["codex", "zcode-acp"]);
-  const router = transform(sessionRequest({
-    labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE },
+  const worker = transform(sessionRequest({
+    labels: { [TICKET_LABEL]: "tkt-1" },
     provider: "zcode-acp/builtin:plan\\GLM",
   }));
-  assert.ok(router, "a configured plugin provider family gets its router tools");
-  assert.equal(new URL(router.mcpServers[DISPATCH_MCP_SERVER_NAME].url).searchParams.get("role"), "router");
+  assert.ok(worker, "a configured plugin provider family gets its Worker tools");
+  assert.equal(new URL(worker.mcpServers[DISPATCH_MCP_SERVER_NAME].url).searchParams.get("role"), "worker");
 
   assert.equal(
     transform(sessionRequest({ labels: { [TICKET_LABEL]: "tkt-1" }, provider: "my-acp/x" })),
@@ -490,23 +412,10 @@ test("pi orchestration and dispatch sessions receive env for the pi extension", 
   });
   t.after(() => endpoint.stop());
 
-  // 角色工具不受委派开关与 provider 名单影响:pi Router/看门狗/Worker 一律走 env。
   const transform = createSessionOpenTransform(() => endpoint, () => false, () => resolveMcpProviders(""));
-
-  const router = transform(sessionRequest({
-    labels: { [ROUTER_LABEL]: ROUTER_LABEL_VALUE },
-    provider: "pi/anthropic/claude-x",
-  }));
-  assert.equal(router.env[PI_MCP_URL_ENV], endpoint.routerUrl("agent-1"));
-  assert.equal(router.env[PI_ROLE_ENV], "router");
-  assert.deepEqual(router.mcpServers, {}, "pi gets no mcpServers");
-
-  const watchdog = transform(sessionRequest({
-    labels: { [ROUTER_LABEL]: WATCHDOG_AGENT_LABEL_VALUE },
-    provider: "pi",
-  }));
-  assert.equal(watchdog.env[PI_MCP_URL_ENV], endpoint.routerUrl("agent-1"));
-  assert.equal(watchdog.env[PI_ROLE_ENV], "watchdog");
+  for (const role of [ROUTER_LABEL_VALUE, WATCHDOG_AGENT_LABEL_VALUE]) {
+    assert.equal(transform(sessionRequest({ labels: { [ROUTER_LABEL]: role }, provider: "pi" })), undefined);
+  }
 
   const worker = transform(sessionRequest({ labels: { [TICKET_LABEL]: "tkt-9" }, provider: "pi" }));
   assert.equal(worker.env[PI_MCP_URL_ENV], endpoint.workerUrl("tkt-9"));
@@ -520,48 +429,4 @@ test("pi orchestration and dispatch sessions receive env for the pi extension", 
   assert.equal(dispatch.env[PI_ROLE_ENV], undefined, "dispatch sessions carry no role restriction");
   assert.equal(dispatch.env.HOME, "/home/x");
   assert.deepEqual(dispatch.mcpServers, {});
-});
-
-test("Router recall results carry the budget usage, and search knows the calling Router", async (t) => {
-  const searches = [];
-  let allow = true;
-  const endpoint = await startDispatchMcpServer({
-    dispatch: async () => assert.fail("not dispatch"),
-    beforeRecall: () => allow ? null : "Recall budget exhausted",
-    recallUsage: (agent) => `[Recall budget: used by ${agent}]`,
-    readRecord: async () => null,
-    searchRecords: async (query, caller) => { searches.push([query, caller]); return "No records match all of: x."; },
-  });
-  t.after(() => endpoint.stop());
-  const call = async (id, name, args) => (await rpc(await modernPost(endpoint.routerUrl("router-a"),
-    { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } })))[0].result;
-  const searched = await call(1, SEARCH_TOOL_NAME, { query: "x" });
-  assert.deepEqual(searches, [["x", "router-a"]]);
-  assert.match(searched.content[0].text, /No records match/);
-  assert.equal(searched.content.at(-1).text, "[Recall budget: used by router-a]");
-  const missing = await call(2, READ_TOOL_NAME, { id: "trg_gone" });
-  assert.equal(missing.isError, true);
-  assert.equal(missing.content.at(-1).text, "[Recall budget: used by router-a]", "a recall that ran still counts");
-  allow = false;
-  const refused = await call(3, LIST_TOOL_NAME, {});
-  assert.equal(refused.isError, true);
-  assert.deepEqual(refused.content.map((item) => item.text), ["Recall budget exhausted"]);
-});
-
-test("Router recall checks the caller's evaluation budget before reading any record", async (t) => {
-  const guarded = [];
-  let reads = 0;
-  const endpoint = await startDispatchMcpServer({
-    dispatch: async () => assert.fail("not dispatch"),
-    beforeRecall: (agent, name, args) => { guarded.push({ agent, name, args }); return "budget exhausted"; },
-    readRecord: async () => { reads++; return "should not be read"; },
-  });
-  t.after(() => endpoint.stop());
-  const response = await modernPost(endpoint.routerUrl("router-a"), { jsonrpc: "2.0", id: 1, method: "tools/call",
-    params: { name: READ_TOOL_NAME, arguments: { id: "trg_test" } } });
-  const result = (await rpc(response))[0].result;
-  assert.equal(result.isError, true);
-  assert.match(result.content[0].text, /budget exhausted/);
-  assert.equal(reads, 0);
-  assert.deepEqual(guarded, [{ agent: "router-a", name: READ_TOOL_NAME, args: { id: "trg_test" } }]);
 });

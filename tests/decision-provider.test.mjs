@@ -1,17 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { pickPreferredProvider } from "../server/providers.ts";
+import { superagentSettings } from "../shared/settings.ts";
 
-const ENTRIES = [
-  { provider: "claude", enabled: true, status: "ready", models: [{ id: "sonnet", isDefault: true }] },
-  { provider: "codex", enabled: true, status: "ready", models: [{ id: "gpt-5", isDefault: true }] },
-  { provider: "opencode", enabled: true, status: "ready", models: [{ id: "zen", isDefault: true }] },
-];
-
-test("an automatic Router pick honors provider priority and falls back to Pi", () => {
-  const preferred = ["claude", "codex", "opencode"];
-  assert.equal(pickPreferredProvider(ENTRIES.toReversed(), preferred)?.provider, "claude");
-  assert.equal(pickPreferredProvider(ENTRIES.slice(1).toReversed(), preferred)?.provider, "codex");
-  assert.equal(pickPreferredProvider([{ provider: "pi" }], preferred)?.provider, "pi");
-  assert.equal(pickPreferredProvider([], preferred), undefined);
+test("legacy decision providers do not become inference model IDs when upgrading settings", () => {
+  const values = superagentSettings.schema.parse({
+    routerProvider: "claude/sonnet",
+    watchdogProvider: "codex/gpt-5",
+    workerProvider: "pi/glm",
+  });
+  assert.equal(values.inferenceBaseUrl, "");
+  assert.equal(values.routerModel, "");
+  assert.equal(values.watchdogModel, "");
+  assert.equal(values.workerProvider, "pi/glm");
 });

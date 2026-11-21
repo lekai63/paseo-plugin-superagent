@@ -7,7 +7,6 @@ export const NUMBER_LIMITS = {
   evalBatchMs: { min: 0, max: 60000 },
   workerTimeoutMin: { min: 5, max: 1440 },
   routerEvalTimeoutMin: { min: 1, max: 60 },
-  routerIdleTimeoutMin: { min: 1, max: 1440 },
   threadIdleTimeoutMin: { min: 5, max: 43200 },
   workerIdleTimeoutMin: { min: 1, max: 43200 },
   maxTicketAttempts: { min: 0, max: 5 },
@@ -37,7 +36,7 @@ export const WORKER_PROFILE_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,23}$/;
  */
 export const WORKER_PROFILE_NAME_HINT = "validation.profileNameFormat" satisfies MessageKey;
 
-/** 共享隔离下 Router 与默认 Worker 合用的持久工作区标题(消息键);按「标题 + 目录」找回或新建。 */
+/** 共享隔离下默认 Worker 的持久工作区标题(消息键);按「标题 + 目录」找回或新建。 */
 export const DEFAULT_WORKSPACE_TITLE = "labels.workspace.default" satisfies MessageKey;
 
 /** thinking 档位 id(pi: low/medium/high/…);空串 = 不指定。 */
@@ -104,13 +103,12 @@ const WorkerProfilesSchema = z
 export const superagentSettings = defineSettings({
   id: "superagent",
   scope: "host",
-  version: 15,
+  version: 16,
   schema: z.object({
-    /** `provider` 或 `provider/model`。Router 用轻量模型即可。 */
-    routerProvider: z.string().trim().max(120).default(""),
-    /** Router 会话的 thinking 档位;留空不指定(回落 provider 默认)。 */
-    routerThinkingOptionId: ThinkingOptionSchema,
-    /** 每次评估直接注入,不依赖 provider 读取工作目录中的规则文件。 */
+    /** 推理 API 的服务根地址（包含 API 版本路径），并由服务端添加 /chat/completions。 */
+    inferenceBaseUrl: z.string().trim().max(1000).default(""),
+    routerModel: z.string().trim().max(200).default(""),
+    /** 规则放入每次推理评估的系统消息。 */
     routerInstructions: z.string().trim().max(MAX_ROUTER_INSTRUCTIONS_CHARS).default(""),
     /** 默认 Worker:dispatch 未指定档位(或档位不存在)时使用。 */
     workerProvider: z.string().trim().max(120).default(""),
@@ -137,7 +135,6 @@ export const superagentSettings = defineSettings({
     /** Worker 单轮运行上限,超时看门狗中断并判失败。 */
     workerTimeoutMin: boundedInt("workerTimeoutMin", 120),
     routerEvalTimeoutMin: boundedInt("routerEvalTimeoutMin", 10),
-    routerIdleTimeoutMin: boundedInt("routerIdleTimeoutMin", 30),
     threadIdleTimeoutMin: boundedInt("threadIdleTimeoutMin", 1440),
     workerIdleTimeoutMin: boundedInt("workerIdleTimeoutMin", 1440),
     /** Ticket 失败重试上限。 */
@@ -226,8 +223,8 @@ export const superagentSettings = defineSettings({
      * 必要时提醒/打断/取消/重试或上报 Router;维护者也可直接在该会话里问诊。
      */
     watchdogEnabled: z.boolean().default(false),
-    /** 看门狗的 `provider` 或 `provider/model`;留空沿用 Router 的模型。 */
-    watchdogProvider: z.string().trim().max(120).default(""),
+    /** 推理 API 的模型 ID；留空沿用 Router 模型。 */
+    watchdogModel: z.string().trim().max(200).default(""),
     /** 巡检间隔(分钟)。没有进行中的任务(无新动静的待命任务不算)、也没有异常时跳过,不调用模型。 */
     watchdogIntervalMin: boundedInt("watchdogIntervalMin", 30),
   }),
@@ -244,7 +241,8 @@ export const superagentSettings = defineSettings({
    * (留空不传,回落 provider 默认,行为与旧版一致);
    * v12 → v13:新增 imInboxDir(留空 = 默认收件目录,行为与旧版一致);
    * v13 → v14:新增 Router 评估/空闲、Thread 空闲与 Worker 待命超时;
-   * v14 → v15:新增 workerBackground(默认关闭,Worker 照旧显示在 Paseo 中)。
+   * v14 → v15:新增 workerBackground(默认关闭,Worker 照旧显示在 Paseo 中);
+   * v15 → v16:独立推理 API 使用新地址和模型字段，旧 Paseo provider 选择不作为 API 模型 ID。
    */
   migrate: (values) => values,
 });

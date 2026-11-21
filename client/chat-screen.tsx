@@ -186,13 +186,12 @@ export function ChatScreen(props: ChatScreenProps) {
   if (deciding) disabledReason = t("chat.disabled.loadingConversation");
   else if (!threadId) {
     if (!snapshot) disabledReason = list.isError ? t("chat.disabled.statusUnavailable") : t("chat.disabled.loadingConfig");
-    else if (!snapshot.configured) disabledReason = t("chat.disabled.needWorkingDir");
-    else if (snapshot.workingDirIssue) disabledReason = t("chat.disabled.workingDirUnavailable");
+    else if (!snapshot.inferenceConfigured) disabledReason = t("chat.disabled.needInference");
   }
 
   const activeQuery = threadId ? detail : list;
   const sidebarProps = {
-    tab, onTab: setTab, snapshot, threadId, onSelectThread: selectThread, onThreadClosed: closeTab, theme, hostId: host.id,
+    tab, onTab: setTab, snapshot, routerDecisions: detailData?.decisions, threadId, onSelectThread: selectThread, onThreadClosed: closeTab, theme, hostId: host.id,
     navigation, openSettings,
   };
   const notFound = Boolean(threadId && detailData && !thread);
@@ -332,6 +331,11 @@ function Welcome({ snapshot, theme, openSettings, onSelectThread }: {
           </View>
         ) : null}
       </View>
+      {snapshot && !snapshot.inferenceConfigured ? (
+        <Notice theme={theme} tone="warning" title={t("chat.disabled.needInference")}>
+          <Button theme={theme} variant="outline" size="xs" label={t("chat.welcome.openSettings")} onPress={openSettings} />
+        </Notice>
+      ) : null}
       {snapshot?.configured && snapshot.workingDirIssue ? (
         <Notice theme={theme} tone="danger" title={t("chat.welcome.workerCannotStart")} description={snapshot.workingDirIssue}>
           <Button theme={theme} variant="outline" size="xs" label={t("chat.welcome.openSettings")} onPress={openSettings} />

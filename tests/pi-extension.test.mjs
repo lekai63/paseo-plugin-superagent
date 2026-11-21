@@ -233,12 +233,9 @@ test("the budget-exhausted verdict prompt runs without tools", async () => {
   assert.deepEqual(pi.state.active, RECALL);
 });
 
-test("the extension's budget and verdict marker match the server", async () => {
+test("the legacy extension budget matches the server", async () => {
   const budget = await import("../server/decision-budget.ts");
-  const router = await import("../server/router.ts");
   assert.equal(extension.CALL_LIMIT, budget.DECISION_TOOL_LIMIT);
   assert.equal(extension.REPEAT_LIMIT, budget.DECISION_REPEAT_LIMIT);
   assert.equal(extension.OVERFLOW_LIMIT, budget.DECISION_OVERFLOW_LIMIT);
-  assert.equal(extension.RECALL_EXHAUSTED_MARKER, router.RECALL_EXHAUSTED_MARKER);
-  assert.ok(router.composeBudgetExhaustedPrompt("thr_1", 12).startsWith(router.RECALL_EXHAUSTED_MARKER));
 });

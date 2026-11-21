@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +10,6 @@ import { emptyState, SuperagentStateSchema } from "../shared/model.ts";
 import { splitImReply } from "../server/im-replies.ts";
 import { SETTINGS_DEFAULTS } from "../shared/settings.ts";
 import { imDay, imConversationKey, dailyImThreadKey } from "../shared/im-threads.ts";
-import { RECALL_EXHAUSTED_MARKER, ROUTER_CONTEXT_LIMIT, ROUTER_EVALUATION_LIMIT } from "../server/router.ts";
 import { BACKGROUND_WORKSPACE_TITLE, workspaceTitles } from "../server/workspace.ts";
 import { approvalCode } from "../server/approvals.ts";
 import { createRespondToPermissionHandler } from "../server/handlers.ts";
@@ -70,7 +68,7 @@ async function until(predicate) {
 function fixture(t, status = "running", subscribed = true) {
   const state = emptyState();
   Object.assign(state.kv, {
-    backgroundWorkspaces: { "/mock/repo": "role-workspace" }, routerAgentId: "router", routerProvider: "claude/sonnet", workerProvider: "codex/test",
+    workerProvider: "codex/test",
   });
   state.threads.push({
     id: "thread", key: "manual:test", title: "test", state: "active", summary: null,
@@ -86,28 +84,24 @@ function fixture(t, status = "running", subscribed = true) {
   });
   const calls = {
     sends: [], watches: [], archives: [], workspaceArchives: [], creates: 0, workspaceCreateOptions: [], evals: [],
-    routerCreates: [], workerCreates: [], prompts: [], watchdogCreates: [], patrols: [],
+    requests: [], workerCreates: [], prompts: [], patrols: [],
     permissionResponses: [], detaches: [], reloads: [],
   };
   const controls = {
     send: async () => {},
     createAgent: async () => ({ id: "new-worker" }),
-    createRouterAgent: async () => ref(calls.routerCreates.length === 1 ? "new-router" : `new-router-${calls.routerCreates.length}`),
     timeline: async () => ({ entries: [{ seqStart: 1, item: { type: "assistant_message", text: "work completed" } }] }),
     verdict: { decision: "reply", reply: "done" },
     patrolVerdict: { summary: "all good", actions: [] },
     providerSnapshot: async () => ({ entries: PROVIDER_ENTRIES }),
     isGit: true,
     instructionFiles: [],
-    routerSessionId: null,
-    routerUsage: null,
-    routerTimeline: async () => ({ entries: [] }),
     /** worktree 创建后工作区 descriptor 报告的实际分支;null 表示未报告(退回请求名)。 */
     workspaceBranch: null,
     pendingPermissions: new Map(),
     sessionStatuses: new Map(),
-    agentWorkspaces: new Map([["router", "role-workspace"]]),
-    parents: new Map([["worker", "router"]]),
+    agentWorkspaces: new Map(),
+    parents: new Map(),
     respond: async (id, { requestId }) => {
       controls.pendingPermissions.set(id, (controls.pendingPermissions.get(id) ?? []).filter((request) => request.id !== requestId));
     },
@@ -119,11 +113,8 @@ function fixture(t, status = "running", subscribed = true) {
       id,
       refresh: async () => ({ agent: { status: controls.sessionStatuses.get(id) ?? (id.includes("router") || id.includes("watchdog") ? "idle" : "running"), archivedAt: null,
         workspaceId: controls.agentWorkspaces.get(id),
-        lastUsage: controls.routerUsage,
-        pendingPermissions: controls.pendingPermissions.get(id) ?? [],
-        persistence: id.includes("router") && controls.routerSessionId ? { sessionId: controls.routerSessionId } : null } }),
+        pendingPermissions: controls.pendingPermissions.get(id) ?? [] } }),
       reload: async () => { calls.reloads.push(id); },
-      current: () => ({ persistence: controls.routerSessionId ? { sessionId: controls.routerSessionId } : null }),
       send: async (text, options) => {
         calls.sends.push({ id, text, options });
         await controls.send(text, options);
@@ -136,21 +127,14 @@ function fixture(t, status = "running", subscribed = true) {
           await engine.workerPermissionResolved(id, { requestId: options.requestId, resolution: options.response });
         }
       },
-      run: async (prompt) => {
-        if (id.includes("watchdog")) {
-          calls.patrols.push(prompt);
-          return { lastMessage: JSON.stringify(controls.patrolVerdict) };
-        }
-        calls.prompts.push(prompt);
-        return { lastMessage: JSON.stringify(controls.verdict) };
-      },
+      run: async () => { assert.fail("inference must not run a Paseo agent"); },
       waitForFinish: () => {
         calls.watches.push(id);
         const finish = deferred();
         finishes.push(finish);
         return finish.promise;
       },
-      timeline: { refetch: () => id.includes("router") ? controls.routerTimeline() : controls.timeline() },
+      timeline: { refetch: () => controls.timeline() },
       detach: async () => { calls.detaches.push(id); controls.parents.delete(id); },
       archive: async () => {
         calls.archives.push(id);
@@ -175,18 +159,7 @@ function fixture(t, status = "running", subscribed = true) {
       refresh: async () => daemonWorkspaces.get(id) ?? (id === "role-workspace" ? { background: true, workspaceDirectory: "/mock/repo" } : null),
       agents: {
         create: async (options) => {
-          if (options.labels?.["superagent.role"] === "router") {
-            calls.routerCreates.push(options);
-            const agent = await controls.createRouterAgent(options);
-            controls.agentWorkspaces.set(agent.id, id);
-            return agent;
-          }
-          if (options.labels?.["superagent.role"] === "watchdog") {
-            calls.watchdogCreates.push(options);
-            const agentId = calls.watchdogCreates.length === 1 ? "watchdog" : `watchdog-${calls.watchdogCreates.length}`;
-            controls.agentWorkspaces.set(agentId, id);
-            return ref(agentId);
-          }
+          assert.equal(options.labels?.["superagent.role"], undefined);
           calls.workerCreates.push(options);
           return controls.createAgent(options);
         },
@@ -207,10 +180,6 @@ function fixture(t, status = "running", subscribed = true) {
           .map(([id]) => ({ agent: { id, archivedAt: null } })),
         pageInfo: { nextCursor: null },
       }),
-      create: async (options) => {
-        calls.routerCreates.push(options);
-        return ref("new-router");
-      },
     },
     providers: {
       waitForReady: async () => ({ entries: PROVIDER_ENTRIES }),
@@ -244,11 +213,27 @@ function fixture(t, status = "running", subscribed = true) {
     onChange: () => () => {},
   };
   const values = {
-    ...SETTINGS_DEFAULTS, workingDir: "/mock/repo", routerProvider: "claude/sonnet", workerProvider: "codex/test",
+    ...SETTINGS_DEFAULTS, workingDir: "/mock/repo", inferenceBaseUrl: "http://inference.example/v1", routerModel: "test-router", workerProvider: "codex/test",
+  };
+  const inferenceRequest = async (url, init) => {
+    const body = JSON.parse(init.body);
+    const isPatrol = body.messages[1].content.startsWith("# Patrol");
+    const prompt = body.messages.at(-1).content;
+    calls.requests.push({ url: String(url), body, signal: init.signal });
+    (isPatrol ? calls.patrols : calls.prompts).push(prompt);
+    const scripted = isPatrol ? controls.runWatchdog : controls.runRouter;
+    const result = scripted
+      ? await scripted(prompt, { signal: init.signal, body })
+      : { lastMessage: JSON.stringify(isPatrol ? controls.patrolVerdict : controls.verdict) };
+    if (result instanceof Response) return result;
+    return Response.json({
+      usage: { prompt_tokens: 12, completion_tokens: 5 },
+      choices: [{ message: { content: result.lastMessage }, finish_reason: "stop" }],
+    });
   };
   const engine = new SuperagentEngine(store, {
     subscribe: (listener) => { controls.settingsChanged = listener; }, read: async () => ({ status: "ready", values }),
-  });
+  }, inferenceRequest);
   engine.paseo = paseo;
   engine.workingDirProbe = {
     isDirectory: async () => true,
@@ -258,7 +243,7 @@ function fixture(t, status = "running", subscribed = true) {
   engine.primed = true;
   engine.scheduleEval = (id) => { calls.evals.push(id); };
   t.after(() => engine.stop());
-  return { engine, state, calls, controls, finishes, ref, values, paseo, ticket: state.tickets[0], daemonWorkspaces };
+  return { engine, state, calls, controls, finishes, ref, values, paseo, inferenceRequest, ticket: state.tickets[0], daemonWorkspaces };
 }
 
 function pendingTrigger(state) {
@@ -769,47 +754,14 @@ test("canceling a blocked Worker clears its pending input and cannot answer a fu
   assert.equal(f.calls.permissionResponses.length, 0);
 });
 
-test("ACP Router initializes once then appends only new events on its thread session", async (t) => {
-  const f = fixture(t, "waiting");
-  f.state.kv.routerAgentId = null;
-  f.values.routerProvider = "zcode-acp/builtin:plan\\GLM";
-  f.controls.verdict = { actions: [{ action: "ignore" }] };
-  const text = "这条用户消息不能在标题里再出现一次。";
-  f.state.threads[0].title = text;
-  f.state.threads[0].summary = text;
-  const first = await evaluateRouter(f, text);
-  assert.equal(f.calls.routerCreates[0].config.systemPrompt, undefined);
-  assert.match(first, /do NOT call any\ntools/);
-  assert.equal(first.split(text).length - 1, 1);
-  const second = await evaluateRouter(f, "second event");
-  assert.match(second, /second event/);
-  assert.doesNotMatch(second, /Superagent Router instructions|Recent thread history|这条用户消息/);
-  assert.equal(f.calls.routerCreates.length, 1);
-  assert.equal(f.state.threads[0].router.agentId, "new-router");
-  assert.ok(!f.calls.archives.includes("new-router"));
-});
-
-test("a new native Router receives its rules as systemPrompt rather than repeating them in user turns", async (t) => {
-  const f = fixture(t, "waiting");
-  f.state.kv.routerAgentId = null;
-  f.values.routerInstructions = "用中文回答。";
-  const prompt = await evaluateRouter(f, "first event");
-  const system = f.calls.routerCreates[0].config.systemPrompt;
-  assert.match(system, /do NOT call any\ntools/);
-  assert.match(system, /用中文回答/);
-  assert.match(system, /"action":"dispatch"/);
-  assert.doesNotMatch(prompt, /Superagent Router instructions|用中文回答|"actions"/);
-  assert.match(prompt, /first event/);
-});
-
-test("fresh native sessions receive current configuration and temporary issues stay out of the system prompt", async (t) => {
+test("direct inference receives current configuration and temporary issues stay out of the system prompt", async (t) => {
   const f = fixture(t, "waiting");
   await evaluateRouter(f);
   assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
   f.controls.settingsChanged({ status: "ready", values: { ...f.values, routerInstructions: "报告先写结论。" } });
   assert.doesNotMatch(await evaluateRouter(f), /报告先写结论|Superagent Router instructions/);
-  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /报告先写结论/);
-  const stableSystem = f.calls.routerCreates.at(-1).config.systemPrompt;
+  assert.match(f.calls.requests.at(-1).body.messages[0].content, /报告先写结论/);
+  const stableSystem = f.calls.requests.at(-1).body.messages[0].content;
   assert.doesNotMatch(await evaluateRouter(f), /报告先写结论|Superagent Router instructions/);
   f.controls.isGit = false;
   const unavailable = await evaluateRouter(f);
@@ -819,54 +771,7 @@ test("fresh native sessions receive current configuration and temporary issues s
   const ready = await evaluateRouter(f);
   assert.match(ready, /Worker environment: ready/);
   assert.doesNotMatch(ready, /PROBLEM:|Superagent Router instructions/);
-  assert.equal(f.calls.routerCreates.at(-1).config.systemPrompt, stableSystem);
-});
-
-test("engine restart resumes the persisted thread Router without replaying its history", async (t) => {
-  const f = fixture(t, "waiting");
-  f.controls.routerSessionId = "session-stable";
-  await evaluateRouter(f);
-  // 旧版落盘的已读游标不能让新会话省掉线程窗口。
-  f.state.kv.routerPromptState = {
-    agentId: "new-router", sessionId: "session-stable", configHash: "legacy",
-    compactionSeq: 0, threadIds: ["thread"], triggerIds: f.state.triggers.map((trigger) => trigger.id),
-  };
-  Object.assign(f.state, SuperagentStateSchema.parse(JSON.parse(JSON.stringify(f.state))));
-  const restored = new SuperagentEngine(f.engine.store, {
-    subscribe: () => {}, read: async () => ({ status: "ready", values: f.values }),
-  });
-  restored.paseo = f.engine.paseo;
-  restored.workingDirProbe = f.engine.workingDirProbe;
-  t.after(() => restored.stop());
-  await setImmediate();
-  const prompt = await evaluateRouter({ ...f, engine: restored }, "after restart");
-  assert.match(prompt, /after restart/);
-  assert.doesNotMatch(prompt, /Superagent Router instructions/);
-  assert.doesNotMatch(prompt, /Recent thread history/);
-  assert.equal(f.calls.routerCreates.length, 1);
-  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /Superagent Router instructions/);
-});
-
-test("compaction or unavailable timeline restores bounded history on the same Router", async (t) => {
-  const f = fixture(t, "waiting");
-  await evaluateRouter(f, "original event");
-  f.controls.routerTimeline = async () => { throw new Error("old timeline must not be read"); };
-  const next = await evaluateRouter(f, "next event");
-  assert.match(next, /original event/);
-  assert.match(next, /Recent thread history/);
-  assert.doesNotMatch(next, /Superagent Router instructions/);
-  assert.equal(f.calls.routerCreates.length, 1);
-  assert.match(f.calls.routerCreates[0].config.systemPrompt, /Superagent Router instructions/);
-});
-
-test("direct-to-Worker context is delivered to its Router once per session", async (t) => {
-  const f = fixture(t, "waiting");
-  await evaluateRouter(f);
-  f.state.triggers.push({ ...f.state.triggers[0], id: "direct-followup", status: "delivered", text: "追加要求：输出中文报告。" });
-  const first = await evaluateRouter(f, "worker finished");
-  assert.equal(first.split("追加要求：输出中文报告。").length - 1, 1);
-  assert.doesNotMatch(await evaluateRouter(f), /追加要求|Recent thread history/);
-
+  assert.equal(f.calls.requests.at(-1).body.messages[0].content, stableSystem);
 });
 
 test("a new thread gets recovery context without resending the Router protocol", async (t) => {
@@ -881,27 +786,6 @@ test("a new thread gets recovery context without resending the Router protocol",
   assert.doesNotMatch(prompt, /Superagent Router instructions/);
 });
 
-test("invalid Router output does not mark a bootstrap as successfully applied", async (t) => {
-  const f = fixture(t, "waiting");
-  f.controls.verdict = { invalid: "result" };
-  await evaluateRouter(f);
-  assert.equal(f.state.kv.routerPromptState, undefined);
-  f.controls.verdict = { actions: [{ action: "ignore" }] };
-  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
-  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /Superagent Router instructions/);
-});
-
-test("invalid output is retried in a new session with its rules and thread window", async (t) => {
-  const f = fixture(t, "waiting");
-  await evaluateRouter(f);
-  f.controls.verdict = { invalid: true };
-  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
-  f.controls.verdict = { actions: [{ action: "ignore" }] };
-  assert.match(await evaluateRouter(f), /Recent thread history/);
-  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /Superagent Router instructions/);
-  assert.doesNotMatch(await evaluateRouter(f), /Superagent Router instructions/);
-});
-
 test("direct context is bounded and older omitted messages do not leak into later evaluations", async (t) => {
   const f = fixture(t, "waiting");
   await evaluateRouter(f);
@@ -913,7 +797,8 @@ test("direct context is bounded and older omitted messages do not leak into late
   assert.match(prompt, /context-11:/);
   const next = await evaluateRouter(f);
   assert.doesNotMatch(next, /context-0:/);
-  assert.doesNotMatch(next, /context-\d+:/);
+  assert.match(next, /context-11:/);
+  assert.equal(next.match(/id: direct-/g).length, 8);
 });
 
 test("IM sends the complete long reply sequentially and persists each acknowledged part", async (t) => {
@@ -1016,20 +901,20 @@ test("IM recovery sends nothing while the durable outbox cannot be written", asy
   assert.equal(f.state.imDeliveries[0].nextPart, 0);
 });
 
-test("Router rules update in each new agent system prompt and can be cleared", async (t) => {
+test("Router rules update in each inference system message and can be cleared", async (t) => {
   const f = fixture(t, "waiting");
   await setImmediate();
   for (const rules of ["中文汇报,列出验证情况。", "简洁答复,优先说明阻塞项。", ""]) {
     f.controls.settingsChanged({ status: "ready", values: { ...f.values, routerInstructions: rules } });
     pendingTrigger(f.state);
     await f.engine.runEval("thread");
-    const prompt = f.calls.routerCreates.at(-1).config.systemPrompt;
+    const prompt = f.calls.requests.at(-1).body.messages[0].content;
     if (rules) assert.ok(prompt.includes(rules));
     else assert.match(prompt, /No custom Router preferences are configured\. Use the built-in rules only/);
     f.state.triggers = [];
   }
   assert.equal(f.calls.prompts.length, 3);
-  assert.equal(f.calls.routerCreates.length, 3, "each evaluation creates a fresh Router");
+  assert.equal(f.calls.requests.length, 3);
   assert.equal(f.calls.workerCreates.length, 0);
 });
 
@@ -1105,7 +990,7 @@ test("reply then stop retains both the Router conclusion and full Worker report 
     await archive();
   };
   await f.engine.runEval("thread");
-  assert.deepEqual(f.calls.archives, ["router", "new-router", "worker"]);
+  assert.deepEqual(f.calls.archives, ["worker"]);
   assert.equal(f.engine.snapshot().threads.length, 0);
   const result = f.engine.snapshot().recentResults[0];
   assert.equal(result.kind, "router_reply");
@@ -1212,7 +1097,7 @@ test("a canceled launch that fails does not retry or enqueue a failure report", 
 test("canceling during provider discovery prevents worker creation", async (t) => {
   const f = fixture(t, "pending");
   const provider = deferred();
-  f.engine.resolveProvider = () => provider.promise;
+  f.engine.resolveWorkerProvider = () => provider.promise;
   const launching = f.engine.startTicket("ticket");
   await setImmediate();
   await f.engine.cancelTicket("ticket");
@@ -1240,7 +1125,7 @@ for (const closer of ["closeThread", "Router stop"]) {
     await launching;
     assert.equal(f.ticket.status, "canceled");
     assert.equal(f.state.threads[0].state, "closed");
-    assert.deepEqual(f.calls.archives, closer === "closeThread" ? ["late-worker"] : ["router", "new-router", "late-worker"]);
+    assert.deepEqual(f.calls.archives, ["late-worker"]);
     assert.deepEqual(f.calls.workspaceArchives, ["new-workspace"]);
     assert.deepEqual(f.calls.watches, []);
   });
@@ -1297,7 +1182,7 @@ test("Router stop retires every worker on the thread, including unsubscribed, la
   pendingTrigger(f.state);
   f.controls.verdict = { decision: "stop" };
   await f.engine.runEval("thread");
-  assert.deepEqual(f.calls.archives.sort(), ["finished-worker", "new-router", "router", "starting-worker", "worker"]);
+  assert.deepEqual(f.calls.archives.sort(), ["finished-worker", "starting-worker", "worker"]);
   assert.deepEqual(f.calls.workspaceArchives.sort(), ["starting-workspace", "workspace", "workspace"]);
   assert.deepEqual(f.state.tickets.map((ticket) => ticket.status), ["canceled", "canceled", "completed"]);
 });
@@ -1346,10 +1231,10 @@ test("Router receives the syntax error and resends all actions before any are ex
     { action: "reply", reply: "on it" },
   ] };
   const prompts = [];
-  const timeouts = [];
-  f.ref("new-router").run = async (prompt, options) => {
+  const signals = [];
+  f.controls.runRouter = async (prompt, options) => {
     prompts.push(prompt);
-    timeouts.push(options.timeoutMs);
+    signals.push(options.signal);
     assert.equal(f.calls.creates, 0);
     assert.equal(f.state.decisions.length, 0);
     assert.equal(f.state.triggers[0].status, "pending");
@@ -1365,7 +1250,8 @@ test("Router receives the syntax error and resends all actions before any are ex
   assert.match(prompts[1], /JSON syntax:/);
   assert.match(prompts[1], /position \d+/);
   assert.ok(prompts[1].includes('{"action":"reply","reply":"message text"}'));
-  assert.ok(timeouts[1] > 0 && timeouts[1] <= timeouts[0]);
+  assert.equal(signals[0], signals[1]);
+  assert.equal(f.calls.requests[1].body.tools, undefined);
   assert.deepEqual(f.state.decisions.map((decision) => decision.outcome), ["dispatch", "reply"]);
   assert.equal(f.state.decisions[0].raw, JSON.stringify(repaired));
   assert.equal(f.state.triggers[0].status, "evaluated");
@@ -1377,7 +1263,7 @@ test("Router gets one correction attempt then records the final error and keeps 
   pendingTrigger(f.state);
   let attempts = 0;
   const final = '{"actions":[{"action":"reply":"still broken"}]}';
-  f.ref("new-router").run = async () => ({ lastMessage: ++attempts === 1 ? 'no JSON' : final });
+  f.controls.runRouter = async () => ({ lastMessage: ++attempts === 1 ? 'no JSON' : final });
   f.engine.evalFailures.set("thread", 2);
   await f.engine.runEval("thread");
   assert.equal(attempts, 2);
@@ -1394,7 +1280,7 @@ test("Router can correct a schema error using the same feedback path", async (t)
   const f = fixture(t, "completed");
   pendingTrigger(f.state);
   const prompts = [];
-  f.ref("new-router").run = async (prompt) => {
+  f.controls.runRouter = async (prompt) => {
     prompts.push(prompt);
     return { lastMessage: JSON.stringify({ actions: prompts.length === 1
       ? [{ action: "reply" }] : [{ action: "reply", reply: "corrected" }] }) };
@@ -1411,7 +1297,7 @@ test("closing a thread during Router correction discards its late dispatch", asy
   const correction = deferred();
   const entered = deferred();
   let attempts = 0;
-  f.ref("new-router").run = async () => {
+  f.controls.runRouter = async () => {
     if (++attempts === 1) return { lastMessage: 'no JSON' };
     entered.resolve();
     return correction.promise;
@@ -1528,7 +1414,7 @@ test("a steer before stop is delivered before the thread closes", async (t) => {
   assert.ok(f.calls.sends[0].text.includes("wrap up now"));
   assert.equal(f.ticket.status, "canceled");
   assert.equal(f.state.threads[0].state, "closed");
-  assert.deepEqual(f.calls.archives, ["router", "new-router", "worker"]);
+  assert.deepEqual(f.calls.archives, ["worker"]);
   assert.deepEqual(f.calls.workspaceArchives, ["workspace"]);
   assert.equal(f.state.triggers[0].status, "evaluated");
   assert.equal(f.state.pendingActions.length, 0);
@@ -1612,7 +1498,7 @@ test("a Router cancel action cancels exactly one ticket and keeps the thread ope
   assert.equal(f.state.threads[0].state, "active");
   assert.equal(f.ticket.status, "running");
   assert.equal(f.state.tickets.find((ticket) => ticket.id === "other").status, "canceled");
-  assert.deepEqual(f.calls.archives, ["router", "worker2"]);
+  assert.deepEqual(f.calls.archives, ["worker2"]);
   assert.deepEqual(f.calls.workspaceArchives, ["workspace2"]);
   assert.equal(f.state.triggers[0].status, "evaluated");
 });
@@ -1665,7 +1551,7 @@ test("closing a thread during Router evaluation discards the late dispatch verdi
   pendingTrigger(f.state);
   const verdict = deferred();
   const entered = deferred();
-  f.ref("new-router").run = () => { entered.resolve(); return verdict.promise; };
+  f.controls.runRouter = () => { entered.resolve(); return verdict.promise; };
   const evaluating = f.engine.runEval("thread");
   await entered.promise;
   await f.engine.closeThread("thread");
@@ -1712,43 +1598,6 @@ test("Feishu stop clears references even when closing throws", async () => {
   assert.equal(source.client, null);
 });
 
-test("an over-escaped router model id is normalized before creating the Router", async (t) => {
-  const f = fixture(t);
-  f.state.kv.routerAgentId = null;
-  f.values.routerProvider = "zcode-acp/builtin:plan\\\\GLM-Flash";
-  pendingTrigger(f.state);
-  await f.engine.runEval("thread");
-  assert.equal(f.calls.routerCreates.length, 1);
-  assert.equal(f.calls.routerCreates[0].config.provider, "zcode-acp/builtin:plan\\GLM-Flash");
-  assert.equal(f.state.kv.routerAgentId, "new-router");
-  assert.equal(f.state.kv.routerProvider, "zcode-acp/builtin:plan\\GLM-Flash");
-});
-
-test("an unknown router model fails the eval with the available model ids instead of creating an agent", async (t) => {
-  const f = fixture(t);
-  f.state.kv.routerAgentId = null;
-  f.values.routerProvider = "zcode-acp/nope";
-  pendingTrigger(f.state);
-  await assert.rejects(f.engine.runEval("thread"), (error) => {
-    assert.match(error.message, /router provider setting "zcode-acp\/nope" is invalid/);
-    assert.match(error.message, /builtin:plan\\GLM-Flash/);
-    return true;
-  });
-  assert.equal(f.calls.routerCreates.length, 0);
-});
-
-test("Router creation failures name the provider", async (t) => {
-  const f = fixture(t);
-  f.state.kv.routerAgentId = null;
-  f.values.routerProvider = "zcode-acp/builtin:plan\\GLM";
-  pendingTrigger(f.state);
-  f.controls.createRouterAgent = async () => { throw new Error("Internal error"); };
-  await assert.rejects(
-    f.engine.runEval("thread"),
-    /router agent creation failed \(provider "zcode-acp\/builtin:plan\\GLM"\): Internal error/,
-  );
-});
-
 test("an invalid worker model keeps the ticket pending with a readable lastError", async (t) => {
   const f = fixture(t, "pending");
   f.values.workerProvider = "zcode-acp/nope";
@@ -1793,7 +1642,7 @@ test("the Router sees the worker base directory and any problem with it", async 
   pendingTrigger(f.state);
   await f.engine.runEval("thread");
   const prompt = f.calls.prompts.at(-1);
-  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /## Worker environment\nbase directory: \/mock\/repo\nisolation: worktree/);
+  assert.match(f.calls.requests.at(-1).body.messages[0].content, /## Worker environment\nbase directory: \/mock\/repo\nisolation: worktree/);
   assert.match(prompt, /PROBLEM: worker working directory \/mock\/repo is not a git repository/);
   assert.match(f.engine.snapshot().workingDirIssue, /not a git repository/);
 });
@@ -1819,7 +1668,7 @@ test("shared workers and the Router are pointed at the base directory's AGENTS.m
   pendingTrigger(f.state);
   f.state.tickets[0].status = "completed";
   await f.engine.runEval("thread");
-  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /The base directory has its own project instructions \(AGENTS\.md\)/);
+  assert.match(f.calls.requests.at(-1).body.messages[0].content, /The base directory has its own project instructions \(AGENTS\.md\)/);
 });
 
 test("worktree workers are not told about base-directory instruction files", async (t) => {
@@ -1854,8 +1703,8 @@ test("dispatches run each ticket on the provider of its chosen worker profile", 
   assert.deepEqual([code.profile, code.provider], [null, "codex/test"]);
   assert.deepEqual([report.profile, report.provider], ["glm", GLM]);
   assert.equal(f.state.kv.workerProvider, "codex/test", "a named profile never overwrites the default worker");
-  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /## Worker profiles/);
-  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /- default \(codex\/test\): general work that fits no other profile/);
+  assert.match(f.calls.requests.at(-1).body.messages[0].content, /## Worker profiles/);
+  assert.match(f.calls.requests.at(-1).body.messages[0].content, /- default \(codex\/test\): general work that fits no other profile/);
 });
 
 test("an unknown profile from the Router falls back to the default worker and is recorded", async (t) => {
@@ -2005,38 +1854,6 @@ test("the snapshot exposes the configured worker profiles", async (t) => {
   assert.deepEqual(f.engine.snapshot().workerProfiles.map((profile) => profile.name), ["glm", "flash"]);
 });
 
-test("the Router is created inside a background workspace, which is remembered and reused", async (t) => {
-  const f = fixture(t);
-  f.state.kv.backgroundWorkspaces = {};
-  f.state.kv.routerAgentId = null;
-  f.controls.verdict = { actions: [{ action: "ignore" }] };
-  await evaluateRouter(f);
-  assert.equal(f.calls.creates, 1, "exactly one shared workspace is created for the Router");
-  assert.equal(f.daemonWorkspaces.get("new-workspace").name, "Superagent background");
-  assert.equal(f.daemonWorkspaces.get("new-workspace").background, true);
-  assert.equal(f.daemonWorkspaces.get("new-workspace").workspaceDirectory, "/mock/repo");
-  assert.equal(f.calls.routerCreates.length, 1);
-  assert.equal(f.calls.routerCreates[0].cwd, undefined, "the workspace, not the engine, supplies the cwd");
-  assert.equal(f.state.kv.backgroundWorkspaces["/mock/repo"], "new-workspace");
-  assert.equal(f.state.kv.sharedWorkspaces, undefined);
-  assert.equal(SuperagentStateSchema.parse(f.state).kv.backgroundWorkspaces["/mock/repo"], "new-workspace");
-
-  // 引擎重启(缓存清空)后 Router 丢失:登记过的 workspace 直接复用,不再新建。
-  f.state.kv.routerAgentId = null;
-  const restarted = new SuperagentEngine(f.engine.store, {
-    subscribe: () => {}, read: async () => ({ status: "ready", values: f.values }),
-  });
-  restarted.paseo = f.engine.paseo;
-  restarted.workingDirProbe = f.engine.workingDirProbe;
-  restarted.primed = true;
-  t.after(() => restarted.stop());
-  await setImmediate();
-  pendingTrigger(f.state);
-  await restarted.runEval("thread");
-  assert.equal(f.calls.creates, 1, "the remembered background workspace is reused after a restart");
-  assert.equal(f.calls.routerCreates.length, 1);
-});
-
 test("shared workers join the default workspace and retiring them never archives it", async (t) => {
   const f = fixture(t, "pending");
   f.values.workerIsolation = "shared";
@@ -2049,79 +1866,6 @@ test("shared workers join the default workspace and retiring them never archives
   assert.deepEqual(f.calls.archives, ["new-worker"]);
   assert.deepEqual(f.calls.workspaceArchives, [], "the shared workspace is not ticket-owned and survives");
   assert.ok(f.daemonWorkspaces.has("new-workspace"));
-});
-
-test("legacy Router and watchdog sessions move to one background workspace without hiding Workers", async (t) => {
-  const f = fixture(t, "running");
-  f.state.kv.backgroundWorkspaces = {};
-  f.daemonWorkspaces.set("legacy-workspace", {
-    id: "legacy-workspace", name: "默认 workspace", workspaceDirectory: "/mock/repo", background: false,
-  });
-  f.state.kv.sharedWorkspaces = { "/mock/repo": "legacy-workspace" };
-  f.controls.agentWorkspaces.set("router", "legacy-workspace");
-  f.controls.agentWorkspaces.set("worker", "legacy-workspace");
-  f.controls.agentWorkspaces.set("legacy-watchdog", "legacy-workspace");
-  f.state.kv.watchdog = { agentId: "legacy-watchdog", provider: "codex/test", seen: {} };
-  f.ticket.workspaceId = "legacy-workspace";
-  f.values.watchdogEnabled = true;
-  f.controls.verdict = { actions: [{ action: "ignore" }] };
-
-  await evaluateRouter(f);
-  await f.engine.maybePatrol(true);
-  assert.equal(f.calls.creates, 1, "both roles use the same background workspace");
-  assert.equal(f.daemonWorkspaces.get("new-workspace").background, true);
-  assert.equal(f.controls.agentWorkspaces.get("new-router"), "new-workspace");
-  assert.equal(f.controls.agentWorkspaces.get("watchdog"), "new-workspace");
-  assert.deepEqual(f.calls.archives, ["router", "legacy-watchdog"]);
-  assert.deepEqual(f.calls.detaches, ["worker"], "the shared Worker survives parent archival");
-  assert.deepEqual(f.calls.workspaceArchives, [], "the legacy workspace still houses Workers");
-  assert.equal(f.daemonWorkspaces.get("legacy-workspace").background, false);
-  assert.equal(f.ticket.workspaceId, "legacy-workspace");
-
-  f.values.workerIsolation = "shared";
-  f.ticket.status = "pending";
-  f.ticket.workerAgentId = null;
-  await f.engine.startTicket("ticket");
-  assert.equal(f.ticket.workspaceId, "legacy-workspace", "new shared Workers keep using the ordinary workspace");
-  assert.equal(f.calls.creates, 1);
-});
-
-test("failed background replacement preserves the legacy Router for retry", async (t) => {
-  const f = fixture(t);
-  f.controls.agentWorkspaces.set("router", null);
-  f.controls.createRouterAgent = async () => { throw new Error("provider unavailable"); };
-  await assert.rejects(evaluateRouter(f), /router agent creation failed/);
-  assert.deepEqual(f.calls.archives, [], "the old session is archived only after replacement succeeds");
-  assert.equal(f.state.kv.routerAgentId, "router");
-});
-
-test("a Worker detach failure leaves the legacy Router intact for a later replacement", async (t) => {
-  const f = fixture(t);
-  f.controls.agentWorkspaces.set("router", null);
-  f.ref("worker").detach = async () => { throw new Error("detach failed"); };
-  await assert.rejects(evaluateRouter(f), /detach failed/);
-  assert.equal(f.calls.creates, 0, "no replacement starts until all Workers can survive parent archival");
-  assert.deepEqual(f.calls.archives, []);
-  assert.equal(f.state.kv.routerAgentId, "router");
-});
-
-test("a busy legacy watchdog waits until idle before background replacement", async (t) => {
-  const f = fixture(t, "running");
-  f.state.kv.backgroundWorkspaces = {};
-  f.values.watchdogEnabled = true;
-  f.state.kv.watchdog = { agentId: "legacy-watchdog", provider: "codex/test", seen: {} };
-  f.controls.sessionStatuses.set("legacy-watchdog", "running");
-  await f.engine.maybePatrol(true);
-  assert.equal(f.calls.creates, 0);
-  assert.deepEqual(f.calls.archives, []);
-  assert.equal(f.calls.patrols.length, 0);
-  assert.match(f.state.kv.watchdog.lastSummary, /skipped/);
-
-  f.controls.sessionStatuses.set("legacy-watchdog", "idle");
-  await f.engine.maybePatrol(true);
-  assert.equal(f.calls.creates, 1);
-  assert.equal(f.daemonWorkspaces.get("new-workspace").background, true);
-  assert.deepEqual(f.calls.archives, ["legacy-watchdog"]);
 });
 
 test("a worktree profile with its own working directory branches from that directory", async (t) => {
@@ -2214,7 +1958,7 @@ test("a persisted cross-thread steer survives a restart and still reaches the ot
   assert.ok(f.calls.sends[0].text.includes("focus on tests"));
 });
 
-test("router and worker configs stay clean — orchestration tools arrive via session_open only", async (t) => {
+test("Worker configs keep session tool settings and parent identity out of creation", async (t) => {
   // daemon 侧两条硬校验决定了角色工具只能走 session_open 注入:保存配置里同名
   // mcpServer 与插件注入冲突会拒绝建会话;toolPolicy 预授权引用的 server 必须出现在
   // 同一个 agent 请求里(插件注入在合并之前,不满足)。这里回归护栏:创建配置两样都不带。
@@ -2224,12 +1968,7 @@ test("router and worker configs stay clean — orchestration tools arrive via se
   assert.equal(workerConfig.mcpServers, undefined, "no MCP server is saved into the agent config");
   assert.equal(workerConfig.toolPolicy, undefined, "no MCP preapproval is saved either");
 
-  const routerFixture = fixture(t, "waiting");
-  routerFixture.state.kv.routerAgentId = null;
-  await evaluateRouter(routerFixture, "first event");
-  const routerConfig = routerFixture.calls.routerCreates[0].config;
-  assert.equal(routerConfig.mcpServers, undefined);
-  assert.equal(routerConfig.toolPolicy, undefined);
+  assert.equal(f.calls.workerCreates[0].parent, undefined);
 });
 
 test("worker unsubscribe stops direct delivery and completes a waiting ticket", async (t) => {
@@ -2393,13 +2132,13 @@ test("searchRecords matches keywords across record types, newest first, with bou
 test("searchRecords hides the calling Router's own pending triggers and thread, which the prompt already shows", async (t) => {
   const f = fixture(t, "running");
   const now = new Date().toISOString();
-  Object.assign(f.state.threads[0], { title: "caddy 现在的状态", router: { agentId: "router-a" } });
+  f.state.threads[0].title = "caddy 现在的状态";
   f.state.threads.push({ id: "other", key: "manual:other", title: "caddy 旧调研", state: "active", summary: null, createdAt: now, updatedAt: now });
   const trigger = (id, threadId, status) => ({ id, threadId, threadKey: `manual:${threadId}`, kind: "manual", sender: "user",
     text: `caddy ${id}`, status, context: false, receivedAt: now, note: null });
   f.state.triggers.push(trigger("trg_own_pending", "thread", "pending"), trigger("trg_own_done", "thread", "evaluated"),
     trigger("trg_other_pending", "other", "pending"));
-  const scoped = await f.engine.searchRecords("caddy", "router-a");
+  const scoped = await f.engine.searchRecords("caddy", "thread");
   assert.doesNotMatch(scoped, /trg_own_pending|\[thread thread active\]/);
   for (const id of ["trg_own_done", "trg_other_pending", "[other thread active]"]) assert.ok(scoped.includes(id), id);
   const unscoped = await f.engine.searchRecords("caddy");
@@ -2483,8 +2222,8 @@ test("filtered drops are recorded with a reason without eval, direct delivery, o
 
 test("transient eval errors keep requeueing well past the unparsed circuit breaker", async (t) => {
   const f = fixture(t, "waiting");
-  // 异常计数:drainEvalQueue 捕获 runEval 抛错(目录未配置),计入 evalErrors 而非 evalFailures。
-  f.values.workingDir = "";
+  // API errors count toward infrastructure backoff.
+  f.values.inferenceBaseUrl = "";
   pendingTrigger(f.state);
   f.engine.evalQueued.add("thread");
   await f.engine.drainEvalQueue();
@@ -2494,7 +2233,7 @@ test("transient eval errors keep requeueing well past the unparsed circuit break
   assert.equal(f.state.triggers[0].status, "pending", "触发保留待重试");
 
   // 看门狗重排门控:异常未达上限继续重排;unparsed 3 次与异常达上限都停。
-  f.values.workingDir = "/mock/repo";
+  f.values.inferenceBaseUrl = "http://inference.example/v1";
   f.engine.evalErrors.set("thread", 3);
   f.state.threads[0].evalRetry.nextAt = oldTime;
   f.calls.evals.length = 0;
@@ -2665,7 +2404,7 @@ test("speculative dispatch is honored only when enabled, never subscribes, and i
   f.values.speculativeEnabled = true;
   f.controls.verdict = { actions: [spec("一"), spec("二"), spec("三")] };
   await evaluateRouter(f, "又有人反馈");
-  assert.match(f.calls.routerCreates.at(-1).config.systemPrompt, /## Speculative execution \(enabled\)/);
+  assert.match(f.calls.requests.at(-1).body.messages[0].content, /## Speculative execution \(enabled\)/);
   const speculative = f.state.tickets.filter((ticket) => ticket.speculative);
   assert.deepEqual(speculative.map((ticket) => ticket.title), ["一", "二"]);
   assert.ok(speculative.every((ticket) => ticket.subscribed === false));
@@ -2731,11 +2470,8 @@ test("the LLM watchdog patrols unfinished work, judges progress across patrols, 
     ],
   };
   await f.engine.maybePatrol(true);
-  assert.equal(f.calls.watchdogCreates.length, 1);
-  const created = f.calls.watchdogCreates[0];
-  assert.equal(created.labels["superagent.role"], "watchdog");
-  assert.match(created.config.systemPrompt, /Superagent Watchdog instructions/);
-  assert.equal(created.config.options, undefined, "the Claude watchdog uses its provider defaults");
+  assert.equal(f.calls.requests.length, 1);
+  assert.match(f.calls.requests[0].body.messages[0].content, /Superagent Watchdog instructions/);
   assert.match(f.calls.patrols[0], /### ticket "test" — status=running/);
   assert.match(f.calls.patrols[0], /activity: first patrol for this ticket/);
   assert.match(f.calls.patrols[0], /latest worker message \(excerpt\):\n```text\nwork completed/);
@@ -2749,10 +2485,9 @@ test("the LLM watchdog patrols unfinished work, judges progress across patrols, 
 
   f.controls.patrolVerdict = { summary: "steady", actions: [] };
   await f.engine.maybePatrol(true);
-  assert.equal(f.calls.watchdogCreates.length, 2, "each patrol uses a fresh session");
-  assert.equal(f.state.kv.watchdog.agentId, "watchdog-2");
-  assert.ok(f.calls.archives.includes("watchdog"));
-  assert.equal(f.calls.watchdogCreates[0].config.systemPrompt, f.calls.watchdogCreates[1].config.systemPrompt);
+  assert.equal(f.calls.requests.length, 2);
+  assert.equal(f.state.kv.watchdog.agentId, undefined);
+  assert.deepEqual(f.calls.requests.map(({ body }) => body.messages.length), [2, 2]);
   assert.match(f.calls.patrols[1], /Previous patrol/);
   assert.match(f.calls.patrols[1], /ticket loops on the same failure/);
   assert.match(f.calls.patrols[1], /nudge: 先跑单测再改代码/);
@@ -2772,7 +2507,6 @@ test("the LLM watchdog stays off by default and skips the model when there is no
   idle.values.watchdogEnabled = true;
   await idle.engine.maybePatrol(true);
   assert.equal(idle.calls.patrols.length, 0);
-  assert.equal(idle.calls.watchdogCreates.length, 0);
   assert.equal(idle.state.kv.watchdog.lastSummary, "nothing to patrol");
 
   // Router 被释放/归档后线程仍活跃:引擎下次评估自动重建,不是需要看门狗判断的异常。
@@ -2782,7 +2516,6 @@ test("the LLM watchdog stays off by default and skips the model when there is no
   assert.ok(released.state.threads.some((thread) => thread.state === "active"));
   await released.engine.maybePatrol(true);
   assert.equal(released.calls.patrols.length, 0, "a released Router alone does not wake the model");
-  assert.equal(released.calls.watchdogCreates.length, 0);
   assert.equal(released.state.kv.watchdog.lastSummary, "nothing to patrol");
 
   // 有未完结票据时照常巡检,Router 状态作为参考说明随附。
@@ -2792,7 +2525,7 @@ test("the LLM watchdog stays off by default and skips the model when there is no
   busy.controls.patrolVerdict = { summary: "steady", actions: [] };
   await busy.engine.maybePatrol(true);
   assert.equal(busy.calls.patrols.length, 1);
-  assert.match(busy.calls.patrols[0], /## Engine health\n- no problems detected\n- \(info, no action needed\) no live Router agent/);
+  assert.match(busy.calls.patrols[0], /## Engine health\n- no problems detected/);
 });
 
 test("parked waiting tickets do not wake the watchdog model; new activity, a live worker or a permission does", async (t) => {
@@ -2808,7 +2541,6 @@ test("parked waiting tickets do not wake the watchdog model; new activity, a liv
   await f.engine.maybePatrol(true);
   await f.engine.maybePatrol(true);
   assert.equal(f.calls.patrols.length, 1);
-  assert.equal(f.calls.watchdogCreates.length, 1);
   assert.equal(f.state.kv.watchdog.lastSummary, "nothing to patrol: 1 parked waiting ticket(s)");
 
   // 会话有新动静:巡一次,之后又回到待命。
@@ -2876,14 +2608,16 @@ test("old failed IM deliveries stop waking the watchdog model; recent ones still
 test("an unparsable watchdog reply is recorded and the rules are resent next time", async (t) => {
   const f = fixture(t, "running");
   f.values.watchdogEnabled = true;
-  f.values.routerProvider = "zcode-acp/builtin:plan\\GLM";
+  f.values.watchdogModel = "test-watchdog";
   f.controls.patrolVerdict = "not json";
   await f.engine.maybePatrol(true);
-  assert.match(f.calls.patrols[0], /Superagent Watchdog instructions/, "ACP sessions receive the rules in the first turn");
+  assert.match(f.calls.requests[0].body.messages[0].content, /Superagent Watchdog instructions/);
+  assert.equal(f.calls.requests[0].body.model, "test-watchdog");
   assert.match(f.state.kv.watchdog.lastError, /^unparsed/);
   f.controls.patrolVerdict = { summary: "ok", actions: [] };
   await f.engine.maybePatrol(true);
-  assert.match(f.calls.patrols[1], /Superagent Watchdog instructions/);
+  assert.equal(f.calls.requests[1].body.tools, undefined, "repair gets no tools");
+  assert.match(f.calls.requests[2].body.messages[0].content, /Superagent Watchdog instructions/);
   assert.equal(f.state.kv.watchdog.lastError, null);
 });
 
@@ -2900,239 +2634,8 @@ test("messages that arrive before the engine starts are kept and delivered once 
   const trigger = f.state.triggers.find((item) => item.id === queued.triggerId);
   assert.equal(trigger.status, "delivered");
   assert.equal(f.engine.orchestrationRole("worker"), "worker");
-  assert.equal(f.engine.orchestrationRole("router"), "router");
+  assert.equal(f.engine.orchestrationRole("router"), null);
   assert.equal(f.engine.orchestrationRole("someone-else"), null);
-});
-
-test("a configured Codex Router requests a read-only sandbox", async (t) => {
-  const f = fixture(t, "waiting");
-  f.state.kv.routerAgentId = null;
-  f.values.routerProvider = "codex/test";
-  await evaluateRouter(f, "first event");
-  assert.equal(f.calls.routerCreates[0].config.provider, "codex/test");
-  assert.deepEqual(f.calls.routerCreates[0].config.options, { sandbox_mode: "read-only" });
-});
-
-test("the Router can use configured Codex while the provider snapshot is unavailable", async (t) => {
-  const f = fixture(t, "waiting");
-  f.values.routerProvider = "codex/test";
-  f.controls.providerSnapshot = async () => { throw new Error("provider snapshot unavailable"); };
-  await evaluateRouter(f, "first event");
-  assert.equal(f.calls.routerCreates[0].config.provider, "codex/test");
-  assert.deepEqual(f.calls.routerCreates[0].config.options, { sandbox_mode: "read-only" });
-});
-
-test("an automatic Router pick chooses Codex when Claude is unavailable", async (t) => {
-  const f = fixture(t, "waiting");
-  f.state.kv.routerAgentId = null;
-  f.state.kv.routerProvider = null;
-  f.values.routerProvider = "";
-  f.controls.providerSnapshot = async () => ({
-    entries: [
-      { provider: "opencode", status: "ready", models: [{ id: "test" }] },
-      ...PROVIDER_ENTRIES.filter((entry) => entry.provider !== "claude").toReversed(),
-    ],
-  });
-  await evaluateRouter(f, "first event");
-  assert.equal(f.calls.routerCreates[0].config.provider, "codex/test");
-});
-
-test("a remembered Codex selection rebuilds a Router from an older configuration", async (t) => {
-  const f = fixture(t, "waiting");
-  f.state.kv.routerProvider = "codex/test";
-  f.values.routerProvider = "";
-  await evaluateRouter(f, "first event");
-  const { provider, systemPrompt } = f.calls.routerCreates[0].config;
-  assert.equal(provider, "codex/test");
-  f.state.threads[0].router.configHash = createHash("sha256")
-    .update(JSON.stringify([systemPrompt, provider, ""])).digest("hex");
-
-  await evaluateRouter(f, "second event");
-  assert.equal(f.calls.routerCreates.length, 2);
-  assert.deepEqual(f.calls.routerCreates[1].config.options, { sandbox_mode: "read-only" });
-});
-
-test("a configured Codex watchdog requests a read-only sandbox", async (t) => {
-  const f = fixture(t, "running");
-  f.values.watchdogEnabled = true;
-  f.values.watchdogProvider = "codex/test";
-  await f.engine.maybePatrol(true);
-  assert.equal(f.calls.watchdogCreates[0].config.provider, "codex/test");
-  assert.deepEqual(f.calls.watchdogCreates[0].config.options, { sandbox_mode: "read-only" });
-});
-
-
-test("a failed Router run is remembered for archival and the retry gets a fresh session", async (t) => {
-  const f = fixture(t, "waiting");
-  f.ref("new-router").run = async () => { throw new Error("provider timeout"); };
-  await assert.rejects(evaluateRouter(f, "timeout event"), /provider timeout/);
-  assert.equal(f.state.kv.routerAgentId, "new-router");
-  assert.equal(f.state.triggers.at(-1).status, "pending");
-  await f.engine.runEval("thread");
-  assert.equal(f.state.kv.routerAgentId, "new-router-2");
-  assert.ok(f.calls.archives.includes("new-router"));
-  assert.match(f.calls.prompts.at(-1), /timeout event/);
-});
-
-test("a failed watchdog run is remembered for archival and its error reaches the next fresh patrol", async (t) => {
-  const f = fixture(t, "running");
-  f.values.watchdogEnabled = true;
-  f.ref("watchdog").run = async () => { throw new Error("patrol timeout"); };
-  await assert.rejects(f.engine.maybePatrol(true), /patrol timeout/);
-  assert.equal(f.state.kv.watchdog.agentId, "watchdog");
-  assert.equal(f.state.kv.watchdog.lastError, "patrol timeout");
-  await f.engine.maybePatrol(true);
-  assert.equal(f.state.kv.watchdog.agentId, "watchdog-2");
-  assert.ok(f.calls.archives.includes("watchdog"));
-  assert.match(f.calls.patrols.at(-1), /error: patrol timeout/);
-});
-
-test("a busy watchdog yields even when its provider setting changes", async (t) => {
-  const f = fixture(t, "running");
-  f.values.watchdogEnabled = true;
-  f.state.kv.watchdog = { agentId: "watchdog", provider: "old/model", seen: {} };
-  f.controls.sessionStatuses.set("watchdog", "running");
-  await f.engine.maybePatrol(true);
-  assert.equal(f.calls.watchdogCreates.length, 0);
-  assert.equal(f.calls.patrols.length, 0);
-  assert.equal(f.state.kv.watchdog.provider, "old/model");
-  assert.match(f.state.kv.watchdog.lastSummary, /skipped/);
-});
-
-
-test("each active thread keeps its own Router and the original thread resumes after another evaluates", async (t) => {
-  const f = fixture(t, "waiting");
-  await evaluateRouter(f, "first thread event");
-  const first = f.state.threads[0].router.agentId;
-  f.state.threads.push({ ...f.state.threads[0], router: null, id: "thread-b", key: "manual:b", title: "B" });
-  f.state.triggers.push({ ...f.state.triggers[0], id: "trg-b", threadId: "thread-b", text: "second thread event", status: "pending" });
-  await f.engine.runEval("thread-b");
-  const second = f.state.threads[1].router.agentId;
-  assert.notEqual(first, second);
-  assert.equal(f.engine.orchestrationRole(first), "router");
-  assert.equal(f.engine.orchestrationRole(second), "router");
-  const resumed = await evaluateRouter(f, "resume first thread");
-  assert.equal(f.state.threads[0].router.agentId, first);
-  assert.equal(f.calls.routerCreates.length, 2);
-  assert.doesNotMatch(resumed, /first thread event|second thread event|Recent thread history/);
-  assert.equal(f.calls.routerCreates[0].labels["superagent.thread"], "thread");
-  assert.equal(f.calls.routerCreates[1].labels["superagent.thread"], "thread-b");
-  await f.engine.closeThread("thread");
-  assert.equal(f.state.threads[0].router, null);
-  assert.ok(f.calls.archives.includes(first));
-  assert.ok(!f.calls.archives.includes(second));
-  assert.equal(f.state.threads[1].router.agentId, second);
-});
-
-test("context size and evaluation count cause controlled Router replacement with summary recovery", async (t) => {
-  for (const cause of ["context", "small-window", "rounds"]) {
-    const f = fixture(t, "waiting");
-    await evaluateRouter(f, "remember original request");
-    if (cause === "context") f.controls.routerUsage = { contextWindowUsedTokens: ROUTER_CONTEXT_LIMIT, contextWindowMaxTokens: 1_000_000 };
-    if (cause === "small-window") f.controls.routerUsage = { contextWindowUsedTokens: 30_000, contextWindowMaxTokens: 32_000 };
-    if (cause === "rounds") f.state.threads[0].router.evaluations = ROUTER_EVALUATION_LIMIT;
-    const prompt = await evaluateRouter(f, "continue after rollover");
-    assert.equal(f.state.threads[0].router.agentId, "new-router-2");
-    assert.ok(f.calls.archives.includes("new-router"));
-    assert.match(prompt, /Recent thread history/);
-    assert.match(prompt, /remember original request/);
-    assert.equal(f.state.threads[0].router.evaluations, 1);
-  }
-});
-
-test("a native session change rebuilds only its Router and recovers the thread summary", async (t) => {
-  const f = fixture(t, "waiting");
-  f.controls.routerSessionId = "session-one";
-  await evaluateRouter(f);
-  f.controls.routerSessionId = "session-two";
-  assert.match(await evaluateRouter(f), /Recent thread history/);
-  assert.equal(f.calls.routerCreates.length, 2);
-});
-
-test("a recall loop that ignores refusals is stopped, offered one verdict turn, then left for a clean replacement", async (t) => {
-  const f = fixture(t, "waiting");
-  const prompts = [];
-  f.ref("new-router").run = async (prompt) => {
-    prompts.push(prompt);
-    // 3 次放行 + 5 次被拒仍继续:服务端硬中断(两轮都无视拒绝)。
-    for (let i = 0; i < 8; i++) f.engine.beforeRecall("new-router", "superagent_read", { id: "ticket" });
-    return new Promise(() => {});
-  };
-  await assert.rejects(evaluateRouter(f, "budget test"),
-    /Router recall budget exhausted after 3 recall calls and no verdict followed \(recall budget exhausted: 3 recall calls ran and 5 more were refused/);
-  assert.equal(prompts.length, 2);
-  assert.ok(prompts[1].startsWith(RECALL_EXHAUSTED_MARKER), "the second turn is the tool-free verdict turn");
-  assert.deepEqual(f.calls.reloads, ["new-router", "new-router"], "the still-running turn is interrupted before each retry");
-  assert.equal(f.state.threads[0].router.dirty, true);
-  assert.equal(f.state.triggers[0].status, "pending");
-  assert.equal(f.state.decisions.length, 0);
-  await f.engine.runEval("thread");
-  assert.equal(f.state.threads[0].router.agentId, "new-router-2");
-  assert.equal(f.state.threads[0].router.dirty, false);
-});
-
-test("an exhausted recall budget gets a tool-free verdict turn in the same session instead of an error", async (t) => {
-  const f = fixture(t, "waiting");
-  const prompts = [];
-  f.ref("new-router").run = async (prompt) => {
-    prompts.push(prompt);
-    if (prompts.length === 1) {
-      for (let i = 0; i < 12; i++) assert.equal(f.engine.beforeRecall("new-router", "superagent_search", { query: `q${i}` }), null);
-      assert.match(f.engine.recallUsage("new-router"), /all 12 calls used/);
-      // pi 扩展拒绝第 13 次后模型仍继续调用,扩展中止本轮。
-      return { status: "error", error: "This operation was aborted (stopReason=error, model=zcode-local/glm-5.3-flash)", lastMessage: null };
-    }
-    assert.match(f.engine.beforeRecall("new-router", "superagent_list", {}), /Recall budget exhausted \(12 recall calls used/);
-    return { status: "idle", lastMessage: JSON.stringify({ actions: [{ action: "reply", reply: "decided" }] }) };
-  };
-  await evaluateRouter(f, "needs history");
-  assert.equal(prompts.length, 2);
-  assert.ok(prompts[1].startsWith(RECALL_EXHAUSTED_MARKER));
-  assert.match(prompts[1], /used up its recall budget \(12 recall calls\)/);
-  assert.deepEqual(f.calls.reloads, [], "the session and its recalled context are kept");
-  assert.equal(f.state.threads[0].router.agentId, "new-router");
-  assert.equal(f.state.threads[0].router.dirty, false);
-  assert.equal(f.state.triggers.at(-1).status, "evaluated");
-  assert.ok(f.state.decisions.some((decision) => decision.outcome === "reply" && decision.reply === "decided"));
-  assert.equal(f.engine.recallUsage("new-router"), null, "the budget ends with the evaluation");
-});
-
-test("a failed verdict turn reports the exhausted recall budget explicitly", async (t) => {
-  const f = fixture(t, "waiting");
-  let runs = 0;
-  f.ref("new-router").run = async () => {
-    if (++runs === 1) for (let i = 0; i < 12; i++) f.engine.beforeRecall("new-router", "superagent_search", { query: `q${i}` });
-    return { status: "error", error: "This operation was aborted (stopReason=error, model=m)", lastMessage: null };
-  };
-  await assert.rejects(evaluateRouter(f),
-    /Router recall budget exhausted after 12 recall calls and no verdict followed \(decision run error: This operation was aborted/);
-  assert.equal(runs, 2);
-  assert.equal(f.state.triggers.at(-1).status, "pending");
-  assert.equal(f.state.threads[0].router.dirty, true);
-});
-
-test("an abort or error with recall budget left is an ordinary evaluation error", async (t) => {
-  for (const error of ["This operation was aborted", "provider unavailable"]) {
-    const f = fixture(t, "waiting");
-    let runs = 0;
-    f.ref("new-router").run = async () => {
-      runs++;
-      // 某个调用重复到上限,但不是中止:不当作预算拦截。
-      if (error !== "This operation was aborted") for (let i = 0; i < 3; i++) f.engine.beforeRecall("new-router", "superagent_read", { id: "same" });
-      return { status: "error", error, lastMessage: null };
-    };
-    await assert.rejects(evaluateRouter(f), new RegExp(`^Error: decision run error: ${error}$`));
-    assert.equal(runs, 1, `${error}: no verdict turn`);
-  }
-});
-
-test("a timeout status cannot execute an old valid reply and interrupts the model", async (t) => {
-  const f = fixture(t, "waiting");
-  f.ref("new-router").run = async () => ({ status: "timeout", lastMessage: '{"actions":[{"action":"stop"}]}' });
-  await assert.rejects(evaluateRouter(f), /decision run timeout/);
-  assert.equal(f.state.threads[0].state, "active");
-  assert.equal(f.state.decisions.length, 0);
-  assert.deepEqual(f.calls.reloads, ["new-router"]);
 });
 
 test("IM intake isolates days, channels and accounts, even for an explicit old thread or a cross-day quote", async (t) => {
@@ -3164,7 +2667,6 @@ test("day rollover preserves ongoing work and closes the old IM thread only afte
   const dayOne = await f.engine.dispatch({ origin, task: "long job" });
   f.controls.verdict = { actions: [{ action: "ignore" }] };
   await f.engine.runEval(dayOne.threadId);
-  const firstRouter = f.state.threads.find((t) => t.id === dayOne.threadId).router.agentId;
   f.state.tickets.push({ ...f.ticket, id: "daily-ticket", threadId: dayOne.threadId, status: "running",
     workerAgentId: "daily-worker", startedAt: new Date().toISOString() });
   f.engine.now = () => new Date("2026-11-14T00:00:00Z");
@@ -3176,7 +2678,6 @@ test("day rollover preserves ongoing work and closes the old IM thread only afte
   ticket.workerAgentId = null;
   await f.engine.reconcile();
   assert.equal(f.state.threads.find((t) => t.id === dayOne.threadId).state, "closed");
-  assert.ok(f.calls.archives.includes(firstRouter));
   assert.equal(f.state.threads.find((t) => t.id === dayTwo.threadId).state, "active");
 });
 
@@ -3195,16 +2696,6 @@ test("day cleanup checks the live Worker before retiring a parked ticket", async
   await f.engine.reconcile();
   assert.equal(f.state.threads[0].state, "closed");
   assert.ok(f.calls.archives.includes("worker"));
-});
-
-test("a maintainer's running Router is not interrupted by another scheduled evaluation", async (t) => {
-  const f = fixture(t, "waiting");
-  await evaluateRouter(f);
-  f.controls.sessionStatuses.set("new-router", "running");
-  await assert.rejects(evaluateRouter(f), /Router .* is busy/);
-  assert.equal(f.calls.routerCreates.length, 1);
-  assert.ok(!f.calls.archives.includes("new-router"));
-  assert.equal(f.state.threads[0].router.dirty, false);
 });
 
 test("thread search includes the date and IM channel of retained closed conversations", async (t) => {
@@ -3241,12 +2732,12 @@ test("a stuck preparation releases the global evaluation queue", async t => {
   assert.equal(f.calls.prompts.length, 1);
 });
 
-test("a hard evaluation deadline discards a late dispatch even when run ignores timeoutMs", async t => {
+test("a hard evaluation deadline discards a late dispatch even when the API ignores abort", async t => {
   const f = fixture(t, "completed");
   f.values.routerEvalTimeoutMin = 1;
   const late = deferred();
   let running = false;
-  f.ref("new-router").run = () => { running = true; return late.promise; };
+  f.controls.runRouter = () => { running = true; return late.promise; };
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
   const rejected = assert.rejects(evaluateRouter(f), /timed out/);
   await until(() => running);
@@ -3257,100 +2748,10 @@ test("a hard evaluation deadline discards a late dispatch even when run ignores 
   assert.equal(f.state.tickets.length, 1);
   assert.equal(f.state.triggers[0].status, "pending");
   assert.equal(f.state.decisions.length, 0);
-  assert.deepEqual(f.calls.reloads, ["new-router"]);
-  assert.equal(f.state.threads[0].router.dirty, true);
+  assert.equal(f.calls.requests[0].signal.aborted, true);
+  f.controls.runRouter = undefined;
   await f.engine.runEval("thread");
-  assert.equal(f.state.threads[0].router.agentId, "new-router-2");
   assert.equal(f.state.triggers[0].status, "evaluated");
-});
-
-test("Router creation completing after preparation expiry archives its orphan", async t => {
-  const f = fixture(t, "completed");
-  const late = deferred();
-  f.controls.createRouterAgent = () => late.promise;
-  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
-  const rejected = assert.rejects(evaluateRouter(f), /Router preparation timed out/);
-  await until(() => f.calls.routerCreates.length === 1);
-  t.mock.timers.tick(60_001);
-  await rejected;
-  late.resolve(f.ref("late-router"));
-  await until(() => f.calls.archives.includes("late-router"));
-  assert.equal(f.state.threads[0].router, undefined);
-  assert.equal(f.calls.prompts.length, 0);
-  assert.equal(f.state.triggers[0].status, "pending");
-});
-
-test("a hung interrupt has its own deadline and cannot retain the evaluation lock", async t => {
-  const f = fixture(t, "completed");
-  pendingTrigger(f.state);
-  f.ref("new-router").run = async () => ({ status: "timeout" });
-  let cleaning = false;
-  f.ref("new-router").reload = () => { cleaning = true; return new Promise(() => {}); };
-  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
-  f.engine.evalQueued.add("thread");
-  const draining = f.engine.drainEvalQueue();
-  await until(() => cleaning);
-  t.mock.timers.tick(30_001);
-  await draining;
-  assert.equal(f.engine.evalInFlight, false);
-  assert.equal(f.engine.evalRuns.size, 0);
-  assert.equal(f.state.triggers[0].status, "pending");
-});
-
-test("idle Router retirement preserves the thread, result and running Worker; recall rebuilds it", async t => {
-  const f = fixture(t, "running");
-  await evaluateRouter(f, "remember this request");
-  const thread = f.state.threads[0];
-  const result = thread.latestResult;
-  const routerId = thread.router.agentId;
-  f.controls.parents.set("worker", routerId);
-  // Simulate an old same-workspace parent relation: it must be detached before archival.
-  f.controls.agentWorkspaces.set("worker", "role-workspace");
-  thread.router.lastUsedAt = oldTime;
-  f.ticket.startedAt = new Date().toISOString();
-  await f.engine.reconcile();
-  assert.equal(thread.router, null);
-  assert.equal(thread.state, "active");
-  assert.deepEqual(thread.latestResult, result);
-  assert.ok(f.calls.archives.includes(routerId));
-  assert.ok(!f.calls.archives.includes("worker"));
-  assert.ok(f.calls.detaches.includes("worker"));
-  const prompt = await evaluateRouter(f, "follow up");
-  assert.equal(thread.router.agentId, "new-router-2");
-  assert.match(prompt, /remember this request/);
-});
-
-test("idle retirement yields to a new message arriving while children are detached", async t => {
-  const f = fixture(t, "completed");
-  await evaluateRouter(f);
-  const thread = f.state.threads[0];
-  thread.router.lastUsedAt = oldTime;
-  const routerId = thread.router.agentId;
-  const detached = deferred();
-  f.controls.parents.set("worker", routerId);
-  f.ref("worker").detach = () => detached.promise;
-  const retiring = f.engine.retireThreadRouter("thread", Date.now() - 30 * 60_000);
-  await until(() => f.engine.retiringRouters.has("thread"));
-  await f.engine.dispatch({ threadId: "thread", task: "new message" });
-  detached.resolve();
-  await retiring;
-  assert.equal(thread.router.agentId, routerId);
-  assert.ok(!f.calls.archives.includes(routerId));
-});
-
-test("idle Router retirement protects live manual turns and pending messages", async t => {
-  for (const reason of ["running", "initializing", "permission", "pending"]) {
-    const f = fixture(t, "completed");
-    await evaluateRouter(f);
-    const routerId = f.state.threads[0].router.agentId;
-    f.state.threads[0].router.lastUsedAt = oldTime;
-    if (reason === "pending") pendingTrigger(f.state);
-    else if (reason === "permission") f.controls.pendingPermissions.set(routerId, [toolRequest]);
-    else f.controls.sessionStatuses.set(routerId, reason);
-    await f.engine.retireThreadRouter("thread", Date.now() - 30 * 60_000);
-    assert.equal(f.state.threads[0].router.agentId, routerId);
-    assert.ok(!f.calls.archives.includes(routerId));
-  }
 });
 
 test("a waiting Worker's idle lease expires across reloads and preserves shared workspaces and reports", async t => {
@@ -3478,7 +2879,7 @@ test("permission waits get one durable reminder and remain available for a forma
 test("evaluation retry backoff and circuit breaker survive restoration and reset on manual retry", async t => {
   const f = fixture(t, "completed");
   pendingTrigger(f.state);
-  f.values.workingDir = "";
+  f.values.inferenceBaseUrl = "";
   f.engine.evalQueued.add("thread");
   await f.engine.drainEvalQueue();
   assert.equal(f.state.threads[0].evalRetry.errors, 1);
@@ -3518,6 +2919,7 @@ test("an uncertain timed-out action is held for review and a late permission loo
 
 test("a hung shared workspace lookup releases the creation chain and fences its late result", async t => {
   const f = fixture(t, "completed");
+  f.state.kv.backgroundWorkspaces = { "/mock/repo": "role-workspace" };
   const late = deferred();
   let calls = 0;
   f.paseo.workspaces.ref = id => ({ id, refresh: () => ++calls === 1 ? late.promise : Promise.resolve({ background: true, workspaceDirectory: "/mock/repo" }) });
@@ -3531,4 +2933,76 @@ test("a hung shared workspace lookup releases the creation chain and fences its 
   late.resolve({ background: true, workspaceDirectory: "/mock/repo" });
   await setImmediate();
   assert.equal(f.calls.creates, 0);
+});
+
+test("direct Router uses configured inference without an Agent or Worker directory and restores sourced memory", async t => {
+  const f = fixture(t, "completed");
+  f.values.workingDir = "";
+  f.paseo.providers.snapshot = () => assert.fail("decision inference must not discover Paseo providers");
+  f.controls.verdict = {
+    actions: [{ action: "reply", reply: "Document only" }],
+    memory: [{ text: "Documentation changes only", triggerId: "event-0" }],
+  };
+  const first = await evaluateRouter(f, "Only change documentation");
+  assert.match(first, /Worker working directory is not configured/);
+  const [request] = f.calls.requests;
+  assert.equal(request.url, "http://inference.example/v1/chat/completions");
+  assert.equal(request.body.model, "test-router");
+  assert.equal(f.calls.creates, 0);
+  assert.deepEqual(f.state.threads[0].routerMemory, f.controls.verdict.memory);
+  assert.equal(f.state.decisions[0].inference.inputTokens, 12);
+
+  Object.assign(f.state, SuperagentStateSchema.parse(JSON.parse(JSON.stringify(f.state))));
+  const restored = new SuperagentEngine(f.engine.store, {
+    subscribe() {}, read: async () => ({ status: "ready", values: f.values }),
+  }, f.inferenceRequest);
+  restored.paseo = f.paseo;
+  t.after(() => restored.stop());
+  f.controls.verdict = {
+    actions: [{ action: "ignore" }],
+    memory: [{ text: "Invalid source", triggerId: "fake-trigger" }],
+  };
+  const next = await evaluateRouter({ ...f, engine: restored }, "Continue");
+  assert.match(next, /Saved thread memory/);
+  assert.match(next, /Documentation changes only/);
+  assert.match(next, /Recent thread history/);
+  assert.deepEqual(f.state.threads[0].routerMemory, [{ text: "Documentation changes only", triggerId: "event-0" }]);
+});
+
+test("migration detaches Workers before archiving idle legacy decision sessions and retries failed cleanup", async t => {
+  const f = fixture(t, "waiting");
+  f.state.kv.routerAgentId = "legacy-router";
+  f.state.kv.watchdog = { agentId: "legacy-watchdog", lastSummary: "previous summary" };
+  f.controls.parents.set("worker", "legacy-router");
+  f.controls.sessionStatuses.set("legacy-watchdog", "running");
+  f.ref("worker").detach = async () => { throw new Error("detach failed"); };
+  await f.engine.retireLegacyDecisionAgents();
+  assert.deepEqual(f.calls.archives, []);
+  assert.equal(f.state.kv.routerAgentId, "legacy-router");
+  f.ref("worker").detach = async () => { f.calls.detaches.push("worker"); f.controls.parents.delete("worker"); };
+  f.controls.sessionStatuses.set("legacy-watchdog", "idle");
+  await f.engine.retireLegacyDecisionAgents();
+  assert.deepEqual(f.calls.detaches, ["worker"]);
+  assert.deepEqual(f.calls.archives, ["legacy-router", "legacy-watchdog"]);
+  assert.equal(f.ticket.workerAgentId, "worker");
+  assert.equal(f.state.kv.routerAgentId, null);
+  assert.equal(f.state.kv.watchdog.agentId, null);
+  assert.equal(f.state.kv.watchdog.lastSummary, "previous summary");
+});
+
+test("watchdog skips an interrupt if the Worker finishes during inference", async t => {
+  const f = fixture(t, "running");
+  f.values.watchdogEnabled = true;
+  const started = deferred();
+  const model = deferred();
+  f.controls.runWatchdog = () => { started.resolve(); return model.promise; };
+  const patrol = f.engine.maybePatrol(true);
+  await started.promise;
+  f.ticket.status = "completed";
+  model.resolve({ lastMessage: JSON.stringify({
+    summary: "looks stuck", actions: [{ action: "interrupt", ticketId: "ticket", text: "redirect" }],
+  }) });
+  await patrol;
+  assert.equal(f.calls.sends.length, 0);
+  assert.equal(f.state.kv.watchdog.lastActions, 0);
 });

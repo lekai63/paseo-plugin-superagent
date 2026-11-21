@@ -181,29 +181,6 @@ test("pending questions stay outside the Router's scrollable transcript and disa
   assert.equal(render([permission])[1], null);
 });
 
-test("plugin Router status includes background sessions, filters archived sessions, and retains the remembered fallback", async () => {
-  const records = [
-    { id: "hidden", background: true, labels: { "superagent.role": "router" } },
-    { id: "archived", background: true, labels: { "superagent.role": "router" }, archivedAt: "2026-01-01" },
-    { id: "worker", background: false, labels: { "superagent.role": "worker" } },
-  ];
-  const paseo = {
-    agents: {
-      list: async ({ filter }) => ({
-        entries: records
-          .filter((agent) => (filter.includeBackground || !agent.background)
-            && Object.entries(filter.labels).every(([key, value]) => agent.labels[key] === value))
-          .map((agent) => ({ agent })),
-      }),
-      ref: (id) => ({ refresh: async () => ({ agent: { id, archivedAt: null } }) }),
-    },
-  };
-  const { exports } = load(queryBundle, "web", { paseo });
-  const query = exports.useRouterAgents("host", "remembered", true);
-  const agents = await query.queryFn();
-  assert.deepEqual(Array.from(agents, (agent) => agent.id), ["hidden", "remembered"]);
-});
-
 // Exported constants are not read back from the bundle: the Hermes pass above evaluates entry
 // exports before module-level constants are initialized. Only functions survive it.
 

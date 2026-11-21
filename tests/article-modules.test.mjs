@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { composeEvalPrompt, composeRouterInstructions, parseVerdict } from "../server/router.ts";
 import { composeWorkerPrompt, isOrchestrationAgent } from "../server/workers.ts";
-import { createSessionOpenTransform, orchestrationPermission, DISPATCH_MCP_SERVER_NAME } from "../server/agent-mcp.ts";
+import { createSessionOpenTransform, orchestrationPermission } from "../server/agent-mcp.ts";
 import { startDispatchMcpServer, UNSUBSCRIBE_TOOL_NAME } from "../server/mcp-server.ts";
 import { composePatrolPrompt, parseWatchdogVerdict } from "../server/watchdog.ts";
 import { FeishuSource } from "../server/feishu.ts";
@@ -87,10 +87,10 @@ test("speculative workers are told to work silently and lead their report with D
   assert.match(speculative, /DELIVER: <conclusion>[\s\S]*DISCARD: <reason>[\s\S]*When in doubt, DISCARD\./);
 });
 
-test("Router and watchdog may only use their own recall tools; workers get their session tools auto-approved", () => {
+test("legacy decision agents cannot obtain permissions; Workers get their session tools auto-approved", () => {
   const tool = (name) => ({ name, kind: "tool" });
-  assert.deepEqual(orchestrationPermission("router", tool("mcp__superagent__superagent_read")), { behavior: "allow" });
-  assert.deepEqual(orchestrationPermission("watchdog", tool("superagent_search")), { behavior: "allow" });
+  assert.equal(orchestrationPermission("router", tool("mcp__superagent__superagent_read")).behavior, "deny");
+  assert.equal(orchestrationPermission("watchdog", tool("superagent_search")).behavior, "deny");
   const denied = orchestrationPermission("router", tool("Bash"));
   assert.equal(denied.behavior, "deny");
   assert.match(denied.message, /decision-only/);
@@ -102,7 +102,7 @@ test("Router and watchdog may only use their own recall tools; workers get their
   assert.equal(orchestrationPermission("router", tool("mcp__other__not_superagent_read_x")).behavior, "deny");
 });
 
-test("the watchdog session gets the read-only recall tools and never the dispatch tool", async (t) => {
+test("a legacy watchdog session receives no MCP tools", async (t) => {
   const endpoint = await startDispatchMcpServer({ dispatch: async () => ({ threadId: "t", triggerId: "g", directDelivered: false, note: null }) });
   t.after(() => endpoint.stop());
   const transform = createSessionOpenTransform(() => endpoint, () => true, () => ["codex"]);
@@ -111,7 +111,7 @@ test("the watchdog session gets the read-only recall tools and never the dispatc
     title: null, labels: { "superagent.role": "watchdog" }, tools: [], env: {}, mcpServers: {},
   };
   const injected = transform(request);
-  assert.equal(new URL(injected.mcpServers[DISPATCH_MCP_SERVER_NAME].url).searchParams.get("role"), "router");
+  assert.equal(injected, undefined);
   assert.equal(isOrchestrationAgent({ "superagent.role": "watchdog" }), true);
 });
 

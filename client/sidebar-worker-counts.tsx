@@ -33,22 +33,12 @@ export function SidebarWorkerCounts({ counts, theme }: { counts: { running: numb
   </View>;
 }
 
-/**
- * 没有 Worker 在运行/待命时,同一位置改显 Router 会话的状态点:
- * 蓝(旋转环)= 运行、绿 = 完成待查看、琥珀 = 等权限、红 = 出错、灰 = 空闲;
- * 彩色点对齐宿主 statusDot 色带(agentStatusColors),空闲点用宿主非活跃点同款的 border 色
- * (foregroundMuted 在浅色主题下过深,6px 小点看起来发黑)。
- * Router 已关闭时不显示(空白)。仅 1 个 Router 时不带数字,多个并存才显示数量。
- */
+/** Worker 无活动时显示 Router 评估进度或需要关注的错误。 */
 export function SidebarRouterMark({ mark, theme }: { mark: RouterStatusMark; theme: Theme }) {
   const t = useT();
   const colors = agentStatusColors(theme);
   const countSize = scaleFontSize(fontSize.sm, useHostUiFontSize(theme));
-  const color = mark.kind === "running" ? colors.running
-    : mark.kind === "finished" ? colors.success
-    : mark.kind === "permission" ? colors.warning
-    : mark.kind === "error" ? colors.danger
-    : theme.colors.border;
+  const color = mark.kind === "running" ? colors.running : colors.danger;
   const label = `${t("sidebar.workers.routerA11y", { status: routerStatusLabel(mark.kind, t) })}${mark.count > 1 ? ` ×${mark.count}` : ""}`;
   return <View accessibilityLabel={label} testID="superagent-router-mark"
     style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>

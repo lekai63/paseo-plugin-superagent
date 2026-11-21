@@ -14,10 +14,7 @@ import { ChatTabsSchema } from "./chat-tabs";
  * 都发生在状态落盘之后,看门狗负责对账恢复。
  */
 
-/**
- * Router 会话在 Paseo agent 目录里的标签(服务端创建时打上,客户端据此枚举全部
- * Router 会话——引擎记住的 id 之外,状态重置后残留的旧 Router 也算)。
- */
+/** 用于识别升级前创建的 Paseo Router 和看门狗。 */
 export const ROUTER_AGENT_LABEL = "superagent.role";
 export const ROUTER_AGENT_LABEL_VALUE = "router";
 /** 同一标签键下的 LLM 看门狗会话(§6):独立于 Router 的巡检 agent。 */
@@ -107,7 +104,7 @@ export const ThreadResultSchema = z.object({
 });
 export type ThreadResult = z.infer<typeof ThreadResultSchema>;
 
-/** 一个 Thread 的 Router 及已送达游标;失败标记在发送前落盘,防崩溃后复用半轮上下文。 */
+/** 旧版本的原生 Router 会话状态，用于识别和归档。 */
 export const ThreadRouterSchema = z.object({
   agentId: z.string(),
   provider: z.string(),
@@ -121,6 +118,21 @@ export const ThreadRouterSchema = z.object({
   triggerIds: z.array(z.string()).default([]),
 });
 export type ThreadRouter = z.infer<typeof ThreadRouterSchema>;
+
+const RouterMemorySchema = z.array(z.object({
+  text: z.string().trim().min(1).max(400),
+  triggerId: z.string().min(1).max(80),
+})).max(12);
+
+const InferenceTraceSchema = z.object({
+  model: z.string(),
+  durationMs: z.number().int().nonnegative(),
+  requests: z.number().int().nonnegative(),
+  recallCalls: z.number().int().nonnegative(),
+  inputTokens: z.number().int().nonnegative().optional(),
+  outputTokens: z.number().int().nonnegative().optional(),
+});
+export type InferenceTrace = z.infer<typeof InferenceTraceSchema>;
 
 export const ThreadSchema = z.object({
   id: z.string().min(1),
@@ -138,6 +150,7 @@ export const ThreadSchema = z.object({
     nextAt: z.string().nullable().default(null),
   }).optional(),
   router: ThreadRouterSchema.nullish(),
+  routerMemory: RouterMemorySchema.optional(),
   /** 仅 IM 入站按该日期和渠道会话分流;旧任务的汇报仍回原线程。 */
   imDay: z.string().optional(),
   imConversationKey: z.string().optional(),
@@ -274,6 +287,7 @@ export const DecisionSchema = z.object({
   workerApprovalNotice: z.literal(true).optional(),
   /** 解析失败时保留的原始回复存根(排障用)。 */
   raw: z.string().nullish(),
+  inference: InferenceTraceSchema.optional(),
   createdAt: z.string(),
 });
 export type Decision = z.infer<typeof DecisionSchema>;
@@ -343,6 +357,7 @@ export type RouterAction = z.infer<typeof RouterActionSchema>;
 /** Router 的结构化裁决(JSON 块)在执行前的校验形状:1-5 个动作,按序执行。 */
 export const RouterVerdictSchema = z.object({
   actions: z.array(RouterActionSchema).min(1).max(ROUTER_ACTION_LIMIT),
+  memory: RouterMemorySchema.optional(),
 });
 export type RouterVerdict = z.infer<typeof RouterVerdictSchema>;
 
@@ -456,6 +471,7 @@ const WatchdogStateSchema = z.object({
   lastSummary: z.string().nullish(),
   lastError: z.string().nullish(),
   lastActions: z.number().int().nonnegative().default(0),
+  inference: InferenceTraceSchema.optional(),
   seen: z.record(z.string(), z.object({ seq: z.number(), at: z.string() })).default({}),
 });
 export type WatchdogState = z.infer<typeof WatchdogStateSchema>;
@@ -509,6 +525,7 @@ export const SuperagentSnapshotSchema = z.object({
    */
   revision: z.string().nullish(),
   configured: z.boolean(),
+  inferenceConfigured: z.boolean().default(false),
   workingDir: z.string(),
   /** Worker 基础目录的问题(如 worktree 隔离但不是 git 仓库);可用时为空。 */
   workingDirIssue: z.string().nullish(),
@@ -563,6 +580,7 @@ export const SuperagentSnapshotSchema = z.object({
       lastRunAt: z.string().nullish(),
       lastSummary: z.string().nullish(),
       lastError: z.string().nullish(),
+      inference: InferenceTraceSchema.optional(),
       running: z.boolean(),
     }).nullish(),
   }),

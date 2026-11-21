@@ -371,23 +371,10 @@ function SettingsForm({ settings, hostId, theme, tab }: { settings: Ready; hostI
         info={t("settings.model.info")}
       >
         <SettingsCard>
-          <ModelField
-            {...field}
-            name="routerProvider"
-            label="Router"
-            hint={t("settings.model.routerHint")}
-            emptyLabel={t("settings.model.auto")}
-          />
-          <ThinkingPicker
-            label={t("settings.model.routerThinking")}
-            providerSelection={form.routerProvider}
-            value={form.routerThinkingOptionId}
-            onChange={(value) => set("routerThinkingOptionId", value)}
-            disabled={disabled}
-            error={errors.routerThinkingOptionId ?? null}
-            snapshot={snapshot}
-            fallbackHint={t("settings.model.routerThinkingFallback")}
-          />
+          <TextField {...field} name="inferenceBaseUrl" label={t("settings.model.inferenceBaseUrl")}
+            hint={t("settings.model.inferenceBaseUrlHint")} placeholder="https://your-inference-host/v1" />
+          <TextField {...field} name="routerModel" label={t("settings.model.routerModel")}
+            hint={t("settings.model.routerHint")} />
           <ModelField
             {...field}
             name="workerProvider"
@@ -498,7 +485,6 @@ function SettingsForm({ settings, hostId, theme, tab }: { settings: Ready; hostI
         <SettingsCard>
           <TextField {...field} name="workerTimeoutMin" label={t("settings.execution.workerTimeout.label")} hint={t("settings.execution.workerTimeout.hint")} />
           <TextField {...field} name="routerEvalTimeoutMin" label={t("settings.execution.routerEvalTimeout.label")} hint={t("settings.execution.routerEvalTimeout.hint")} />
-          <TextField {...field} name="routerIdleTimeoutMin" label={t("settings.execution.routerIdleTimeout.label")} hint={t("settings.execution.routerIdleTimeout.hint")} />
           <TextField {...field} name="threadIdleTimeoutMin" label={t("settings.execution.threadIdleTimeout.label")} hint={t("settings.execution.threadIdleTimeout.hint")} />
           <TextField {...field} name="workerIdleTimeoutMin" label={t("settings.execution.workerIdleTimeout.label")} hint={t("settings.execution.workerIdleTimeout.hint")} />
           <TextField {...field} name="maxTicketAttempts" label={t("settings.execution.maxAttempts.label")} hint={t("settings.execution.maxAttempts.hint")} />
@@ -521,7 +507,7 @@ function SettingsForm({ settings, hostId, theme, tab }: { settings: Ready; hostI
           <SwitchField {...field} name="watchdogEnabled" label={t("settings.proactive.watchdog.label")} hint={t("settings.proactive.watchdog.hint")} />
           {form.watchdogEnabled ? (
             <>
-              <ModelField {...field} name="watchdogProvider" label={t("settings.proactive.watchdogModel.label")} hint={t("settings.proactive.watchdogModel.hint")} emptyLabel={t("settings.proactive.watchdogModel.empty")} />
+              <TextField {...field} name="watchdogModel" label={t("settings.proactive.watchdogModel.label")} hint={t("settings.proactive.watchdogModel.hint")} placeholder={t("settings.proactive.watchdogModel.empty")} />
               <TextField {...field} name="watchdogIntervalMin" label={t("settings.proactive.interval.label")} hint={t("settings.proactive.interval.hint")} />
             </>
           ) : null}

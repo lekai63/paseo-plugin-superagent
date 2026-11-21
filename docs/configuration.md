@@ -6,23 +6,26 @@
 
 | 设置 | 说明 |
 |---|---|
-| Router 评估超时 | `routerEvalTimeoutMin`,默认 10 分钟,可设 1–60 分钟。准备与裁决共享总预算,准备阶段最多 1 分钟;中断、清理、动作与发送也有独立的等待期限。迟到裁决不执行;准备超时后才创建成功的 Router 自动归档。基础设施错误按 15 秒起、最多 5 分钟的退避间隔重试,连续 20 次后暂停并通知;解析失败连续三轮后暂停并通知。次数与退避时间落盘,「重新评估」重置。动作超时且结果不确定时暂停自动重发,交人确认 |
-| Router 空闲回收 | `routerIdleTimeoutMin`,默认 30 分钟,可设 1–1440 分钟。归档空闲 Router 并清空引用,保留 Thread,下次评估自动重建并恢复历史上下文;运行中的 Worker 继续工作。评估、待处理消息/动作/投递、人工运行中的 Router 或权限请求会暂缓回收 |
+| Router 评估超时 | `routerEvalTimeoutMin`，默认 10 分钟，可设 1–60 分钟。准备、推理、回读与一次格式纠正共享总时限，准备最多 1 分钟。超时会取消请求并丢弃迟到裁决。API 错误从 15 秒起指数退避，间隔最高 5 分钟，最多 20 次。连续三轮解析失败会暂停自动评估。 |
 | 对话空闲过期 | `threadIdleTimeoutMin`,默认 1440 分钟(24 小时),可设 5–43200 分钟。没有待处理工作时自动关闭 Thread 并回收遗留会话;有效入站、Worker 汇报与实际会话活动续期,巡检不续期。运行任务、待处理审批、跨线程活动或未送达回复会暂缓关闭。关闭后的新消息可重新激活仍被保留的线程;历史沿用现有保留上限。IM 跨日收口规则继续生效 |
 | Worker 待命回收 | `workerIdleTimeoutMin`,默认 1440 分钟(24 小时),可设 1–43200 分钟。长期空闲的 waiting 票据完结并退订全部线程,保留汇报,归档 Worker 与其独占工作区;共享工作区保留。回收意图落盘,失败后看门狗继续清理。有新消息、待执行动作、实际运行或审批时暂缓;Worker 本轮结束后仍留着后台 shell/监控(Paseo 0.16 上报的 `backgroundWork`)时也暂缓,等它们结束再回收。审批/问题等待超过 24 小时提醒一次,保留请求供人工处理 |
-| 工作目录 | 绝对路径,默认的基础目录(**必填**)。共享目录隔离时,默认 Worker 使用按此目录创建的普通持久工作区「默认 workspace」(同一目录只建一个,id 记在插件状态里跨重启复用;被归档会按标题+目录找回或重建),Router 与看门狗另用同目录的后台工作区;独立 worktree 隔离时它是每个 Ticket 切 worktree 的基准仓库。`worktree` 隔离时必须位于 git 仓库内,否则对话页与设置页都会提示、派发会带着目录与原因失败;Router 的评估提示词里也会写明该目录与隔离方式 |
-| Router provider/model | 设置页从 daemon 的 provider 快照中下拉选取(model id 原样带入,含 ACP 系的反斜杠 id;清单读取失败或所选 provider 未上报模型时退回手填)。留空自动选用宿主可用默认（Claude → Codex → OpenCode → 其他可用 provider）;填错时 Router 评估会报出可用 id。Codex 担任 Router 和 LLM 看门狗时使用只读沙箱，仍可读取工作区。使用 Pi 前请安装随附扩展，以启用工具限制 |
-| thinking 档位(可选) | Router、默认 Worker 与每个具名档位都可独立选 thinking 档位(字段 `routerThinkingOptionId`/`workerThinkingOptionId`/档位 `thinkingOptionId`),候选来自所选 provider/model 的 `thinkingOptions`(如 pi 的 low/medium/high/max)。选「Provider 默认」时不传 `thinkingOptionId`,回落 provider 自己的默认(pi 为 `~/.pi/agent/settings.json` 的 `defaultThinkingLevel`);快照未上报清单时可手工填档位 id。Router 的档位用于新建或重建的 Router 会话(存量会话不受影响,可用 `paseo agent update <id> --thinking <档位>` 热切);Worker 的档位随首条任务传入,只用于新建或重试的 Worker;具名档位留空不继承默认 Worker 的档位。启动前会对照快照校验,非法档位报出可用 ID,不静默回退 |
-| Router 自定义规则 | 设置页「Router 规则」直接填写,支持多行,最多 12000 字符,配置字段为 `routerInstructions`。用于答复语言、分派偏好和汇报格式,留空使用默认规则。每个 Thread 复用其 Router 会话;规则、模型或 thinking 配置变化时受控重建并恢复上下文,不依赖 provider 读取 `AGENTS.md`/`ROUTER.md`;不改变 Worker 的项目规则。自定义规则补充内置编排约束,Router 仍只做裁决并按 JSON actions 输出。裁决解析失败时,同一会话会收到具体语法或校验错误并在原评估超时预算内纠正一次;纠正仍失败则保留消息待重试,连续三轮失败暂停自动重试 |
+| 工作目录 | daemon 上的绝对路径。派发默认 Worker 时需要填写。共享隔离按目录复用工作区，worktree 隔离要求路径位于 Git 仓库内。 |
+| 推理 API 基础地址和 Router 模型 | `inferenceBaseUrl` 与 `routerModel`。使用支持函数调用的 Chat Completions API，地址包含版本路径，例如 `https://inference.example/v1`。插件补上 `/chat/completions`。需要 Bearer 鉴权时，在 daemon 环境设置 `SUPERAGENT_INFERENCE_API_KEY`。 |
+| thinking 档位（可选） | 默认 Worker 和具名档位可独立设置，候选来自 Paseo provider。 |
+| Router 自定义规则 | `routerInstructions`，支持多行，最多 12000 字符。随每次评估的系统消息发送。 |
 | IM 附件收件目录 | `imInboxDir`,daemon 主机上的绝对路径;留空为 `$PASEO_HOME/plugin-data/superagent/inbox`。聊天里收到的文件存到 `<目录>/<通道>/<北京时间日期>/<消息 id>/` 下,改后对下一条消息立即生效,不重连通道。各 Worker 档位的工作目录有自己的归档规则时,宜设成它们之外的中立目录,由 Worker 按规则移入任务目录 |
 | IM 单条消息上限 | 默认 600,可设 100–4000 字符,沿用配置字段 `imReplyMaxChars`。超长答复按段落/换行优先拆分为多条,添加 `[1/N]` 序号(计入上限)后顺序发送,正文完整保留;普通 emoji 按字素边界拆分。发送前保存全部分段,每段确认成功后记录进度;失败暂停,在对话页右侧栏「状态 → 未送达的 IM 回复」从失败段补发(这一栏只列发送中与发送失败的回复,全部发出后即消失)。重启恢复未完成的发送,已确认的段不重发。远端已接收但回执丢失或落盘前崩溃时,该段仍可能重复,通道未提供统一的恰好一次投递保证 |
 | Worker provider/model | 同上,建议配最强模型。配置了 Worker 档位时它是**默认 Worker**,可另填一句用途说明 |
 | Worker 模式(可选) | 默认 Worker 与每个具名档位都可独立选择模式。一般 provider 的候选直接来自所选 provider 的快照(含 ACP 动态模式),与 Paseo 输入框的模式 ID 一致,选「Paseo 默认」时不传 `modeId`,按 Paseo 默认行为启动;provider 选 **pi** 时候选改由 daemon 主机上的 [pi-permission-modes](https://pi.dev/packages/pi-permission-modes) 扩展提供(读 `PI_CODING_AGENT_DIR` 或 `~/.pi/agent` 下的 `permission-mode/permission-mode.json`,与扩展内置模式合并),选中的模式经 `PI_PERMISSION_MODE` 环境变量传给新建或重试的 Worker(pi 不上报 mode,传 `modeId` 会被拒绝);扩展未安装时只剩「Paseo 默认」,Worker 按 pi 自己的默认模式启动。具名档位留空也不继承默认 Worker 的模式。切换 provider 会清空旧模式,同一 provider 更换模型会保留模式。模式随首条任务一起传入,修改用于新建或重试的 Worker,不修改运行中的会话;一般 provider 不支持的模式会在启动前报出可用 ID,不会静默退回默认模式 |
 | Worker 档位 | 可选。默认 Worker 之外的具名档位(名字 + provider/model + 用途说明 + 可选专属工作目录),如 `code → codex/…`「写码、修 bug、跑测试」。Router 的 dispatch 用 `"profile":"<名字>"` 按用途为每个任务选档位;省略或名字不存在时用默认 Worker(后者记入裁决)。Router 只能用到这里列出的模型,触发文本无法把 Worker 引向任意 provider。档位的专属工作目录必须是绝对路径、可以和全局工作目录不同:worktree 隔离时该档位从自己的目录切 worktree,共享目录隔离时该目录有一个以档位名命名的持久工作区(与「默认 workspace」同一套复用机制)。Ticket 记录所选档位与实际模型:retry 沿用档位、按该档位当前设置的模型与目录启动;档位被删除后改用默认 Worker。不配置档位时行为与单一 Worker 完全一致 |
-| Worker 隔离 | `worktree`(默认,每 Ticket 独立分支工作区)/ `shared`(直接在基础目录里干活,不需要 git。默认 Worker 使用普通的「默认 workspace」,Router 与看门狗使用独立后台工作区;工作目录根下有 `AGENTS.md`/`CLAUDE.md` 时,Worker 按其中的归档规则放产出并完成要求的登记;没有规则时,每个 Ticket 的产出放进专属子目录 `tasks/<北京时间日期>-<标题>-<id 尾号>/`。Router 与 Worker 的提示词都会说明)。取消/关闭 Ticket 只归档 Worker 会话;Ticket 独占的 worktree 工作区一并归档,共享的持久工作区保留 |
-| Worker 后台运行 | `workerBackground`,默认关。开启后新建与重试的 Worker 建成 Paseo 0.16 的后台 agent:不进 Paseo 的标签页、默认列表、Router 的 Subagents 轨道与完成/出错通知,仍在本插件对话页按 Ticket 打开、可人工接管;独立 worktree 隔离时 Ticket 独占的工作区也建成后台工作区,共享的「默认 workspace」/档位工作区保持普通工作区。Worker 的权限请求与问题照常经 Router/IM 转告。关闭时 Worker 显式建成普通 agent,不会因父会话是后台而被继承隐藏。已在运行的 Worker 不受影响 |
+| Worker 隔离 | `worktree` 默认按工单创建隔离工作区。`shared` 按基础目录和档位复用持久工作区。 |
+| Worker 后台运行 | `workerBackground`，默认关闭。开启时，新建和重试的 Worker 不出现在 Paseo 默认列表，仍可从 Superagent 打开。 |
 | Worker 超时 / 失败重试次数 / 批处理窗口 / 单条消息上限 | 引擎调参(设置页「执行」分组,超出范围会就地提示) |
 | 投机执行 | 「主动与巡检」分组,默认关。开启后 Router 规则里出现投机执行说明,Router 可依据你在「Router 规则」里写的主动策略(如「群里有人反馈问题时,静默复现并尝试简单修复」)派发 `speculative` Worker;同时最多 2 个,超出的投机派发直接丢弃并记入裁决 |
-| LLM 看门狗 | 「主动与巡检」分组,默认关。看门狗模型留空沿用 Router 的模型;巡检间隔 5–240 分钟(默认 30)。没有未完结任务、也没有异常时跳过,不调用模型(Router 会话已释放、下次评估自动重建不算异常;已交付、在等后续消息的待命任务,Worker 空闲且自上次巡检无新动静时也不算;失败的 IM 回复只在两个巡检间隔内算异常,之后留给「状态」页补发);维护者正在和看门狗会话对话时本次巡检让路 |
+| LLM 看门狗 | 在「规则」里开启，默认关闭。`watchdogModel` 留空时沿用 Router 模型。间隔 5–240 分钟，默认 30。无异常且无需要关注的工单时跳过推理。 |
 | 注入委派 MCP | 开启后所有普通 agent 的会话注入 `superagent_dispatch` 工具。走**插件自持的本地 MCP server**(`127.0.0.1` 随机端口 + 随机密钥路径),不受宿主 "Paseo tools"(`mcp.injectIntoAgents`)开关影响。同一 endpoint 还按角色给编排自身的会话下发工具:Router 拿 `superagent_list`/`superagent_read`/`superagent_search`(只读回读与检索),Worker 拿 `superagent_unsubscribe`/`superagent_handback`(会话控制)——这部分不受本开关控制。角色工具在**每次会话启动时经 session_open 注入**——不能写进 agent 保存配置:同名 mcpServer 与插件注入冲突会被 daemon 拒绝,`toolPolicy` 预授权引用的 server 又必须出现在同一请求里,两条都走不通 |
 | 注入 provider | 允许注入上述 MCP 的 provider 家族,逗号分隔(如 `codex,claude`);留空 = claude,codex,opencode,omp,copilot。不支持 MCP server 的 provider(如 ACP 系)注入会导致会话启动失败,默认排除;pi 家族例外——走 env + pi 扩展通道(见 [pi 集成](pi.md)),在此填 `pi` 即向普通 pi 会话注入委派工具。Router/Worker 的角色工具注入同样按「默认名单 ∪ 此名单」的家族门控(provider 带 model 限定时按 `/` 前的家族判断;插件型 provider 如 zcode-acp 由 daemon 统一声明支持 MCP,想给它注入就在此配置) |
+
+## 从旧版升级
+
+旧的 Paseo Router 与看门狗 provider 选择不会转换为推理模型 ID。配置推理地址和模型后，程序对账会解除存量 Worker 与旧裁决会话的父子关系，再归档已空闲的旧会话。线程、工单、回复与巡检记录继续保留。

@@ -115,20 +115,6 @@ export function resolveProviderSelection(
   return { error: `model "${model}" is not offered by provider "${provider}" (available: ${available})` };
 }
 
-/**
- * 先按首选顺序选择 provider，再回退到快照中的第一个候选。
- */
-export function pickPreferredProvider<T extends ProviderSnapshotEntryLike>(
-  entries: ReadonlyArray<T>,
-  preferred: readonly string[],
-): T | undefined {
-  for (const provider of preferred) {
-    const entry = entries.find((candidate) => candidate.provider === provider);
-    if (entry) return entry;
-  }
-  return entries[0];
-}
-
 export interface WorkerProfileLike {
   name: string;
 }

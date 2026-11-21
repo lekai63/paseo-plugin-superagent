@@ -12,7 +12,7 @@
   ],
   "translations": {
     "zh-CN": {
-      "description": "Router/Worker 双层编排:每线程 Router 会话评估触发事件,按 Ticket 派发隔离 Worker,线程订阅直通,看门狗巡检"
+      "description": "Router/Worker 双层编排:Router 按线程调用推理 API 评估触发事件,按 Ticket 派发隔离 Worker,线程订阅直通,看门狗巡检"
     }
   },
   "requirements": {

@@ -1,9 +1,8 @@
-import type { PaseoApi, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
+import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
 import { resolve } from "node:path";
-import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { dailyImThreadKey, imConversationKey, imDay } from "../shared/im-threads";
-import { DecisionBudget } from "./decision-budget";
+import { runInference, type InferenceConfig, type Recall } from "./inference";
 import { Deadline, DeadlineError, bounded } from "./deadline";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginSettings } from "@getpaseo/plugin/server";
@@ -51,29 +50,22 @@ import {
 import {
   composeEvalPrompt,
   composeRouterInstructions,
-  composeBudgetExhaustedPrompt,
   composeVerdictRepairPrompt,
-  decisionAgentOptions,
-  ensureRouter,
   newDecision,
   parseVerdict,
-  routerUsesSystemPrompt,
-  routerSessionId,
-  routerCompactionSeq,
   type RouterWorkerEnvironment,
 } from "./router";
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
 import type { ToolOutcome } from "./mcp-server";
-import { matchWorkerProfile, pickPreferredProvider, resolveProviderSelection, validateProviderMode, validateProviderThinkingOption } from "./providers";
+import { matchWorkerProfile, resolveProviderSelection, validateProviderMode, validateProviderThinkingOption } from "./providers";
 import { readPiPermissionModes } from "./pi-modes";
-import { BACKGROUND_WORKSPACE_TITLE, ensureSharedWorkspace, detachRoleChildren, workspaceTitles } from "./workspace";
+import { ensureSharedWorkspace, detachRoleChildren, workspaceTitles } from "./workspace";
 import { t } from "./i18n";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 import { deliveryPreview, splitImReply } from "./im-replies";
 import {
   composePatrolPrompt,
   composeWatchdogInstructions,
-  ensureWatchdog,
   parseWatchdogVerdict,
   WATCHDOG_RUN_TIMEOUT_MS,
   type PatrolDigest,
@@ -107,8 +99,6 @@ const MAX_ACTION_ATTEMPTS = 3;
 const MAX_ABANDONED_ACTIONS = 3;
 /** 基础设施异常的自动重排上限;指数退避从 15s 起,最多等待 5 分钟。 */
 const MAX_EVAL_ERRORS = 20;
-/** 回读预算耗尽后补救轮至少要留的时间;不够就直接按预算耗尽报错。 */
-const BUDGET_VERDICT_MIN_MS = 15_000;
 /** 单线程 filtered 留痕上限:滚动保留最近这么多条(相邻消息内联的来源),旧的先丢。 */
 const MAX_FILTERED_TRIGGERS = 30;
 /** 评估时内联的未 @ 相邻群聊条数(§3.3 Inline:时空相邻的消息)。 */
@@ -231,7 +221,6 @@ export class SuperagentEngine {
   private currentEvalThread: string | null = null;
   private evalRuns = new Map<string, Deadline>();
   private watchdogInFlight = false;
-  private retiringRouters = new Set<string>();
   private retiringTickets = new Set<string>();
   private sendingWorkers = new Set<string>();
   private evalQueued = new Set<string>();
@@ -266,7 +255,7 @@ export class SuperagentEngine {
   private lastWatchdogNote: string | null = null;
   /** LLM 看门狗巡检进行中(单飞:一次巡检没结束不起下一次)。 */
   private patrolInFlight = false;
-  private decisionBudgets = new Map<string, DecisionBudget>();
+  private patrolRun: Deadline | null = null;
   /** 可注入时钟用于 IM 跨日边界,不受宿主时区影响。 */
   now = (): Date => new Date();
   private replySink: ReplySink | null = null;
@@ -293,6 +282,7 @@ export class SuperagentEngine {
   constructor(
     private readonly store: SuperagentStore,
     settings: PluginSettings<typeof superagentSettings.schema>,
+    private readonly inferenceRequest: typeof fetch = fetch,
   ) {
     store.onChange(() => this.markChanged());
     settings.subscribe((state) => {
@@ -387,6 +377,7 @@ export class SuperagentEngine {
     this.batchTimers.clear();
     this.watchedTickets.clear();
     for (const run of this.evalRuns.values()) run.cancel();
+    this.patrolRun?.cancel();
     this.primed = false;
     await this.deliveryChain;
     await this.store.flush();
@@ -1164,6 +1155,7 @@ export class SuperagentEngine {
     try {
       await this.runEval(next);
     } catch (error) {
+      if (!this.primed) return;
       console.error("[superagent] eval failed", error);
       // 异常走独立计数:瞬时故障(provider 未就绪等)按看门狗节奏持续重查,
       // 不与 unparsed(模型输出问题)共用 3 次熔断。
@@ -1195,7 +1187,7 @@ export class SuperagentEngine {
   }
 
   private async runEval(threadId: string): Promise<void> {
-    if (this.evalRuns.has(threadId) || this.retiringRouters.has(threadId)) throw new Error("Router lifecycle operation already in progress");
+    if (this.evalRuns.has(threadId)) throw new Error("Router evaluation already in progress");
     const startedAt = Date.now();
     const prepare = new Deadline(ROUTER_PREPARE_TIMEOUT_MS, "Router preparation");
     let run = prepare;
@@ -1205,12 +1197,6 @@ export class SuperagentEngine {
       run = new Deadline(Math.max(1, this.settingsValues.routerEvalTimeoutMin * 60_000 - (Date.now() - startedAt)), `Router evaluation ${threadId}`);
       this.evalRuns.set(threadId, run);
       await run.wait(() => this.evaluateThread(threadId, run, prepare));
-    } catch (error) {
-      run.cancel();
-      const router = this.store.get().threads.find((t) => t.id === threadId)?.router;
-      if (router?.dirty) await bounded(() => this.requirePaseo().agents.ref(router.agentId).reload(), "Router interrupt")
-        .catch((failure) => console.error("[superagent] decision interrupt failed", failure));
-      throw error;
     } finally {
       run.cancel();
       prepare.cancel();
@@ -1234,17 +1220,15 @@ export class SuperagentEngine {
     const batch = state.triggers.filter((t) => t.threadId === threadId && t.status === "pending");
     if (batch.length === 0) return;
 
-    // 1. Router 就绪(provider/目录未配置时给出可读错误)。
-    const routerProvider = await preparing(() => this.resolveProvider("router", state.kv.routerProvider));
-    if (!this.settingsValues.workingDir) {
-      throw new Error("working directory is not configured — set it in the Superagent screen");
-    }
-    if (!routerProvider) throw new Error("no available provider for the router");
+    const config = this.inferenceConfig("router");
+    const evaluatedWorkers = new Map(state.tickets.map((ticket) => [ticket.id, ticket.workerAgentId]));
     const worker: RouterWorkerEnvironment = {
       workingDir: this.settingsValues.workingDir,
       isolation: this.settingsValues.workerIsolation,
-      issue: await preparing(() => this.refreshWorkingDirIssue()),
-      instructionFiles: await preparing(() => this.instructionFilesFor(this.settingsValues.workingDir)),
+      issue: this.settingsValues.workingDir
+        ? await preparing(() => this.refreshWorkingDirIssue()) : "Worker working directory is not configured",
+      instructionFiles: this.settingsValues.workingDir
+        ? await preparing(() => this.instructionFilesFor(this.settingsValues.workingDir)) : [],
       defaultWorker: {
         provider: this.settingsValues.workerProvider.trim() || state.kv.workerProvider || null,
         description: this.settingsValues.workerDescription,
@@ -1253,335 +1237,266 @@ export class SuperagentEngine {
     };
     const ruleOptions = { speculative: this.settingsValues.speculativeEnabled };
     const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions, ruleOptions);
-    const options = decisionAgentOptions(routerProvider).options;
-    const configHash = createHash("sha256").update(JSON.stringify([
-      instructions, routerProvider, this.settingsValues.routerThinkingOptionId.trim(),
-      ...(options ? [options] : []),
-    ])).digest("hex");
-    // 旧版只有全局 Router,不能把它的混合历史认作当前线程的记忆。
-    const legacyId = state.kv.routerAgentId && !state.threads.some((t) => t.router?.agentId === state.kv.routerAgentId)
-      ? state.kv.routerAgentId : null;
-    if (legacyId) await preparing(() => detachRoleChildren(paseo, legacyId, () => { run.check(); prepare.check(); }));
-    const router = await preparing(() => ensureRouter(
-      paseo, thread, routerProvider,
-      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, workspaceTitles(BACKGROUND_WORKSPACE_TITLE), true),
-      instructions, configHash, this.settingsValues.routerThinkingOptionId.trim(),
-      () => { run.check(); prepare.check(); },
-    ));
-    const routerAgentId = router.agentId;
-    const remembered = router.created ? null : thread.router;
-    await this.store.update((next) => {
-      const target = next.threads.find((t) => t.id === threadId);
-      if (!target || target.state !== "active") return;
-      run.check();
-      target.router = remembered ?? {
-        agentId: routerAgentId, provider: routerProvider, configHash, sessionId: router.sessionId,
-        initialized: false, dirty: false, evaluations: 0, compactionSeq: 0, triggerIds: [],
-      };
-      next.kv.routerAgentId = routerAgentId; // 最近一次 Router,仅供旧客户端和诊断入口。
-      next.kv.routerProvider = routerProvider;
-      target.router.lastUsedAt = this.now().toISOString();
+    const contextTriggers = state.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered")
+      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt)).slice(-8);
+    const context = composeEvalPrompt({
+      thread, batch, state, worker, includeInstructions: false, includeHistory: true,
+      contextTriggers, chatter: this.chatterFor(state, threadId, batch), options: ruleOptions,
     });
+    const parsed = await runInference({
+      config, instructions, context, recall: this.inferenceRecall(threadId),
+      parse: parseVerdict, repair: (error) => composeVerdictRepairPrompt(threadId, error), deadline: run,
+    }, this.inferenceRequest);
     run.check();
-    if (legacyId) await preparing(() => paseo.agents.ref(legacyId).archive());
-    if (this.store.get().threads.find((t) => t.id === threadId)?.state !== "active") {
-      if (router.created) await bounded(() => router.handle.archive(), "unused Router archive");
-      return;
-    }
-    const compactionSeq = await preparing(() => routerCompactionSeq(router.handle));
-    const restore = router.created || !remembered?.initialized || compactionSeq === null
-      || compactionSeq > (remembered.compactionSeq ?? 0);
-    const unseenContext = state.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered"
-      && (restore || !remembered?.triggerIds.includes(trigger.id)))
-      .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
-    const contextTriggers = unseenContext.slice(-8);
-    const chatter = this.chatterFor(state, threadId, batch).filter((t) => restore || !remembered?.triggerIds.includes(t.id));
-    const prompt = composeEvalPrompt({
-      thread, batch, state, worker, routerInstructions: this.settingsValues.routerInstructions,
-      includeInstructions: restore && !routerUsesSystemPrompt(routerProvider),
-      includeHistory: restore, contextTriggers, chatter, options: ruleOptions,
-    });
-    // 半轮失败/超时/进程崩溃都留下 dirty,下轮从持久状态重建,避免重复执行旧裁决。
-    await this.store.update((next) => {
+    const replyText = parsed.text;
+    const triggerIds = batch.map((trigger) => trigger.id);
+    const stillPending = (current: SuperagentState) =>
+      current.threads.some((item) => item.id === threadId && item.state === "active") &&
+      triggerIds.every((id) => current.triggers.some((trigger) => trigger.id === id && trigger.status === "pending"));
+    state = this.store.get();
+    if (!stillPending(state)) return;
+
+    // 纠正后仍失败才记一次 unparsed,触发保留 pending,连续失败计数防失控循环。
+    const recordUnparsed = async (reason: string) => {
       run.check();
-      const current = next.threads.find((t) => t.id === threadId)?.router;
-      if (current?.agentId === routerAgentId) current.dirty = true;
-    });
-    const budget = new DecisionBudget();
-    this.decisionBudgets.set(routerAgentId, budget);
-    try {
-      run.check();
-      const evalDeadline = run.expiresAt;
-      const result = await this.runRouterDecision(router.handle, threadId, prompt, budget, run);
-      run.check();
-      let replyText =
-        result.lastMessage?.trim() || "";
-
-      // 3. 解析失败时把具体错误发回同一 Router,预算内仅纠正一次;期间不执行任何动作。
-      let parsed = parseVerdict(replyText);
-      state = this.store.get();
-      // 评估期间线程可能被关闭;丢弃迟到裁决,不能重新派发已取消的工作。
-      if (
-        state.threads.find((t) => t.id === threadId)?.state !== "active" ||
-        batch.some((trigger) => state.triggers.find((t) => t.id === trigger.id)?.status !== "pending")
-      ) return;
-      const remainingMs = evalDeadline - Date.now();
-      if ("error" in parsed && remainingMs > 0) {
-        const corrected = await this.runDecision(router.handle, composeVerdictRepairPrompt(threadId, parsed.error), remainingMs, false);
-        run.check();
-        replyText = corrected.lastMessage?.trim() || "";
-        parsed = parseVerdict(replyText);
-        state = this.store.get();
-        // 人工关闭或消费触发同样优先于迟到的纠正结果。
-        if (
-          state.threads.find((t) => t.id === threadId)?.state !== "active" ||
-          batch.some((trigger) => state.triggers.find((t) => t.id === trigger.id)?.status !== "pending")
-        ) return;
-      }
-      // 纠正后仍失败才记一次 unparsed,触发保留 pending,连续失败计数防失控循环。
-      const recordUnparsed = async (reason: string) => {
-        run.check();
-        const failures = (this.evalFailures.get(threadId) ?? thread.evalRetry?.unparsed ?? 0) + 1;
-        this.evalFailures.set(threadId, failures);
-        await this.store.update((next) => {
-          run.check();
-          const target = next.threads.find((t) => t.id === threadId);
-          if (target) target.evalRetry = { errors: target.evalRetry?.errors ?? 0, unparsed: failures, nextAt: null };
-          next.decisions.push(
-            newDecision(threadId, batch.map((t) => t.id), "unparsed", {
-              rationale: reason,
-              raw: truncate(replyText, 1200),
-            }),
-          );
-        });
-        run.check();
-        if (failures === 3) await this.notifyThread(threadId, t("server.engine.verdictFailed"));
-      };
-      if ("error" in parsed) {
-        await recordUnparsed(parsed.error);
-        return;
-      }
-      // dispatch 兜底:mandate 仅剩省略号时按解析失败处理(parseVerdict 已拒绝此类候选,
-      // 此处防解析路径放宽后空工单漏网),整批触发同样保留 pending 供重试。
-      const mandateBlock = parsed.verdict.actions
-        .filter((action): action is Extract<RouterAction, { action: "dispatch" }> => action.action === "dispatch")
-        .map((action) => dispatchMandateIssue(action.mandate))
-        .find((issue): issue is string => issue !== null);
-      if (mandateBlock) {
-        await recordUnparsed(mandateBlock);
-        return;
-      }
-      for (const action of parsed.verdict.actions) {
-        if (action.action !== "respond") continue;
-        const target = state.tickets.find((ticket) => ticket.id === action.ticketId);
-        if (!target?.pendingRequests?.some((request) => request.id === action.requestId)) {
-          await recordUnparsed(`respond must name a current pending request: ticketId=${action.ticketId} requestId=${action.requestId}`);
-          return;
-        }
-      }
-      this.evalFailures.delete(threadId);
-      this.evalErrors.delete(threadId);
-      const verdict = parsed.verdict;
-
-      // 4. 执行裁决:每个动作一条 Decision,带副作用的动作另立案待执行记录,一次落盘
-      //    (先落盘后副作用);stop 之后的动作作废,不再立案。
-      const triggerIds = batch.map((t) => t.id);
-      const actions = verdict.actions;
-      const decisions: Decision[] = [];
-      const createdTickets: Ticket[] = [];
-      /** 与已立案动作对齐的待执行记录;dispatch/reply/ignore 没有记录(null)。 */
-      const actionRecords: (PendingAction | null)[] = [];
-      const replies: string[] = [];
-      /** subscribe 动作:落盘时把票据挂到本线程(本线程票据恢复 subscribed,其他线程票据加入 follows)。 */
-      const subscribeTickets: string[] = [];
-      let liveSpeculative = state.tickets.filter((t) => t.speculative && !TERMINAL_TICKET_STATUSES.includes(t.status)).length;
-      let summary: string | null = null;
-      for (const action of actions) {
-        const decision = newDecision(threadId, triggerIds, action.action);
-        if (action.action === "dispatch") {
-          // 投机执行仅在设置开启时生效;并发上限内才立案,超出的直接丢弃(记入裁决)。
-          const speculative = Boolean(action.speculative) && this.settingsValues.speculativeEnabled;
-          if (speculative && liveSpeculative >= MAX_SPECULATIVE_TICKETS) {
-            decision.outcome = "ignore";
-            decision.rationale = `speculative dispatch "${truncate(action.title, 80)}" dropped: ${liveSpeculative} speculative tickets already running (limit ${MAX_SPECULATIVE_TICKETS})`;
-            decisions.push(decision);
-            actionRecords.push(null);
-            continue;
-          }
-          if (speculative) liveSpeculative += 1;
-          // 档位只能取自设置名单;未知名字退回默认 Worker 并记入裁决,派发本身不失败。
-          const choice = matchWorkerProfile(action.profile, this.settingsValues.workerProfiles, DEFAULT_WORKER_PROFILE);
-          if (choice.note) decision.rationale = choice.note;
-          const ticket: Ticket = {
-            id: newId("tkt"),
-            threadId,
-            title: action.title,
-            mandate: action.mandate,
-            status: "pending",
-            workerAgentId: null,
-            pendingRequests: [],
-            workspaceId: null,
-            ownsWorkspace: null,
-            branchName: null,
-            profile: choice.profile,
-            provider: null,
-            startedAt: null,
-            attempts: 0,
-            // 投机执行不订阅线程:闲聊与后续消息不打扰它,结果经汇报回流。
-            subscribed: speculative ? false : !action.unsubscribe,
-            follows: [],
-            speculative,
-            report: null,
-            lastError: null,
-            createdAt: decision.createdAt,
-            updatedAt: decision.createdAt,
-          };
-          decision.ticketId = ticket.id;
-          if (speculative) decision.rationale = [decision.rationale, "speculative background attempt"].filter(Boolean).join("; ");
-          createdTickets.push(ticket);
-          if (!summary && !speculative) summary = action.title;
-        } else if (action.action === "reply") {
-          decision.reply = action.reply;
-          replies.push(action.reply);
-          if (!summary) summary = action.reply;
-        } else if (action.action === "steer") {
-          decision.rationale = truncate(action.text, 300);
-        } else if (action.action === "respond") {
-          const owner = state.tickets.find((ticket) => ticket.id === action.ticketId);
-          const request = owner?.pendingRequests?.find((item) => item.id === action.requestId);
-          if (owner && request && !routerMayRespond(request, action.response)) {
-            // 硬约束:Router 不能批准授权类请求。不执行,改为把请求原文和批准码交给人,请求保持等待。
-            const notice = this.approvalNotice(owner, request);
-            decision.outcome = "reply";
-            decision.reply = notice;
-            decision.ticketId = owner.id;
-            decision.rationale = `blocked Router approval of ${request.kind} request ${request.id}: only the human can approve it`;
-            replies.push(notice);
-            decisions.push(decision);
-            actionRecords.push(null);
-            continue;
-          }
-          decision.rationale = `request ${action.requestId}: ${truncate(JSON.stringify(action.response), 1000)}`;
-        } else if (action.action === "subscribe") {
-          const target = state.tickets.find((t) => t.id === action.ticketId);
-          if (!target || TERMINAL_TICKET_STATUSES.includes(target.status)) {
-            decision.rationale = `ticket ${action.ticketId} ${target ? `is ${target.status}` : "not found"}; nothing subscribed`;
-          } else {
-            subscribeTickets.push(target.id);
-            decision.rationale = target.threadId === threadId
-              ? "re-subscribed to its own thread"
-              : `now also follows this thread (home thread ${target.threadId})`;
-          }
-        } else if ("rationale" in action) {
-          decision.rationale = action.rationale ?? null;
-        }
-        if ("ticketId" in action && action.ticketId) decision.ticketId = action.ticketId;
-        decisions.push(decision);
-        actionRecords.push(planPendingAction(threadId, decision.id, action,
-          "ticketId" in action ? state.tickets.find((ticket) => ticket.id === action.ticketId)?.workerAgentId : null));
-        if (action.action === "stop") break;
-      }
-      const decidedAt = decisions[0]?.createdAt ?? new Date().toISOString();
-      const replyDecision = decisions.filter((decision) => decision.outcome === "reply").at(-1);
-      const fullReply = replies.join("\n\n");
-      const origin = batch.find((trigger) => trigger.origin)?.origin;
-      const delivery = fullReply && origin && replyDecision ? {
-        id: `im-${replyDecision.id}`, threadId, origin,
-        parts: splitImReply(fullReply, this.settingsValues.imReplyMaxChars), nextPart: 0,
-        status: "pending" as const, sentMessageIds: [], createdAt: decidedAt, updatedAt: decidedAt,
-      } : null;
-
-      // 成功裁决也留一份截断的原始回复,挂在批内首条决策上:格式/占位类问题事后可审计。
-      decisions[0].raw = truncate(replyText, 1200);
-
+      const failures = (this.evalFailures.get(threadId) ?? thread.evalRetry?.unparsed ?? 0) + 1;
+      this.evalFailures.set(threadId, failures);
       await this.store.update((next) => {
         run.check();
-        delete next.kv.routerPromptState;
-        const memory = next.threads.find((t) => t.id === threadId)?.router;
-        if (memory?.agentId === routerAgentId) {
-          memory.initialized = true;
-          memory.dirty = false;
-          memory.sessionId = routerSessionId(router.handle.current()) ?? router.sessionId;
-          memory.compactionSeq = compactionSeq ?? 0;
-          memory.evaluations++;
-          memory.lastUsedAt = this.now().toISOString();
-          memory.triggerIds = [...new Set([...(restore ? [] : remembered?.triggerIds ?? []), ...triggerIds, ...unseenContext.map((t) => t.id), ...chatter.map((t) => t.id)])]
-            .filter((id) => next.triggers.some((t) => t.id === id));
-        }
-        if (delivery) next.imDeliveries.push(delivery);
-        next.decisions.push(...decisions);
-        next.tickets.push(...createdTickets);
-        for (const ticketId of subscribeTickets) {
-          const target = next.tickets.find((t) => t.id === ticketId);
-          if (!target) continue;
-          if (target.threadId === threadId) target.subscribed = true;
-          else target.follows = [...new Set([...followsOf(target), threadId])];
-          // 已完成待命的票据被重新订阅后回到待命(waiting),后续消息能唤醒它。
-          if (target.status === "completed" && target.workerAgentId) target.status = "waiting";
-          target.updatedAt = decidedAt;
-        }
-        next.pendingActions.push(...actionRecords.filter((record): record is PendingAction => record !== null));
-        for (const trigger of next.triggers) {
-          if (triggerIds.includes(trigger.id)) trigger.status = "evaluated";
-        }
         const target = next.threads.find((t) => t.id === threadId);
-        if (target) {
-          target.evalRetry = { errors: 0, unparsed: 0, nextAt: null };
-          target.updatedAt = decidedAt;
-          if (summary) target.summary = truncate(summary, 200);
-          if (replyDecision && replies.length > 0) {
-            target.latestResult = { id: replyDecision.id, kind: "router_reply", text: replies.join("\n\n"),
-              ticketIds: [...new Set(batch.filter((trigger) => trigger.kind === "report" && trigger.sender.startsWith("worker:"))
-                .map((trigger) => trigger.sender.slice("worker:".length)))], createdAt: decidedAt };
-          }
-        }
-        // stop 不在此处关闭线程:关闭发生在动作执行到 stop 时,否则先于 stop 的
-        // steer/cancel 会因票据已被批量取消而无法执行。
+        if (target) target.evalRetry = { errors: target.evalRetry?.errors ?? 0, unparsed: failures, nextAt: null };
+        next.decisions.push(
+          newDecision(threadId, batch.map((t) => t.id), "unparsed", {
+            rationale: reason,
+            raw: truncate(replyText, 1200),
+            inference: parsed.trace,
+          }),
+        );
       });
       run.check();
-
-      // 副作用按序执行;失败的动作留在待执行记录里由看门狗按上限重试,不再重放整批。
-      const launchQueue = [...createdTickets];
-      for (let index = 0; index < actionRecords.length; index++) {
-        run.check();
-        const action = actions[index];
-        const record = actionRecords[index];
-        if (action.action === "stop") {
-          if (record) await this.runPendingAction(record.id);
-          break;
-        }
-        // 以裁决结果为准:被丢弃的投机派发(记为 ignore)没有票据可启动。
-        if (decisions[index]?.outcome === "dispatch") {
-          const ticket = launchQueue.shift();
-          if (!ticket) continue;
-          void this.startTicket(ticket.id).catch((error) => {
-            console.error("[superagent] ticket launch failed", error);
-          });
-        } else if (record) {
-          await this.runPendingAction(record.id);
-        }
+      if (failures === 3) await this.notifyThread(threadId, t("server.engine.verdictFailed"));
+    };
+    if ("error" in parsed) {
+      await recordUnparsed(parsed.error);
+      return;
+    }
+    // dispatch 兜底:mandate 仅剩省略号时按解析失败处理(parseVerdict 已拒绝此类候选,
+    // 此处防解析路径放宽后空工单漏网),整批触发同样保留 pending 供重试。
+    const mandateBlock = parsed.verdict.actions
+      .filter((action): action is Extract<RouterAction, { action: "dispatch" }> => action.action === "dispatch")
+      .map((action) => dispatchMandateIssue(action.mandate))
+      .find((issue): issue is string => issue !== null);
+    if (mandateBlock) {
+      await recordUnparsed(mandateBlock);
+      return;
+    }
+    for (const action of parsed.verdict.actions) {
+      if (action.action !== "respond") continue;
+      const target = state.tickets.find((ticket) => ticket.id === action.ticketId);
+      const observedAgentId = evaluatedWorkers.get(action.ticketId);
+      if ((observedAgentId && observedAgentId !== target?.workerAgentId) ||
+        !target?.pendingRequests?.some((request) => request.id === action.requestId)) {
+        await recordUnparsed(`respond must name a current pending request: ticketId=${action.ticketId} requestId=${action.requestId}`);
+        return;
       }
+    }
+    this.evalFailures.delete(threadId);
+    this.evalErrors.delete(threadId);
+    const verdict = parsed.verdict;
 
-      // 5. 答复回投:IM 触发回原聊天;agent 委派回原会话。
+    // 4. 执行裁决:每个动作一条 Decision,带副作用的动作另立案待执行记录,一次落盘
+    //    (先落盘后副作用);stop 之后的动作作废,不再立案。
+    const actions = verdict.actions;
+    const decisions: Decision[] = [];
+    const createdTickets: Ticket[] = [];
+    /** 与已立案动作对齐的待执行记录;dispatch/reply/ignore 没有记录(null)。 */
+    const actionRecords: (PendingAction | null)[] = [];
+    const replies: string[] = [];
+    /** subscribe 动作:落盘时把票据挂到本线程(本线程票据恢复 subscribed,其他线程票据加入 follows)。 */
+    const subscribeTickets: string[] = [];
+    let liveSpeculative = state.tickets.filter((t) => t.speculative && !TERMINAL_TICKET_STATUSES.includes(t.status)).length;
+    let summary: string | null = null;
+    for (const action of actions) {
+      const decision = newDecision(threadId, triggerIds, action.action);
+      if (action.action === "dispatch") {
+        // 投机执行仅在设置开启时生效;并发上限内才立案,超出的直接丢弃(记入裁决)。
+        const speculative = Boolean(action.speculative) && this.settingsValues.speculativeEnabled;
+        if (speculative && liveSpeculative >= MAX_SPECULATIVE_TICKETS) {
+          decision.outcome = "ignore";
+          decision.rationale = `speculative dispatch "${truncate(action.title, 80)}" dropped: ${liveSpeculative} speculative tickets already running (limit ${MAX_SPECULATIVE_TICKETS})`;
+          decisions.push(decision);
+          actionRecords.push(null);
+          continue;
+        }
+        if (speculative) liveSpeculative += 1;
+        // 档位只能取自设置名单;未知名字退回默认 Worker 并记入裁决,派发本身不失败。
+        const choice = matchWorkerProfile(action.profile, this.settingsValues.workerProfiles, DEFAULT_WORKER_PROFILE);
+        if (choice.note) decision.rationale = choice.note;
+        const ticket: Ticket = {
+          id: newId("tkt"),
+          threadId,
+          title: action.title,
+          mandate: action.mandate,
+          status: "pending",
+          workerAgentId: null,
+          pendingRequests: [],
+          workspaceId: null,
+          ownsWorkspace: null,
+          branchName: null,
+          profile: choice.profile,
+          provider: null,
+          startedAt: null,
+          attempts: 0,
+          // 投机执行不订阅线程:闲聊与后续消息不打扰它,结果经汇报回流。
+          subscribed: speculative ? false : !action.unsubscribe,
+          follows: [],
+          speculative,
+          report: null,
+          lastError: null,
+          createdAt: decision.createdAt,
+          updatedAt: decision.createdAt,
+        };
+        decision.ticketId = ticket.id;
+        if (speculative) decision.rationale = [decision.rationale, "speculative background attempt"].filter(Boolean).join("; ");
+        createdTickets.push(ticket);
+        if (!summary && !speculative) summary = action.title;
+      } else if (action.action === "reply") {
+        decision.reply = action.reply;
+        replies.push(action.reply);
+        if (!summary) summary = action.reply;
+      } else if (action.action === "steer") {
+        decision.rationale = truncate(action.text, 300);
+      } else if (action.action === "respond") {
+        const owner = state.tickets.find((ticket) => ticket.id === action.ticketId);
+        const request = owner?.pendingRequests?.find((item) => item.id === action.requestId);
+        if (owner && request && !routerMayRespond(request, action.response)) {
+          // 硬约束:Router 不能批准授权类请求。不执行,改为把请求原文和批准码交给人,请求保持等待。
+          const notice = this.approvalNotice(owner, request);
+          decision.outcome = "reply";
+          decision.reply = notice;
+          decision.ticketId = owner.id;
+          decision.rationale = `blocked Router approval of ${request.kind} request ${request.id}: only the human can approve it`;
+          replies.push(notice);
+          decisions.push(decision);
+          actionRecords.push(null);
+          continue;
+        }
+        decision.rationale = `request ${action.requestId}: ${truncate(JSON.stringify(action.response), 1000)}`;
+      } else if (action.action === "subscribe") {
+        const target = state.tickets.find((t) => t.id === action.ticketId);
+        if (!target || TERMINAL_TICKET_STATUSES.includes(target.status)) {
+          decision.rationale = `ticket ${action.ticketId} ${target ? `is ${target.status}` : "not found"}; nothing subscribed`;
+        } else {
+          subscribeTickets.push(target.id);
+          decision.rationale = target.threadId === threadId
+            ? "re-subscribed to its own thread"
+            : `now also follows this thread (home thread ${target.threadId})`;
+        }
+      } else if ("rationale" in action) {
+        decision.rationale = action.rationale ?? null;
+      }
+      if ("ticketId" in action && action.ticketId) decision.ticketId = action.ticketId;
+      decisions.push(decision);
+      actionRecords.push(planPendingAction(threadId, decision.id, action,
+        "ticketId" in action ? state.tickets.find((ticket) => ticket.id === action.ticketId)?.workerAgentId : null));
+      if (action.action === "stop") break;
+    }
+    const decidedAt = decisions[0]?.createdAt ?? new Date().toISOString();
+    const replyDecision = decisions.filter((decision) => decision.outcome === "reply").at(-1);
+    const fullReply = replies.join("\n\n");
+    const origin = batch.find((trigger) => trigger.origin)?.origin;
+    const delivery = fullReply && origin && replyDecision ? {
+      id: `im-${replyDecision.id}`, threadId, origin,
+      parts: splitImReply(fullReply, this.settingsValues.imReplyMaxChars), nextPart: 0,
+      status: "pending" as const, sentMessageIds: [], createdAt: decidedAt, updatedAt: decidedAt,
+    } : null;
+
+    // 成功裁决也留一份截断的原始回复,挂在批内首条决策上:格式/占位类问题事后可审计。
+    decisions[0].raw = truncate(replyText, 1200);
+    decisions[0].inference = parsed.trace;
+
+    const recalledMemory = thread.routerMemory ?? [];
+    const memorySources = new Set([...batch.filter((item) => !item.context).map((item) => item.id),
+      ...recalledMemory.map((item) => item.triggerId)]);
+    const memory = verdict.memory?.every((item) => memorySources.has(item.triggerId)) ? verdict.memory : undefined;
+    let committed = false;
+    await this.store.update((next) => {
       run.check();
-      if (delivery) {
-        await this.sendImDelivery(delivery.id);
-      } else if (fullReply && !origin) {
-        const reply = truncate(fullReply, 2000);
-        const replyTarget = batch.find((t) => t.replyToAgentId)?.replyToAgentId ?? null;
-        if (replyTarget) {
-          try {
-            await bounded(() => paseo.agents.ref(replyTarget).send(reply, {
-              sourceAgentId: routerAgentId,
-              activeTurnBehavior: "steer",
-            }), "Router reply relay");
-          } catch (error) {
-            console.error("[superagent] reply relay to agent failed", error);
-          }
+      if (!stillPending(next)) return;
+      committed = true;
+      if (delivery) next.imDeliveries.push(delivery);
+      next.decisions.push(...decisions);
+      next.tickets.push(...createdTickets);
+      for (const ticketId of subscribeTickets) {
+        const target = next.tickets.find((t) => t.id === ticketId);
+        if (!target) continue;
+        if (target.threadId === threadId) target.subscribed = true;
+        else target.follows = [...new Set([...followsOf(target), threadId])];
+        // 已完成待命的票据被重新订阅后回到待命(waiting),后续消息能唤醒它。
+        if (target.status === "completed" && target.workerAgentId) target.status = "waiting";
+        target.updatedAt = decidedAt;
+      }
+      next.pendingActions.push(...actionRecords.filter((record): record is PendingAction => record !== null));
+      for (const trigger of next.triggers) {
+        if (triggerIds.includes(trigger.id)) trigger.status = "evaluated";
+      }
+      const target = next.threads.find((t) => t.id === threadId);
+      if (target) {
+        target.evalRetry = { errors: 0, unparsed: 0, nextAt: null };
+        target.updatedAt = decidedAt;
+        if (memory !== undefined) target.routerMemory = memory;
+        if (summary) target.summary = truncate(summary, 200);
+        if (replyDecision && replies.length > 0) {
+          target.latestResult = { id: replyDecision.id, kind: "router_reply", text: replies.join("\n\n"),
+            ticketIds: [...new Set(batch.filter((trigger) => trigger.kind === "report" && trigger.sender.startsWith("worker:"))
+              .map((trigger) => trigger.sender.slice("worker:".length)))], createdAt: decidedAt };
         }
       }
-    } finally {
-      if (this.decisionBudgets.get(routerAgentId) === budget) this.decisionBudgets.delete(routerAgentId);
+      // stop 不在此处关闭线程:关闭发生在动作执行到 stop 时,否则先于 stop 的
+      // steer/cancel 会因票据已被批量取消而无法执行。
+    });
+    run.check();
+
+    if (!committed) return;
+
+    // 副作用按序执行;失败的动作留在待执行记录里由看门狗按上限重试,不再重放整批。
+    const launchQueue = [...createdTickets];
+    for (let index = 0; index < actionRecords.length; index++) {
+      run.check();
+      const action = actions[index];
+      const record = actionRecords[index];
+      if (action.action === "stop") {
+        if (record) await this.runPendingAction(record.id);
+        break;
+      }
+      // 以裁决结果为准:被丢弃的投机派发(记为 ignore)没有票据可启动。
+      if (decisions[index]?.outcome === "dispatch") {
+        const ticket = launchQueue.shift();
+        if (!ticket) continue;
+        void this.startTicket(ticket.id).catch((error) => {
+          console.error("[superagent] ticket launch failed", error);
+        });
+      } else if (record) {
+        await this.runPendingAction(record.id);
+      }
+    }
+
+    // 5. 答复回投:IM 触发回原聊天;agent 委派回原会话。
+    run.check();
+    if (delivery) {
+      await this.sendImDelivery(delivery.id);
+    } else if (fullReply && !origin) {
+      const reply = truncate(fullReply, 2000);
+      const replyTarget = batch.find((t) => t.replyToAgentId)?.replyToAgentId ?? null;
+      if (replyTarget) {
+        try {
+          await bounded(() => paseo.agents.ref(replyTarget).send(reply, {
+            activeTurnBehavior: "steer",
+          }), "Router reply relay");
+        } catch (error) {
+          console.error("[superagent] reply relay to agent failed", error);
+        }
+      }
     }
   }
 
@@ -1889,7 +1804,6 @@ export class SuperagentEngine {
     if (!thread) return { ok: true };
     const retiring = state.tickets.filter((t) => t.threadId === record.threadId && t.workerAgentId);
     await this.markThreadClosed(record.threadId);
-    await this.retireThreadRouter(record.threadId);
     for (const ticket of retiring) await retireWorker(paseo, ticket, true);
     return { ok: true };
   }
@@ -1971,7 +1885,6 @@ export class SuperagentEngine {
         paseo,
         workerProvider,
         current,
-        state.threads.find((t) => t.id === current.threadId)?.router?.agentId ?? null,
         env,
       );
       let accepted = false;
@@ -2379,19 +2292,26 @@ export class SuperagentEngine {
   /** 到点(或 force)且设置开启时跑一次巡检;失败也记下时间,下个间隔再试,不在 15s 节奏里重试。 */
   async maybePatrol(force = false): Promise<void> {
     await this.store.ready;
-    if (!this.settingsValues.watchdogEnabled || !this.paseo || this.patrolInFlight) return;
+    await this.settingsReady;
+    if (!this.settingsValues.watchdogEnabled || !this.primed || !this.paseo || this.patrolInFlight) return;
     const last = this.store.get().kv.watchdog?.lastRunAt;
     const due = !last || Date.now() - Date.parse(last) >= this.settingsValues.watchdogIntervalMin * 60_000;
     if (!force && !due) return;
+    const run = new Deadline(WATCHDOG_RUN_TIMEOUT_MS, "Watchdog patrol");
+    this.patrolRun = run;
     this.patrolInFlight = true;
     this.markChanged();
     try {
-      await this.runPatrol();
+      await run.wait(() => this.runPatrol(run));
     } catch (error) {
-      const message = truncate(error instanceof Error ? error.message : String(error), 400);
-      await this.updateWatchdogState({ lastRunAt: new Date().toISOString(), lastError: message });
+      if (this.primed) {
+        const message = truncate(error instanceof Error ? error.message : String(error), 400);
+        await this.updateWatchdogState({ lastRunAt: this.now().toISOString(), lastError: message, lastActions: 0, inference: undefined });
+      }
       throw error;
     } finally {
+      run.cancel();
+      this.patrolRun = null;
       this.patrolInFlight = false;
       this.markChanged();
     }
@@ -2404,60 +2324,54 @@ export class SuperagentEngine {
     });
   }
 
-  private async runPatrol(): Promise<void> {
-    const paseo = this.requirePaseo();
-    const now = new Date();
-    const { digest, seen } = await this.collectPatrolDigest(now);
+  private async runPatrol(run: Deadline): Promise<void> {
+    const now = this.now();
+    const state = this.store.get();
+    const tickets = new Map(state.tickets.map((ticket) => [ticket.id, {
+      status: ticket.status, workerAgentId: ticket.workerAgentId, attempts: ticket.attempts, updatedAt: ticket.updatedAt,
+    }]));
+    const threads = new Map(state.threads.filter((thread) => thread.state === "active").map((thread) => [thread.id, {
+      updatedAt: thread.updatedAt, evalRetry: thread.evalRetry,
+    }]));
+    const { digest, seen } = await this.collectPatrolDigest(now, run);
+    run.check();
     if (digest.tickets.every((ticket) => ticket.parked) && digest.health.length === 0) {
-      // 无事可巡:不调用模型。仅有参考说明(如 Router 已释放)不算异常,看门狗也没有动作可做;
-      // 待命票据(已交付、等后续消息)在对话关闭前会一直挂着,同样不该每个间隔都唤醒模型。
       const parked = digest.tickets.length;
       const lastSummary = parked > 0 ? `nothing to patrol: ${parked} parked waiting ticket(s)` : "nothing to patrol";
-      await this.updateWatchdogState({ lastRunAt: now.toISOString(), lastSummary, lastError: null, lastActions: 0, seen });
+      await this.updateWatchdogState({ lastRunAt: now.toISOString(), lastSummary, lastError: null, lastActions: 0, seen, inference: undefined });
       return;
     }
-    const configured = this.settingsValues.watchdogProvider.trim();
-    const provider = configured
-      ? await this.validateConfiguredProvider("watchdog", configured)
-      : await this.resolveProvider("router", this.store.get().kv.routerProvider);
-    if (!provider) throw new Error("no available provider for the watchdog");
-    const instructions = composeWatchdogInstructions();
-    const state = this.store.get();
-    const watchdog = await ensureWatchdog(
-      paseo,
-      state,
-      provider,
-      () => this.sharedWorkspaceFor(this.settingsValues.workingDir, workspaceTitles(BACKGROUND_WORKSPACE_TITLE), true),
-      instructions,
-    );
-    if (!watchdog.created) {
-      await this.updateWatchdogState({ lastRunAt: now.toISOString(),
-        lastSummary: "skipped: the watchdog session is busy (a maintainer may be talking to it)" });
+    const config = this.inferenceConfig("watchdog");
+    const parsed = await runInference({
+      config, instructions: composeWatchdogInstructions(), context: composePatrolPrompt(digest, null),
+      recall: this.inferenceRecall(), parse: parseWatchdogVerdict,
+      repair: (error) => `The verdict could not be parsed: ${error}
+Return the full patrol JSON with summary and actions.`,
+      deadline: run,
+    }, this.inferenceRequest);
+    run.check();
+    if ("error" in parsed) {
+      await this.updateWatchdogState({ provider: config.model, lastRunAt: now.toISOString(),
+        lastError: `unparsed: ${truncate(parsed.error, 300)}`, lastActions: 0, inference: parsed.trace });
       return;
     }
-    // 先登记新会话,即使 run 超时/抛错,下轮也能归档它,不会遗留失联 agent。
-    await this.updateWatchdogState({ agentId: watchdog.agentId, provider });
-    const includeRules = !routerUsesSystemPrompt(provider);
-    this.decisionBudgets.set(watchdog.agentId, new DecisionBudget());
-    try {
-      const result = await this.runDecision(watchdog.handle, composePatrolPrompt(digest, includeRules ? instructions : null), WATCHDOG_RUN_TIMEOUT_MS);
-      const replyText = result.lastMessage?.trim() || "";
-      const parsed = parseWatchdogVerdict(replyText);
-      if ("error" in parsed) {
-        await this.updateWatchdogState({ agentId: watchdog.agentId, provider, lastRunAt: now.toISOString(),
-          lastError: `unparsed: ${truncate(parsed.error, 300)}` });
-        return;
-      }
-      const executed = await this.executeWatchdogActions(parsed.verdict.actions);
-      await this.updateWatchdogState({
-        agentId: watchdog.agentId, provider, lastRunAt: now.toISOString(),
-        lastSummary: truncate(parsed.verdict.summary, 300), lastError: null, lastActions: executed, seen,
-      });
-    } finally { this.decisionBudgets.delete(watchdog.agentId); }
+    const executed = await this.executeWatchdogActions(parsed.verdict.actions, run, (thread, ticket) => {
+      const prior = ticket ? tickets.get(ticket.id) : null;
+      const priorThread = threads.get(thread.id);
+      return Boolean(priorThread && thread.state === "active" && (ticket
+        ? prior && ticket.status === prior.status && ticket.workerAgentId === prior.workerAgentId
+          && ticket.attempts === prior.attempts && ticket.updatedAt === prior.updatedAt
+        : thread.updatedAt === priorThread.updatedAt && isDeepStrictEqual(thread.evalRetry, priorThread.evalRetry)));
+    });
+    run.check();
+    await this.updateWatchdogState({
+      provider: config.model, lastRunAt: now.toISOString(), lastSummary: truncate(parsed.verdict.summary, 300),
+      lastError: null, lastActions: executed, seen, inference: parsed.trace,
+    });
   }
 
   /** 巡检摘要:未完结票据的会话状态与进展增量,加引擎健康状况。 */
-  private async collectPatrolDigest(now: Date): Promise<{ digest: PatrolDigest; seen: WatchdogState["seen"] }> {
+  private async collectPatrolDigest(now: Date, run: Deadline): Promise<{ digest: PatrolDigest; seen: WatchdogState["seen"] }> {
     const paseo = this.requirePaseo();
     const state = this.store.get();
     const previous = state.kv.watchdog?.seen ?? {};
@@ -2470,6 +2384,7 @@ export class SuperagentEngine {
       .slice(0, 12);
     const tickets: PatrolTicket[] = [];
     for (const ticket of unfinished) {
+      run.check();
       let sessionStatus: string | null = null;
       let pendingPermissions = 0;
       let pendingRequests: readonly unknown[] = [];
@@ -2479,11 +2394,11 @@ export class SuperagentEngine {
       if (ticket.workerAgentId) {
         try {
           const ref = paseo.agents.ref(ticket.workerAgentId);
-          const snapshot = await ref.refresh();
+          const snapshot = await run.wait(() => bounded(() => ref.refresh(), "Patrol worker refresh"));
           sessionStatus = snapshot?.agent.status ?? null;
           pendingPermissions = snapshot?.agent.pendingPermissions?.length ?? 0;
           pendingRequests = snapshot?.agent.pendingPermissions ?? [];
-          const timeline = await ref.timeline.refetch({ direction: "tail", limit: 30 });
+          const timeline = await run.wait(() => bounded(() => ref.timeline.refetch({ direction: "tail", limit: 30 }), "Patrol worker timeline"));
           for (const entry of timeline.entries) {
             const seq = (entry as { seqEnd?: number }).seqEnd ?? entry.seqStart;
             if (latestSeq === null || seq > latestSeq) latestSeq = seq;
@@ -2495,6 +2410,7 @@ export class SuperagentEngine {
             .sort((a, b) => b.seqStart - a.seqStart)[0];
           if (assistant?.item.type === "assistant_message") latestMessage = assistant.item.text?.trim() || null;
         } catch (error) {
+          run.check();
           console.error("[superagent] watchdog could not read worker", ticket.workerAgentId, error);
         }
       }
@@ -2582,52 +2498,57 @@ export class SuperagentEngine {
     for (const ticket of state.tickets.filter((t) => t.status === "failed" && ago(t.updatedAt) <= window)) {
       lines.push(`ticket ${ticket.id} "${truncate(ticket.title, 60)}" failed ${ago(ticket.updatedAt)} min ago: ${truncate(ticket.lastError ?? "unknown error", 200)}`);
     }
-    if (!state.kv.routerAgentId && state.threads.some((t) => t.state === "active")) {
-      notes.push("no live Router agent; it is recreated on the next evaluation");
-    }
     return { health: lines, notes };
   }
 
   /** 执行看门狗动作:每个动作一条 watchdog 裁决留痕;取消/上报经引擎触发交 Router 告知人。 */
-  private async executeWatchdogActions(actions: WatchdogAction[]): Promise<number> {
+  private async executeWatchdogActions(
+    actions: WatchdogAction[], run: Deadline, current: (thread: Thread, ticket?: Ticket) => boolean,
+  ): Promise<number> {
     let executed = 0;
     for (const action of actions) {
+      run.check();
       const state = this.store.get();
       const ticket = "ticketId" in action && action.ticketId ? state.tickets.find((t) => t.id === action.ticketId) : undefined;
-      const threadId = ("threadId" in action && action.threadId) || ticket?.threadId || null;
-      if (!threadId || !state.threads.some((t) => t.id === threadId)) {
-        console.warn(`[superagent] watchdog ${action.action} skipped: unknown target`);
+      const threadId = ("threadId" in action && action.threadId) || ticket?.threadId;
+      const thread = state.threads.find((item) => item.id === threadId);
+      if (!thread || ("ticketId" in action && action.ticketId && !ticket)
+        || (ticket && ticket.threadId !== thread.id && !followsOf(ticket).includes(thread.id))
+        || !current(thread, ticket)) {
+        console.warn(`[superagent] watchdog ${action.action} skipped: unknown or changed target`);
         continue;
       }
       let note: string;
       try {
         if (action.action === "nudge" || action.action === "interrupt") {
           if (!ticket) continue;
-          const outcome = await this.applySteer(ticket.id, `[watchdog] ${action.text}`, action.action === "interrupt" ? "interrupt" : "steer");
+          const outcome = await this.applySteer(ticket.id, `[watchdog] ${action.text}`, action.action === "interrupt" ? "interrupt" : "steer", () => run.check());
           if (!outcome.ok) throw new Error(outcome.error);
           note = `${action.action}: ${action.text}`;
         } else if (action.action === "cancel") {
           if (!ticket) continue;
           await this.cancelTicket(ticket.id);
           note = `cancel: ${action.reason}`;
-          await this.enqueueEngineNote(threadId, `[watchdog] canceled ticket ${ticket.id} "${ticket.title}": ${action.reason}`);
+          await this.enqueueEngineNote(thread.id, `[watchdog] canceled ticket ${ticket.id} "${ticket.title}": ${action.reason}`);
         } else if (action.action === "retry") {
           if (!ticket) continue;
-          await this.retryTicket(ticket.id);
+          await this.retryTicket(ticket.id, () => run.check());
           note = `retry${action.reason ? `: ${action.reason}` : ""}`;
         } else if (action.action === "reeval") {
-          await this.forceEval(threadId);
+          await this.forceEval(thread.id);
           note = `reeval${action.reason ? `: ${action.reason}` : ""}`;
         } else {
           note = `escalate: ${action.text}`;
-          await this.enqueueEngineNote(threadId, `[watchdog]${ticket ? ` ticket ${ticket.id} "${ticket.title}":` : ""} ${action.text}`);
+          await this.enqueueEngineNote(thread.id, `[watchdog]${ticket ? ` ticket ${ticket.id} "${ticket.title}":` : ""} ${action.text}`);
         }
       } catch (error) {
+        run.check();
         note = `${action.action} failed: ${error instanceof Error ? error.message : String(error)}`;
       }
+      run.check();
       executed += 1;
       await this.store.update((next) => {
-        next.decisions.push(newDecision(threadId, [], "watchdog", { ticketId: ticket?.id ?? null, rationale: truncate(note, 500) }));
+        next.decisions.push(newDecision(thread.id, [], "watchdog", { ticketId: ticket?.id ?? null, rationale: truncate(note, 500) }));
       });
     }
     return executed;
@@ -2636,7 +2557,7 @@ export class SuperagentEngine {
   /** 引擎以触发形式把看门狗的结论交给线程的 Router,由 Router 统一对人表述。 */
   private async enqueueEngineNote(threadId: string, text: string): Promise<void> {
     const thread = this.store.get().threads.find((t) => t.id === threadId);
-    if (!thread) return;
+    if (!thread || thread.state !== "active") return;
     const originTrigger = this.store.get().triggers
       .filter((t) => t.threadId === threadId && ["evaluated", "delivered"].includes(t.status))
       .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
@@ -2777,47 +2698,7 @@ export class SuperagentEngine {
       }
     }
 
-    for (const thread of this.store.get().threads) {
-      if (!thread.router) continue;
-      if (thread.state === "closed") {
-        await this.retireThreadRouter(thread.id);
-        continue;
-      }
-      const routerId = thread.router.agentId;
-      const live = await bounded(() => paseo.agents.ref(routerId).refresh(), "Router refresh").catch((error) => {
-        console.error("[superagent] thread Router refresh failed", error);
-        return undefined;
-      });
-      if (live === undefined) continue;
-      if (!live || live.agent.archivedAt) {
-        await this.store.update((next) => {
-          const target = next.threads.find((t) => t.id === thread.id);
-          if (target?.router?.agentId === routerId) target.router = null;
-        });
-      } else if (live.agent.updatedAt && Date.parse(live.agent.updatedAt) > Date.parse(thread.router?.lastUsedAt ?? thread.updatedAt)) {
-        const at = live.agent.updatedAt;
-        await this.store.update((next) => {
-          const target = next.threads.find((t) => t.id === thread.id);
-          if (target?.router?.agentId === routerId) target.router.lastUsedAt = at;
-          this.touchThreads(next, [thread.id], at);
-        });
-      }
-    }
-    const latest = this.store.get().kv.routerAgentId;
-    if (latest && !this.store.get().threads.some((t) => t.router?.agentId === latest)) {
-      // 兼容旧版全局 id;不在这里归档尚未迁移的会话。
-      const live = await bounded(() => paseo.agents.ref(latest).refresh(), "legacy Router refresh").catch(() => undefined);
-      if (live !== undefined && (!live || live.agent.archivedAt)) await this.store.update((next) => { if (next.kv.routerAgentId === latest) next.kv.routerAgentId = null; });
-    }
-
-    // An idle Router can be retired while its Workers continue; the next evaluation restores history.
-    const routerCutoff = this.now().getTime() - this.settingsValues.routerIdleTimeoutMin * 60_000;
-    for (const thread of this.store.get().threads) {
-      if (thread.state !== "active" || !thread.router || this.threadHasPendingWork(thread.id)) continue;
-      if (Date.parse(thread.router.lastUsedAt ?? thread.updatedAt) > routerCutoff) continue;
-      try { await this.retireThreadRouter(thread.id, routerCutoff); }
-      catch (error) { console.error("[superagent] idle Router retirement failed", error); }
-    }
+    if (this.settingsValues.inferenceBaseUrl && this.settingsValues.routerModel) await this.retireLegacyDecisionAgents();
     for (const ticket of this.store.get().tickets) await this.expireIdleWorker(ticket.id);
 
     // Daily IM rollover and the general idle lease share the same safety checks.
@@ -2825,7 +2706,7 @@ export class SuperagentEngine {
     for (const thread of this.store.get().threads) {
       const daily = Boolean(thread.imDay && thread.imDay < imDay(this.now()));
       if (!this.canExpireThread(thread.id, cutoff, daily)) continue;
-      const ids = [thread.router?.agentId, ...this.store.get().tickets.filter((t) => t.threadId === thread.id).map((t) => t.workerAgentId)]
+      const ids = this.store.get().tickets.filter((t) => t.threadId === thread.id).map((t) => t.workerAgentId)
         .filter((id): id is string => Boolean(id));
       let busy = false;
       for (const id of ids) {
@@ -2918,98 +2799,57 @@ export class SuperagentEngine {
     // 关闭线程即整段收口:所有仍持有 Worker 的票据(含终态遗留)一并回收。
     const retiring = state.tickets.filter((t) => t.threadId === threadId && t.workerAgentId);
     await this.markThreadClosed(threadId);
-    await this.retireThreadRouter(threadId);
     for (const ticket of retiring) await retireWorker(paseo, ticket, true);
   }
 
-  private async retireThreadRouter(threadId: string, idleCutoff?: number): Promise<void> {
-    if (this.retiringRouters.has(threadId)) return;
-    const id = this.store.get().threads.find((t) => t.id === threadId)?.router?.agentId;
-    if (!id) return;
-    const eligible = () => {
-      const thread = this.store.get().threads.find((t) => t.id === threadId);
-      return thread?.router?.agentId === id && (idleCutoff === undefined || (!this.threadHasPendingWork(threadId)
-        && Date.parse(thread.router.lastUsedAt ?? thread.updatedAt) <= idleCutoff));
-    };
-    if (!eligible()) return;
-    this.retiringRouters.add(threadId);
-    try {
-      if (idleCutoff !== undefined) {
-        const live = await bounded(() => this.requirePaseo().agents.ref(id).refresh(), "idle Router refresh");
-        if (!eligible() || (live && !live.agent.archivedAt && (live.agent.status === "running" || live.agent.status === "initializing" || live.agent.pendingPermissions?.length))) return;
-      }
-      const detachDeadline = new Deadline(30_000, "Router detach children");
-      await detachDeadline.wait(() => detachRoleChildren(this.requirePaseo(), id, () => detachDeadline.check()));
-      if (!eligible()) return;
-      // If archival times out, the next evaluation must replace this possibly retiring session.
-      await this.store.update((next) => {
-        const router = next.threads.find((t) => t.id === threadId)?.router;
-        if (router?.agentId === id) router.dirty = true;
-      });
-      if (!eligible()) return;
-      await bounded(() => this.requirePaseo().agents.ref(id).archive(), "Router archive");
-      await this.store.update((next) => {
-        const target = next.threads.find((t) => t.id === threadId);
-        if (target?.router?.agentId === id) target.router = null;
-        if (next.kv.routerAgentId === id) next.kv.routerAgentId = null;
-      });
-    } finally { this.retiringRouters.delete(threadId); }
-  }
-
-  /** MCP 只读工具在执行前扣预算;预算由 runEval/runPatrol 创建。 */
-  beforeRecall(agentId: string, name: string, args: unknown): string | null {
-    return this.decisionBudgets.get(agentId)?.check(name, args) ?? null;
-  }
-
-  /** 放行的回读结果后附带的预算用量;不在评估/巡检中返回 null。 */
-  recallUsage(agentId: string): string | null {
-    return this.decisionBudgets.get(agentId)?.usage() ?? null;
-  }
-
-  /**
-   * Router 裁决运行。回读预算耗尽导致的中止(pi 扩展中止本轮,或服务端在模型
-   * 无视拒绝时硬中断)不是故障:在同一会话里补一轮「不再回读、立即裁决」,保留
-   * 已回读的上下文;补救仍失败才按评估错误上报,错误文案点明预算耗尽。
-   */
-  private async runRouterDecision(
-    handle: PaseoAgentHandle, threadId: string, prompt: string, budget: DecisionBudget, run: Deadline,
-  ) {
-    try {
-      return await this.runDecision(handle, prompt, Math.max(1, run.expiresAt - Date.now()), false);
-    } catch (error) {
-      if (!budget.exhausted || error instanceof DeadlineError) throw error;
-      const cause = error instanceof Error ? error.message : String(error);
-      // 只认预算造成的中止:服务端硬中断,或 pi 扩展 abort 后本轮以 aborted 结束。
-      if (!budget.error && !/\babort/i.test(cause)) throw error;
-      const exhausted = `Router recall budget exhausted after ${budget.used} recall calls`;
-      run.check();
-      if (run.expiresAt - Date.now() < BUDGET_VERDICT_MIN_MS) throw new Error(`${exhausted}; no time left for a verdict (${cause})`);
-      // 服务端硬中断只结束了等待,模型轮次可能还在跑:reload 中断它,会话历史保留。
-      if (budget.error) await bounded(() => handle.reload(), "Router interrupt");
-      budget.closeForVerdict();
+  private async retireLegacyDecisionAgents(): Promise<void> {
+    const state = this.store.get();
+    const ids = new Set([state.kv.routerAgentId, state.kv.watchdog?.agentId, ...state.threads.map((thread) => thread.router?.agentId)]);
+    for (const id of ids) {
+      if (!id) continue;
+      const handle = this.requirePaseo().agents.ref(id);
+      const deadline = new Deadline(30_000, "Legacy decision agent cleanup");
       try {
-        return await this.runDecision(handle, composeBudgetExhaustedPrompt(threadId, budget.used),
-          Math.max(1, run.expiresAt - Date.now()), false);
-      } catch (retryError) {
-        if (retryError instanceof DeadlineError) throw retryError;
-        throw new Error(`${exhausted} and no verdict followed (${retryError instanceof Error ? retryError.message : String(retryError)})`);
+        const live = await deadline.wait(() => handle.refresh());
+        if (live && !live.agent.archivedAt) {
+          if (["running", "initializing"].includes(live.agent.status) || live.agent.pendingPermissions?.length) continue;
+          await deadline.wait(() => detachRoleChildren(this.requirePaseo(), id, () => deadline.check()));
+          const latest = await deadline.wait(() => handle.refresh());
+          if (latest && !latest.agent.archivedAt) {
+            if (["running", "initializing"].includes(latest.agent.status) || latest.agent.pendingPermissions?.length) continue;
+            await deadline.wait(() => handle.archive());
+          }
+        }
+        await this.store.update((next) => {
+          for (const thread of next.threads) {
+            if (thread.router?.agentId === id) thread.router = null;
+          }
+          if (next.kv.routerAgentId === id) next.kv.routerAgentId = null;
+          if (next.kv.watchdog?.agentId === id) next.kv.watchdog = { ...next.kv.watchdog, agentId: null };
+        });
+      } catch (error) {
+        console.error("[superagent] legacy decision agent cleanup failed", error);
+      } finally {
+        deadline.cancel();
       }
     }
   }
 
-  private async runDecision(handle: PaseoAgentHandle, prompt: string, timeoutMs: number, interruptOnError = true) {
-    const budget = this.decisionBudgets.get(handle.id);
-    try {
-      const result = await bounded(() => Promise.race([handle.run(prompt, { timeoutMs }), ...(budget ? [budget.failed] : [])]), "decision run", timeoutMs);
-      if (result.status && result.status !== "idle") throw new Error(`decision run ${result.status}: ${result.error ?? "no final verdict"}`);
-      if (budget?.error) throw budget.error;
-      return result;
-    } catch (error) {
-      // SDK 的超时只结束等待;reload 才会中断仍在运行的模型轮次。
-      if (interruptOnError) await bounded(() => handle.reload(), "decision interrupt")
-        .catch((reloadError) => console.error("[superagent] decision interrupt failed", reloadError));
-      throw error;
-    }
+  private inferenceConfig(role: "router" | "watchdog"): InferenceConfig {
+    const settings = this.settingsValues;
+    return {
+      baseUrl: settings.inferenceBaseUrl,
+      model: (role === "watchdog" ? settings.watchdogModel : "") || settings.routerModel,
+      apiKey: process.env.SUPERAGENT_INFERENCE_API_KEY?.trim(),
+    };
+  }
+
+  private inferenceRecall(threadId?: string): Recall {
+    return {
+      list: () => this.listThreads(),
+      read: (id) => this.readRecord(id),
+      search: (query) => this.searchRecords(query, threadId),
+    };
   }
 
   /** 关闭线程的落盘部分:线程关闭、活跃票据取消、pending 触发消费。 */
@@ -3128,7 +2968,8 @@ export class SuperagentEngine {
         `title: ${thread.title}`,
         `state: ${thread.state}  createdAt: ${thread.createdAt}  updatedAt: ${thread.updatedAt}`,
         thread.imDay ? `IM day: ${thread.imDay} (Asia/Shanghai); conversation: ${thread.imConversationKey}` : null,
-        thread.router ? `routerAgent: ${thread.router.agentId}` : null,
+        thread.routerMemory?.length ? `thread memory:
+${JSON.stringify(thread.routerMemory)}` : null,
         thread.summary ? `summary: ${thread.summary}` : null,
         thread.latestResult
           ? `latestResult (${thread.latestResult.kind}, ${thread.latestResult.createdAt}):\n${truncate(thread.latestResult.text, 8000)}`
@@ -3216,11 +3057,11 @@ export class SuperagentEngine {
    * 裁决答复与理由里找「空格分词后全部命中」的记录,返回 ID + 短摘录,newest first。
    * 不知道 ID 时的回读入口;命中摘录取自外部输入,不可信框架由工具层附加。
    */
-  async searchRecords(query: string, callerAgentId?: string): Promise<string> {
+  async searchRecords(query: string, callerThreadId?: string): Promise<string> {
     await this.store.ready;
     const state = this.store.get();
     // 调用方 Router 本线程的待评估触发与线程本身已在提示词里,命中只会误导模型继续搜。
-    const own = callerAgentId ? state.threads.find((t) => t.router?.agentId === callerAgentId) ?? null : null;
+    const own = callerThreadId ? state.threads.find((t) => t.id === callerThreadId) ?? null : null;
     const terms = [...new Set(query.toLowerCase().split(/\s+/).filter((term) => term.length > 0))];
     if (terms.length === 0) {
       return "No usable keywords — pass one or more words that must appear in the record.";
@@ -3433,6 +3274,7 @@ export class SuperagentEngine {
           decision.threadId === thread.id && (!latest || decision.createdAt >= latest.createdAt) ? decision : latest, null);
         return {
           ...thread,
+          router: null,
           latestResult: threadResult(thread, state),
           lastDecision: lastDecision ? { outcome: lastDecision.outcome, createdAt: lastDecision.createdAt } : null,
           pendingTriggers: state.triggers.filter(
@@ -3444,10 +3286,11 @@ export class SuperagentEngine {
     return {
       revision: this.revision,
       configured: Boolean(settings.workingDir),
+      inferenceConfigured: Boolean(settings.inferenceBaseUrl && settings.routerModel),
       workingDir: settings.workingDir,
       workingDirIssue: this.cachedWorkingDirIssue(),
-      routerAgentId: state.kv.routerAgentId ?? null,
-      routerProvider: state.kv.routerProvider || settings.routerProvider || null,
+      routerAgentId: null,
+      routerProvider: settings.routerModel || null,
       workerProvider: state.kv.workerProvider || settings.workerProvider || null,
       workerProfiles: settings.workerProfiles.map(({ name, provider, modeId, thinkingOptionId, description, workingDir }) => ({
         name, provider, modeId: modeId ?? "", thinkingOptionId: thinkingOptionId ?? "", description, workingDir: workingDir ?? "",
@@ -3483,7 +3326,8 @@ export class SuperagentEngine {
         currentEvalThreadId: this.currentEvalThread,
         patrol: {
           enabled: settings.watchdogEnabled,
-          agentId: state.kv.watchdog?.agentId ?? null,
+          agentId: null,
+          inference: state.kv.watchdog?.inference,
           lastRunAt: state.kv.watchdog?.lastRunAt ?? null,
           lastSummary: state.kv.watchdog?.lastSummary ?? null,
           lastError: state.kv.watchdog?.lastError ?? null,
@@ -3612,7 +3456,7 @@ export class SuperagentEngine {
       }
       console.warn(`[superagent] worker profile "${name}" of ticket ${ticket.id} is no longer configured; using the default worker`);
     }
-    const provider = await this.resolveProvider("worker", state.kv.workerProvider);
+    const provider = await this.resolveWorkerProvider(state.kv.workerProvider);
     const modeId = await this.validateWorkerMode("worker", provider, this.settingsValues.workerModeId);
     const thinkingOptionId = await this.validateWorkerThinkingOption("worker", provider, this.settingsValues.workerThinkingOptionId);
     return { provider, profile: null, modeId, thinkingOptionId };
@@ -3673,21 +3517,16 @@ export class SuperagentEngine {
   /**
    * provider 解析:显式设置优先,其次沿用已记忆值,最后从 daemon 快照选择。
    */
-  private async resolveProvider(
-    role: "router" | "worker",
-    remembered: string | null | undefined,
-  ): Promise<string> {
-    const configured = role === "router" ? this.settingsValues.routerProvider : this.settingsValues.workerProvider;
-    if (configured.trim()) return this.validateConfiguredProvider(role, configured.trim());
+  private async resolveWorkerProvider(remembered: string | null | undefined): Promise<string> {
+    const configured = this.settingsValues.workerProvider.trim();
+    if (configured) return this.validateConfiguredProvider("worker", configured);
     if (remembered) return remembered;
     const paseo = this.requirePaseo();
     try {
       await paseo.providers.waitForReady({ timeoutMs: 20_000 }).catch(() => undefined);
       const snapshot = await paseo.providers.snapshot();
       const ready = snapshot.entries.filter((entry) => entry.enabled !== false && entry.status === "ready");
-      const pick = role === "router"
-        ? pickPreferredProvider(ready, PREFERRED_PROVIDERS)
-        : ready.find((entry) => PREFERRED_PROVIDERS.includes(entry.provider)) ?? ready[0];
+      const pick = ready.find((entry) => PREFERRED_PROVIDERS.includes(entry.provider)) ?? ready[0];
       if (!pick) return "";
       const model = pick.models?.find((m) => m.isDefault) ?? pick.models?.[0];
       return model ? `${pick.provider}/${model.id}` : pick.provider;

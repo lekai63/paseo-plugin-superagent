@@ -116,7 +116,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(superagentPiModesRpc, withPrime(() => readPiPermissionModes()));
 
   // agent 委派与编排工具入口:插件自持的本地 MCP endpoint(按调用方角色下发
-  // superagent_dispatch / Router 回读 / Worker 退订转回工具),经 session_open 注入。
+  // superagent_dispatch / Worker 退订转回工具),经 session_open 注入。
   // 通道独立于宿主 "Paseo tools" 开关。注意:角色工具只能走这条注入路径——写进
   // agent 保存配置会与插件注入同名冲突,daemon 会拒绝建会话。
   let dispatchEndpoint: SuperagentMcpEndpoint | null = null;

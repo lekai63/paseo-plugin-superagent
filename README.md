@@ -10,8 +10,8 @@ New here? Start with the [usage guide](docs/guide-EN.md) for install, a first ta
 
 ## Features
 
-- **The Router only decides.** One Router session per thread returns its verdict as JSON actions (dispatch, steer, respond, cancel, retry, subscribe, reply, ignore, stop). Superagent supplies read-only recall and search tools (Chain of Recall) and denies requests for other tools that providers send through Paseo. Codex Router and watchdog sessions use a read-only sandbox that permits workspace reads. Pi tool restrictions require the bundled extension.
-- **Workers execute tickets.** Each ticket gets its own worktree, or works in a shared directory. You can define named Worker profiles (different provider, model and working directory) and the Router picks one per task. Workers are children of the Router, visible under Subagents in the app, and you can take over any of them.
+- **The Router only decides.** It calls an independent inference API with the current triggers, thread memory, and access to read-only recall tools. The plugin validates and applies the JSON verdict.
+- **Workers execute tickets.** Each ticket gets a Paseo Worker in an isolated worktree or shared directory. Named profiles can select the model, purpose, and directory. Open a Worker from the Superagent Tasks sidebar.
 - **Direct delivery for subscriptions.** While a Worker is working in a thread, follow-up messages skip the Router and go straight to it (no model call). One Worker can follow several threads.
 - **You approve permission requests.** Allow once, deny, or answer a Worker question from its card in Superagent. Open the Worker's own Paseo session to review all provider choices. IM notices still include a short `/approve <code>` or `/deny <code>` command. The Router can answer Worker questions from context. Requests are persisted and reconciled after a restart.
 - **IM triggers.** Feishu, DingTalk and WeCom (official long-lived connections, no public endpoint needed), WeChat (Tencent's official ClawBot / iLink, QR-code login) and QQ (OneBot 11 / NapCat). Allowlists gate who can trigger; images, files, voice and video are downloaded to the daemon host and referenced in the message.
@@ -26,7 +26,7 @@ For the full feature description and design trade-offs, see [Architecture and de
 
 - Paseo daemon and all clients **0.16.0** or later, with plugins enabled on the daemon (**Settings → Plugins → Enable plugins**).
 - Daemon host: Node.js 20 or later with `npm` on the `PATH` (used to install dependencies).
-- At least one working agent provider (for example claude, codex, opencode or pi). A lightweight model for the Router and a strong model for Workers works best.
+- A Chat Completions inference API with function calling. Executing tasks also requires a Paseo Worker provider.
 - `worktree` isolation requires the working directory to be inside a git repository; `shared` isolation does not need git.
 
 ## Installation
@@ -49,11 +49,11 @@ See [Development and releases](docs/development-EN.md).
 
 ### Optional: pi extension
 
-If pi will act as the Router, a Worker or a delegation entry point, copy the bundled `pi-extension/superagent.js` to `~/.pi/agent/extensions/`. It is a manual copy, so copy it again after upgrading the plugin. See [pi integration](docs/pi-EN.md).
+For Pi Workers or delegation, copy `pi-extension/superagent.js` to `~/.pi/agent/extensions/`. Copy it again when the extension changes. [Pi integration](docs/pi-EN.md)
 
 ## Quick start
 
-1. In the Paseo app, open **Settings → Plugins → Superagent**, fill in the **Working directory** (required; an absolute path on the daemon host), pick providers and models for the Router and Worker if you like, and click **Save**. Every option is described in [Settings](docs/configuration-EN.md).
+1. In **Settings → Plugins → Superagent → Model**, enter the inference API base URL (for example, `https://inference.example/v1`) and Router model ID. Set `SUPERAGENT_INFERENCE_API_KEY` in the daemon environment if required. Set a working directory under **Basics** to dispatch Workers. [Settings](docs/configuration-EN.md)
 2. Click **Superagent** in the sidebar and describe a task in the composer. The Router either replies directly or dispatches a Worker and writes the result back into the conversation.
 3. In any agent session, type `/superagent <task>` to delegate work to the orchestrator; the Router's reply comes back to that session.
 4. To take instructions from a chat app, enable the channel and fill in its allowlist as described in [IM triggers](docs/im-EN.md).

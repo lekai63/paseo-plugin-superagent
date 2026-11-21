@@ -29,6 +29,7 @@ export const chat = {
     loadingConversation: "Loading conversation",
     statusUnavailable: "Status unavailable; retry first",
     loadingConfig: "Loading configuration",
+    needInference: "Configure the inference API and Router model in Superagent settings",
     needWorkingDir: "Set a working directory in settings first",
     workingDirUnavailable: "Working directory unavailable; Workers can't start for now",
   },

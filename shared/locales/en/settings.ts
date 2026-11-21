@@ -50,11 +50,12 @@ export const settings = {
   },
   model: {
     title: "Model",
-    info: "Pick from the daemon's provider snapshot (the same source used for startup validation). The model id is carried over from the option as-is, so there are no backslash-escaping mistakes or typos. If the list can't be loaded, you can enter provider or provider/model by hand. Leave the fields empty to select models automatically.",
-    routerHint: "Automatic selection prefers Claude, Codex, then OpenCode. Codex uses a read-only sandbox. Pi requires the bundled extension for tool restrictions.",
+    info: "Router and watchdog call the inference API. Worker models come from the Paseo host.",
+    inferenceBaseUrl: "Inference API base URL",
+    inferenceBaseUrlHint: "Include the API version path, such as /v1. Set SUPERAGENT_INFERENCE_API_KEY on the daemon host if the endpoint requires authentication.",
+    routerModel: "Router model",
+    routerHint: "Enter the model ID accepted by the inference API. Use a model that supports function calling.",
     auto: "Automatic",
-    routerThinking: "Router thinking level (optional)",
-    routerThinkingFallback: "Applies to new or rebuilt Router sessions; running sessions are unaffected",
     defaultWorker: "Default Worker",
     worker: "Worker",
     defaultWorkerHint: "Used when the Router doesn't specify a profile, or specifies one that doesn't exist",
@@ -110,10 +111,6 @@ export const settings = {
       label: "Router evaluation timeout (minutes)",
       hint: "Total time limit shared by preparation and the verdict; preparation takes at most 1 minute",
     },
-    routerIdleTimeout: {
-      label: "Router idle recycle (minutes)",
-      hint: "Archives an idle Router but keeps the conversation; it is rebuilt automatically on the next evaluation",
-    },
     threadIdleTimeout: {
       label: "Conversation idle expiry (minutes)",
       hint: "Default 1440 minutes; closing is deferred while there are running tasks, pending messages, or approvals",
@@ -144,11 +141,11 @@ export const settings = {
     },
     watchdog: {
       label: "LLM watchdog",
-      hint: "A separate patrol session that judges Worker progress and drift",
+      hint: "Checks whether Workers are making progress or drifting from their tickets",
     },
     watchdogModel: {
       label: "Watchdog model",
-      hint: "Leave empty to use the Router's model. Codex uses a read-only sandbox. Pi requires the bundled extension for tool restrictions.",
+      hint: "Enter an inference API model ID. Leave empty to use the Router model.",
       empty: "Same as Router",
     },
     interval: {

@@ -1,11 +1,11 @@
 # Superagent
 
-Superagent 让 Paseo 成为事件驱动的编排器。每个活跃对话有一个 Router agent 读取新消息并决定怎么处理;需要动手的工作交给 Worker agent,在独立的 worktree 或共享目录里执行,完成后汇报回对话。
+Superagent 让 Paseo 成为事件驱动的编排器。Router 通过独立推理 API 评估每段对话的新消息，Worker 在独立 worktree 或共享目录执行工单。Worker 汇报回到原对话。
 
 ## 工作方式
 
-- **Router**:每个对话一个 Router 会话,适合用轻量模型。它以 JSON 动作作答:派发 Worker、转向或取消 Worker、重试、回答 Worker 的提问或拒绝其权限请求、让 Worker 订阅本对话、答复、忽略或结束。它不能批准权限请求。Router 可以使用插件提供的只读回读与检索工具。
-- **Worker**:每个 Ticket 启动一个 Worker 会话,适合用更强的模型,挂在 Router 名下。Worker 在 app 里可见,可随时人工接管。具名 Worker 档位让 Router 按任务选择不同的 provider、模型、模式、thinking 档位或工作目录。
+- **Router**。每次评估把新消息、线程记忆和工单状态送给模型。模型输出结构化裁决，需要时可回读已有记录。
+- **Worker**。每张工单启动一个 Paseo Worker。具名档位可为不同任务配置模型、模式和工作目录。可以在 Superagent 任务侧栏打开 Worker 并人工接管。
 - **直通**:Worker 订阅了某个对话时,后续消息不经模型直接送达它。
 - **看门狗**:内置检查每 15 秒运行一次,找回错过的完成、卡住的启动、超时与待执行动作,daemon 重启后同样生效。可选的 LLM 看门狗按间隔检查任务进展。
 - **触发来源**:插件对话页、任意 agent 会话里的 `/superagent` 斜杠命令、可选注入到 agent 会话的 `superagent_dispatch` 工具,以及可选的 IM 通道:飞书、钉钉、企业微信、微信(腾讯 ClawBot / iLink)与 QQ(OneBot 11,经 NapCat)。
@@ -14,9 +14,9 @@ Superagent 让 Paseo 成为事件驱动的编排器。每个活跃对话有一�
 
 - daemon 与各端客户端需要 Paseo 0.16.0 或更新版本;daemon 主机需要 Node.js 20 或更新版本及 npm。
 - 打开 **Settings → Plugins → Superagent**,填写工作目录(daemon 主机上的绝对路径)。`worktree` 隔离要求它位于 git 仓库内,`shared` 隔离不需要。
-- 为 Router 和默认 Worker 选择 provider 与模型，也可留空自动选择。Router 按 Claude、Codex、OpenCode、其他可用 provider 的顺序选择。
+- 在「模型」中设置支持函数调用的 Chat Completions API 基础地址和 Router 模型 ID。需要鉴权时，在 daemon 环境设置 `SUPERAGENT_INFERENCE_API_KEY`。Worker 仍从 Paseo 选 provider。
 - 各 IM 通道默认关闭。开启时需要对应平台的机器人凭据,以及发送者或会话白名单;白名单为空的通道不会启动。微信通过扫描设置页里的二维码登录。
-- 使用 Pi 担任 Router、LLM 看门狗或 Worker 前，先安装随插件提供的 Pi 扩展。扩展限制 Router 和看门狗可用的工具，并提供 Superagent 的工具。配置步骤见 README。
+- 使用 Pi 执行任务或注入委派工具时，可安装随附的 Pi 扩展。
 
 界面为英文;Paseo 设为简体中文时显示简体中文。
 
@@ -27,7 +27,7 @@ Superagent 让 Paseo 成为事件驱动的编排器。每个活跃对话有一�
 - 开启的 IM 通道会连接飞书开放平台、钉钉 Stream、企业微信机器人服务或 `ilinkai.weixin.qq.com`,或你指定的 NapCat WebSocket。附件下载到 daemon 主机上的收件目录(单个文件上限 100 MB)。压缩包只列清单、不解压;列出 `.7z`/`.rar` 时调用本机已安装的 `7z`。
 - 插件在 `127.0.0.1` 的随机端口与随机路径上运行本地 MCP server,为自身的会话提供工具。
 - 对话页可经 daemon 只读、限量地预览答复里链接的任意绝对路径。
-- Provider 通过 Paseo 发出权限请求时，Superagent 拒绝 Router 和 LLM 看门狗使用外部工具、批准计划或切换模式。Codex 担任这两个角色时使用只读沙箱，仍可在无需权限请求的情况下读取工作区。
+- Router 与 LLM 看门狗的推理 API 只收到插件提供的上下文和只读编排回读结果。插件校验并执行裁决。
 - Worker 按其 provider 与模式的权限行事。
 - Worker 的工具、计划与模式请求只能由你批准。Superagent 把每个请求按 provider 原文、附一个短批准码,发到发起任务的对话(对话页,或来源的 IM 聊天、agent 会话)。在你发送 `/approve <批准码>` 或 `/deny <批准码> [原因]`,或在 Paseo 里打开该 Worker 会话处理之前,Worker 保持暂停。一次批准只放行这一个请求、这一次。
 - 批准命令只在以下来源有效:对话页、`/superagent` 斜杠命令,以及白名单 IM 发送者在请求所在聊天里发出的消息。agent 发来的消息(包括 `superagent_dispatch` 工具)和群里没有 @ 机器人的消息都不能批准任何请求。

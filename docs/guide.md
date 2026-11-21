@@ -47,7 +47,7 @@ paseo plugin install git:https://github.com/lekai63/paseo-plugin-superagent.git
 
 1. 打开 **Settings → Plugins → Superagent**。设置页分为五个标签:基础、模型、规则、执行、IM 触发源。
 2. 在**基础**里填写**工作目录**:daemon 主机上的绝对路径。选择**Worker 隔离**方式:按 Ticket 独立 worktree(默认)或共享目录。
-3. 在**模型**里为 Router 选一个轻量模型,为默认 Worker 选一个更强的模型。任一项留空时,引擎会自动选用第一个可用的 provider。
+3. 在**模型**里填写独立推理 API 地址和 Router 模型 ID。需要鉴权时，在 daemon 环境设置 `SUPERAGENT_INFERENCE_API_KEY`。默认 Worker provider 可以留空自动选择。
 4. 点击**保存**。
 5. 点侧栏的 **Superagent**,描述一个任务。
 
@@ -132,7 +132,7 @@ Router 的答复只回投给发起委派的会话,你可以继续在同一个 ag
 
 **基础** —— 工作目录、Worker 隔离、后台 Worker、委派注入。
 
-**模型** —— Router 的 provider/模型/thinking 档位,默认 Worker 的 provider/模型/模式/thinking 档位、默认 Worker 用途,以及具名 Worker 档位。
+**模型** —— 推理 API、Router 模型、默认 Worker provider 与模式、具名 Worker 档位。
 
 ![设置页模型标签](../assets/screenshots/superagent-settings-models.png)
 
@@ -181,7 +181,7 @@ Superagent 可以从飞书、钉钉、企业微信、微信和 QQ 接收指令,�
 
 **让一个 Worker 持续接话。** Worker 订阅了某对话时,后续消息不经模型直接送达它,输入框提示显示*直通 Worker*。
 
-**让它自己盯着。** 在**规则**里打开 LLM 看门狗。每隔一段时间,独立的 `Superagent Watchdog` 会话检查未完成的 Worker,判断是否有实质进展,必要时提醒、打断、取消或重试。你可以打开该会话问它看到了什么。
+**让它自己盯着。** 在**规则**里开启 LLM 看门狗。它按间隔调用推理 API 判断进展或偏离。插件在执行前核对工单状态，巡检结果显示在侧栏「状态」。
 
 ## 排障
 

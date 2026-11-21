@@ -9,8 +9,7 @@ import { ROUTER_LABEL, ROUTER_LABEL_VALUE, TICKET_LABEL } from "./router";
 /**
  * Worker 层:每个 Ticket 一个独立隔离的 Paseo agent。
  * worktree 隔离时每个 Ticket 一个独立 worktree 工作区;shared 隔离时 Worker
- * 落在该目录的普通持久共享工作区里。parent 指向后台工作区中的 Router,因此全部 Worker
- * 出现在 Router 会话的 Subagents track 里,可随时人工介入。
+ * 落在该目录的持久共享工作区里，Superagent 按 Ticket 展示并打开 Worker 会话。
  */
 
 /**
@@ -185,7 +184,6 @@ export async function launchWorker(
   paseo: PaseoApi,
   provider: string,
   ticket: Ticket,
-  routerAgentId: string | null,
   env: WorkerLaunchEnv,
 ): Promise<WorkerLaunch> {
   if (!provider) throw new Error("worker provider is not configured");
@@ -242,7 +240,6 @@ export async function launchWorker(
       prompt: composeWorkerPrompt(ticket, env.workingDir, env.isolation, env.instructionFiles),
       labels: { [TICKET_LABEL]: ticket.id },
       background: env.background,
-      ...(routerAgentId ? { parent: routerAgentId } : {}),
     });
     const actualBranch = branchName ? await resolveActualBranch(workspace, branchName) : null;
     return { agentId: agent.id, workspaceId: workspace.id, branchName: actualBranch, ownsWorkspace };

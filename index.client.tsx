@@ -10,7 +10,7 @@ import {
   SuperagentRuleSettingsScreen,
 } from "./client/settings-screen";
 import { superagentDispatchRpc } from "./shared/rpc";
-import { useExecutionAgents, useSuperagentState, useRouterAgents } from "./client/query";
+import { useExecutionAgents, useSuperagentState } from "./client/query";
 import { routerStatusMark, sidebarWorkerCounts } from "./shared/sidebar-status";
 import { SidebarRouterMark, SidebarWorkerCounts } from "./client/sidebar-worker-counts";
 import { messages, useReportLocale } from "./client/i18n";
@@ -30,8 +30,7 @@ function SuperagentSidebarItem({ currentScreen, openScreen, host, theme }: Plugi
     ? sidebarWorkerCounts(snapshot.tickets, Object.fromEntries(Object.entries(agents).map(([id, item]) => [id, item.agent]))) : null;
   // 有 Worker 在运行/待命时只显示 Worker 计数;状态不可用(counts 为 null)时两者都不显示。
   const workersQuiet = counts !== null && counts.running === 0 && counts.done === 0;
-  const routers = useRouterAgents(host.id, snapshot?.routerAgentId ?? null, workersQuiet);
-  const routerMark = workersQuiet && !routers.isError ? routerStatusMark(routers.data ?? []) : null;
+  const routerMark = routerStatusMark(snapshot);
   return (
     <SidebarRow
       icon="Network"

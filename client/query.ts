@@ -4,7 +4,7 @@ import { usePaseo, useRpc, useSubscription } from "@getpaseo/plugin/client";
 import type { PaseoAgent } from "@getpaseo/client";
 import type { RpcInput } from "@getpaseo/plugin";
 import { superagentPiModesRpc, superagentStateEventsSubscription, superagentStateRpc } from "../shared/rpc";
-import { ROUTER_AGENT_LABEL, ROUTER_AGENT_LABEL_VALUE, type SuperagentSnapshot } from "../shared/model";
+import type { SuperagentSnapshot } from "../shared/model";
 import type { ExecutionAgent } from "../shared/execution";
 
 /** 操作后按此前缀失效;具体快照再按宿主隔离。 */
@@ -240,29 +240,4 @@ export function useExecutionAgents(hostId: string, agentIds: string[]): Record<s
     loading: queries[index].isPending,
     error: queries[index].isError,
   }]));
-}
-
-/**
- * 枚举 daemon 里全部 Router 会话(按创建时打上的标签过滤,不扫全部 agent)。
- * 引擎只记住一个 id,但状态重置后旧 Router 会残留——多个并存时状态点要带数字。
- * 快照里记住的 id 兜底并入:标签枚举异常时至少能显示当前 Router 的状态。
- */
-export function useRouterAgents(hostId: string, routerAgentId: string | null | undefined, enabled: boolean) {
-  const paseo = usePaseo();
-  return useQuery({
-    queryKey: ["superagent", "routers", hostId, routerAgentId ?? null],
-    queryFn: async (): Promise<PaseoAgent[]> => {
-      const listed = await paseo.agents.list({ filter: { includeBackground: true, labels: { [ROUTER_AGENT_LABEL]: ROUTER_AGENT_LABEL_VALUE } } });
-      const agents = listed.entries.map((entry) => entry.agent).filter((agent) => !agent.archivedAt);
-      if (routerAgentId && !agents.some((agent) => agent.id === routerAgentId)) {
-        const remembered = (await paseo.agents.ref(routerAgentId).refresh())?.agent ?? null;
-        if (remembered && !remembered.archivedAt) agents.push(remembered);
-      }
-      return agents;
-    },
-    enabled,
-    staleTime: 2000,
-    refetchInterval: 5000,
-    retry: 1,
-  });
 }
