@@ -55,7 +55,8 @@ import {
 } from "./router";
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
 import type { ToolOutcome } from "./mcp-server";
-import { matchWorkerProfile, resolveProviderSelection, validateProviderMode, validateProviderThinkingOption } from "./providers";
+import { providerCanDecideOnly } from "../shared/decision-provider";
+import { matchWorkerProfile, pickDecisionProvider, resolveProviderSelection, validateProviderMode, validateProviderThinkingOption } from "./providers";
 import { readPiPermissionModes } from "./pi-modes";
 import { BACKGROUND_WORKSPACE_TITLE, ensureSharedWorkspace, detachRoleChildren, workspaceTitles } from "./workspace";
 import { t } from "./i18n";
@@ -3475,14 +3476,16 @@ export class SuperagentEngine {
   ): Promise<string> {
     const configured = role === "router" ? this.settingsValues.routerProvider : this.settingsValues.workerProvider;
     if (configured.trim()) return this.validateConfiguredProvider(role, configured.trim());
-    if (remembered) return remembered;
+    // 记住的值也要过一遍:升级前存下的 provider 可能已经不能担任只裁决角色。
+    if (remembered && this.providerUsableForRole(role, remembered)) return remembered;
     const paseo = this.requirePaseo();
     try {
       await paseo.providers.waitForReady({ timeoutMs: 20_000 }).catch(() => undefined);
       const snapshot = await paseo.providers.snapshot();
       const ready = snapshot.entries.filter((entry) => entry.enabled !== false && entry.status === "ready");
-      const pick =
-        ready.find((entry) => PREFERRED_PROVIDERS.includes(entry.provider)) ?? ready[0];
+      const pick = role === "router"
+        ? pickDecisionProvider(ready, PREFERRED_PROVIDERS)
+        : ready.find((entry) => PREFERRED_PROVIDERS.includes(entry.provider)) ?? ready[0];
       if (!pick) return "";
       const model = pick.models?.find((m) => m.isDefault) ?? pick.models?.[0];
       return model ? `${pick.provider}/${model.id}` : pick.provider;
@@ -3490,6 +3493,11 @@ export class SuperagentEngine {
       console.error("[superagent] provider discovery failed", error);
       return "";
     }
+  }
+
+  /** 该角色能不能用这个 provider:只有只裁决角色受限,Worker 不受影响。 */
+  private providerUsableForRole(role: "router" | "worker", selection: string): boolean {
+    return role === "worker" || providerCanDecideOnly(selection);
   }
 
   /**
@@ -3506,7 +3514,7 @@ export class SuperagentEngine {
       console.error("[superagent] provider snapshot unavailable; using configured provider as-is", error);
       return configured;
     }
-    const result = resolveProviderSelection(configured, entries);
+    const result = resolveProviderSelection(configured, entries, role === "worker" ? "worker" : "router");
     if ("error" in result) {
       throw new Error(`${role} provider setting "${configured}" is invalid: ${result.error}`);
     }

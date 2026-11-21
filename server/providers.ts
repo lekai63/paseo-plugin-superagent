@@ -7,6 +7,8 @@
  * 转义变成 `\\`;未知 model 传给 ACP agent 只会得到一句 "Internal error"。
  */
 
+import { decisionOnlyProviderError, providerCanDecideOnly, providerNameOf } from "../shared/decision-provider";
+
 export interface ProviderSnapshotEntryLike {
   provider: string;
   enabled?: boolean;
@@ -72,12 +74,17 @@ export type ProviderSelectionResult =
 export function resolveProviderSelection(
   raw: string,
   entries: ReadonlyArray<ProviderSnapshotEntryLike>,
+  role: "router" | "worker" = "worker", // router 一档同时覆盖 Router 与看门狗
 ): ProviderSelectionResult {
   const trimmed = raw.trim();
   const separator = trimmed.indexOf("/");
   const provider = (separator === -1 ? trimmed : trimmed.slice(0, separator)).trim();
   const model = separator === -1 ? "" : trimmed.slice(separator + 1).trim();
   if (!provider) return { error: `expected "provider/model", got "${trimmed}"` };
+  // 只裁决角色(Router/看门狗)必须能把工具关掉;该 provider 做不到时在这里挡下。
+  if (role === "router" && !providerCanDecideOnly(provider)) {
+    return { error: decisionOnlyProviderError("Router/watchdog", trimmed) };
+  }
 
   const entry = entries.find((candidate) => candidate.provider === provider);
   if (!entry) {
@@ -113,6 +120,18 @@ export function resolveProviderSelection(
 
   const available = models.map((candidate) => candidate.id).join(", ");
   return { error: `model "${model}" is not offered by provider "${provider}" (available: ${available})` };
+}
+
+/**
+ * 自动挑选只裁决角色可用的 provider:跳过无法关闭工具的 provider(codex),其余按
+ * 首选顺序或快照顺序。全部不可用时返回 undefined。
+ */
+export function pickDecisionProvider<T extends ProviderSnapshotEntryLike>(
+  entries: ReadonlyArray<T>,
+  preferred: readonly string[],
+): T | undefined {
+  const usable = entries.filter((entry) => providerCanDecideOnly(entry.provider));
+  return usable.find((entry) => preferred.includes(providerNameOf(entry.provider))) ?? usable[0];
 }
 
 export interface WorkerProfileLike {

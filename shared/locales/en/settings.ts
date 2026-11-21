@@ -51,7 +51,7 @@ export const settings = {
   model: {
     title: "Model",
     info: "Pick from the daemon's provider snapshot (the same source used for startup validation). The model id is carried over from the option as-is, so there are no backslash-escaping mistakes or typos. If the list can't be loaded, you can enter provider or provider/model by hand. When left empty, the choice is automatic in the order claude → codex → opencode.",
-    routerHint: "Only evaluates and dispatches, so a lightweight model is enough",
+    routerHint: "Only evaluates and dispatches, so a lightweight model is enough. Needs a provider whose tools the plugin can withhold; Codex is not offered because it always exposes tools",
     auto: "Automatic",
     routerThinking: "Router thinking level (optional)",
     routerThinkingFallback: "Applies to new or rebuilt Router sessions; running sessions are unaffected",
@@ -148,7 +148,7 @@ export const settings = {
     },
     watchdogModel: {
       label: "Watchdog model",
-      hint: "Leave empty to use the Router's model",
+      hint: "Leave empty to use the Router's model. Restricted to providers that can run without tools, like the Router",
       empty: "Same as Router",
     },
     interval: {

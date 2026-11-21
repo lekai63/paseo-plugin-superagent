@@ -4,7 +4,7 @@ Superagent turns Paseo into an event-driven orchestrator. Each active conversati
 
 ## How it works
 
-- **Router.** One Router session per conversation, ideally on a lightweight model. It answers with JSON actions: dispatch a Worker, steer or cancel one, retry, answer a Worker's question or decline its permission request, subscribe a Worker to the conversation, reply, ignore, or stop. It cannot approve a permission request. A permission hook rejects every other tool the Router tries to use, except the plugin's own read-only recall and search tools.
+- **Router.** One Router session per conversation, ideally on a lightweight model. It answers with JSON actions: dispatch a Worker, steer or cancel one, retry, answer a Worker's question or decline its permission request, subscribe a Worker to the conversation, reply, ignore, or stop. It cannot approve a permission request. A permission hook rejects every other tool the Router tries to use, except the plugin's own read-only recall and search tools. The Router and the LLM watchdog run only on providers where that hook is effective; Codex is excluded because its read-only sandbox still allows reads that never raise a permission request.
 - **Workers.** Each ticket starts a Worker session, ideally on a stronger model, as a child of the Router. Workers are visible in the app and you can take over any of them. Named Worker profiles let the Router choose a different provider, model, mode, thinking level or working directory per task.
 - **Direct delivery.** While a Worker is subscribed to a conversation, follow-up messages go straight to it without a model call.
 - **Watchdog.** A built-in check runs every 15 seconds to recover missed completions, stuck launches, timeouts and pending actions, including after a daemon restart. An optional LLM watchdog reviews task progress on an interval.
@@ -14,7 +14,7 @@ Superagent turns Paseo into an event-driven orchestrator. Each active conversati
 
 - Requires Paseo 0.16.0 or later on the daemon and every client, and Node.js 20 or later with npm on the daemon host.
 - Open **Settings → Plugins → Superagent** and set the working directory, an absolute path on the daemon host. `worktree` isolation needs it to be inside a git repository; `shared` isolation does not.
-- Pick providers and models for the Router and the default Worker, or leave them empty to use the first available one (claude, then codex, then opencode, then any other).
+- Pick providers and models for the Router and the default Worker, or leave them empty to use the first available one (claude, then codex, then opencode, then any other). The Router and the optional LLM watchdog are limited to providers whose tools the plugin can withhold, so Codex is not offered for them; a Worker can still use Codex.
 - Each IM channel is off by default. Enabling one needs that platform's bot credentials and an allowlist of senders or chats; a channel with an empty allowlist does not start. WeChat logs in by scanning a QR code shown in settings.
 - To use pi as the Router or a Worker, copy the bundled pi extension into pi's extensions directory. The README has the exact steps and install sources.
 

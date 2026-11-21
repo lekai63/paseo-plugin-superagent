@@ -17,6 +17,7 @@ import { approvalCode } from "../server/approvals.ts";
 const oldTime = "2020-01-01T00:00:00.000Z";
 
 const PROVIDER_ENTRIES = [
+  { provider: "claude", enabled: true, status: "ready", models: [{ id: "sonnet", isDefault: true }], modes: [{ id: "default" }] },
   { provider: "codex", enabled: true, status: "ready", models: [{ id: "test", isDefault: true }], modes: [{ id: "full-access" }, { id: "read-only" }] },
   {
     provider: "zcode-acp", enabled: true, status: "ready",
@@ -66,7 +67,7 @@ async function until(predicate) {
 function fixture(t, status = "running", subscribed = true) {
   const state = emptyState();
   Object.assign(state.kv, {
-    backgroundWorkspaces: { "/mock/repo": "role-workspace" }, routerAgentId: "router", routerProvider: "codex/test", workerProvider: "codex/test",
+    backgroundWorkspaces: { "/mock/repo": "role-workspace" }, routerAgentId: "router", routerProvider: "claude/sonnet", workerProvider: "codex/test",
   });
   state.threads.push({
     id: "thread", key: "manual:test", title: "test", state: "active", summary: null,
@@ -235,7 +236,7 @@ function fixture(t, status = "running", subscribed = true) {
     onChange: () => () => {},
   };
   const values = {
-    ...SETTINGS_DEFAULTS, workingDir: "/mock/repo", routerProvider: "codex/test", workerProvider: "codex/test",
+    ...SETTINGS_DEFAULTS, workingDir: "/mock/repo", routerProvider: "claude/sonnet", workerProvider: "codex/test",
   };
   const engine = new SuperagentEngine(store, {
     subscribe: (listener) => { controls.settingsChanged = listener; }, read: async () => ({ status: "ready", values }),
@@ -2585,7 +2586,7 @@ test("the LLM watchdog patrols unfinished work, judges progress across patrols, 
   const created = f.calls.watchdogCreates[0];
   assert.equal(created.labels["superagent.role"], "watchdog");
   assert.match(created.config.systemPrompt, /Superagent Watchdog instructions/);
-  assert.deepEqual(created.config.options, { sandbox_mode: "read-only" }, "codex sessions get a read-only sandbox");
+  assert.equal(created.config.options, undefined, "decision-only sessions add no provider options");
   assert.match(f.calls.patrols[0], /### ticket "test" — status=running/);
   assert.match(f.calls.patrols[0], /activity: first patrol for this ticket/);
   assert.match(f.calls.patrols[0], /latest worker message \(excerpt\):\n```text\nwork completed/);
@@ -2754,11 +2755,38 @@ test("messages that arrive before the engine starts are kept and delivered once 
   assert.equal(f.engine.orchestrationRole("someone-else"), null);
 });
 
-test("a new codex Router is created with a read-only sandbox", async (t) => {
+test("codex cannot serve as the Router: the sandbox cannot withhold tools, so it is refused", async (t) => {
   const f = fixture(t, "waiting");
   f.state.kv.routerAgentId = null;
+  f.values.routerProvider = "codex/test";
+  await assert.rejects(evaluateRouter(f, "first event"), /cannot run as a decision-only session/);
+  assert.equal(f.calls.routerCreates.length, 0, "no Router agent is created with a provider that cannot withhold tools");
+});
+
+test("an automatic Router pick skips codex and lands on a provider that can withhold tools", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.kv.routerAgentId = null;
+  f.state.kv.routerProvider = null;
+  f.values.routerProvider = "";
   await evaluateRouter(f, "first event");
-  assert.deepEqual(f.calls.routerCreates[0].config.options, { sandbox_mode: "read-only" });
+  assert.equal(f.calls.routerCreates[0].config.provider, "claude/sonnet");
+});
+
+test("a remembered codex Router is not reused: the next evaluation picks another provider", async (t) => {
+  const f = fixture(t, "waiting");
+  f.state.kv.routerProvider = "codex/test";
+  f.values.routerProvider = "";
+  await evaluateRouter(f, "first event");
+  assert.equal(f.calls.routerCreates[0].config.provider, "claude/sonnet");
+});
+
+test("the watchdog refuses codex but still allows it for Workers", async (t) => {
+  const f = fixture(t, "running");
+  f.values.watchdogEnabled = true;
+  f.values.watchdogProvider = "codex/test";
+  await assert.rejects(f.engine.maybePatrol(true), /cannot run as a decision-only session/);
+  f.values.workerProvider = "codex/test";
+  assert.equal(await f.engine.resolveProvider("worker", null), "codex/test", "Workers may use codex");
 });
 
 
