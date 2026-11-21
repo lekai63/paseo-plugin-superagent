@@ -14,6 +14,7 @@ import {
   TERMINAL_TICKET_STATUSES,
   type RouterVerdict,
   RouterVerdictSchema,
+  type TriggerOrigin,
 } from "../shared/model";
 
 /** 旧 Router 会话标签供升级识别；Ticket 标签仍用于 Worker。 */
@@ -276,6 +277,8 @@ const SPECULATIVE_RULES = [
 export interface RouterInstructionOptions {
   /** 投机执行开关(设置 speculativeEnabled)。 */
   speculative?: boolean;
+  /** 本批触发的 IM 渠道:答复风格指南随 system 提示下发(同渠道跨轮字节稳定,利于前缀缓存)。 */
+  channel?: TriggerOrigin["channel"];
 }
 
 /** 固定规则与示例在前,配置在后;目录临时故障只进入本轮动态消息。 */
@@ -317,6 +320,17 @@ export function composeRouterInstructions(
     routerInstructions?.trim() || "No custom Router preferences are configured. Use the built-in rules only.",
   );
   lines.push("", ...workerEnvironmentLines({ ...worker, issue: null }), ...workerProfileLines(worker));
+  // 渠道答复风格放在最后:按渠道分叉,同渠道跨轮保持字节稳定(前缀缓存)。
+  if (options.channel) {
+    lines.push(
+      "", "## Reply style for this channel",
+      `The human reads your replies inside a chat client (${options.channel}):`,
+      "keep replies concise — a few sentences (under ~100 words) unless the human explicitly",
+      "asks for detail; prefer plain text over tables and heavy markup. When the useful output",
+      "is long, dispatch a worker, then relay a short summary and where the full result lands",
+      "instead of pasting it. Multi-part splitting is automatic; do not pad or number parts.",
+    );
+  }
   return lines.join("\n");
 }
 
@@ -403,19 +417,6 @@ export function composeEvalPrompt({
       lines.push(`id: ${trigger.id} from: ${trigger.sender}`, "```text", truncate(trigger.text, 1000), "```");
       if (trigger.text.length > 1000) lines.push(`[truncated — full text: superagent_read ${trigger.id}]`);
     }
-  }
-  // 渠道风格(§4.2):答复要匹配回投渠道——IM 聊天要短,长内容交给 Worker 产出。
-  const originChannels = [...new Set(batch.filter((trigger) => trigger.origin).map((trigger) => trigger.origin!.channel))];
-  if (originChannels.length > 0) {
-    lines.push(
-      "## Reply style for this channel",
-      `The human reads your replies inside a chat client (${originChannels.join(", ")}):`,
-      "keep replies concise — a few sentences (under ~100 words) unless the human explicitly",
-      "asks for detail; prefer plain text over tables and heavy markup. When the useful output",
-      "is long, dispatch a worker, then relay a short summary and where the full result lands",
-      "instead of pasting it. Multi-part splitting is automatic; do not pad or number parts.",
-      "",
-    );
   }
   if (chatter.length > 0) {
     lines.push("## Recent unaddressed chat in this conversation (filtered at admission; context only)");

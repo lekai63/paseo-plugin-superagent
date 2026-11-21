@@ -3,7 +3,7 @@ import { Platform, Pressable, Text, View } from "react-native";
 import { useQueryClient } from "@tanstack/react-query";
 import { useRpc, useSettings, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { Icon, useToast } from "@getpaseo/plugin/client/ui";
-import type { SuperagentSnapshot, Ticket } from "../shared/model";
+import type { SuperagentSnapshot, Ticket, InferenceTrace } from "../shared/model";
 import { SUBSCRIBED_STATUSES, TERMINAL_TICKET_STATUSES } from "../shared/model";
 import { agentStatus, currentTickets, directTickets, elapsedTime, followsOf, subscribesTo, ticketPriority } from "../shared/execution";
 import {
@@ -166,6 +166,14 @@ function observationStatus(observation: AgentObservation | undefined, t: Transla
   return agentStatus(observation.agent, t);
 }
 
+/** 推理 trace 一行:模型 · 耗时 · 回读次数,服务上报缓存命中时附占比。 */
+function inferenceTraceText(trace: InferenceTrace, t: Translate): string {
+  const extra = trace.cachedInputTokens !== undefined && trace.inputTokens
+    ? ` · ${t("sidebar.status.inferenceCache", { percent: Math.round(trace.cachedInputTokens / trace.inputTokens * 100) })}`
+    : "";
+  return t("sidebar.status.inferenceTrace", { model: trace.model, ms: trace.durationMs, calls: trace.recallCalls, extra });
+}
+
 function TasksTab({ snapshot, routerDecisions = snapshot.decisions, threadId, onSelectThread, onThreadClosed, theme, hostId, navigation }: ChatSidebarProps & { snapshot: SuperagentSnapshot }) {
   const t = useT();
   const thread = threadId ? snapshot.threads.find((item) => item.id === threadId) : undefined;
@@ -232,7 +240,7 @@ function RouterCard({ snapshot, routerDecisions, threadId, theme }: {
       {latest && trace ? (
         <>
           <CardMeta theme={theme} lines={2}>{latest.id}</CardMeta>
-          <CardMeta theme={theme} lines={2}>{t("sidebar.status.inferenceTrace", { model: trace.model, ms: trace.durationMs, calls: trace.recallCalls })}</CardMeta>
+          <CardMeta theme={theme} lines={2}>{inferenceTraceText(trace, t)}</CardMeta>
           <CardMeta theme={theme} lines={2}>{actions.slice().reverse().map((decision) => outcomeLabel(decision.outcome, t)).join(" · ")}</CardMeta>
           {latest.rationale ? <CardMeta theme={theme} lines={2}>{latest.rationale}</CardMeta> : null}
           {latest.triggerIds.length ? <CardMeta theme={theme} lines={2}>{latest.triggerIds.join(", ")}</CardMeta> : null}
@@ -532,7 +540,7 @@ function StatusTab({ snapshot, theme, hostId, openSettings }: ChatSidebarProps &
         ) : null}
         {patrol?.enabled && patrol.inference ? (
           <InfoRow theme={theme} label={t("sidebar.status.inferenceTraceLabel")}
-            value={t("sidebar.status.inferenceTrace", { model: patrol.inference.model, ms: patrol.inference.durationMs, calls: patrol.inference.recallCalls })} />
+            value={inferenceTraceText(patrol.inference, t)} />
         ) : null}
       </View>
       {undelivered.length ? (

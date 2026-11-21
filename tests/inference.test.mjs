@@ -6,9 +6,9 @@ import { runInference } from "../server/inference.ts";
 import { parseVerdict } from "../server/router.ts";
 
 const tool = (id, name, args) => ({ id, type: "function", function: { name, arguments: JSON.stringify(args) } });
-const payload = (content, tools) => ({
+const payload = (content, tools, usage) => ({
   choices: [{ finish_reason: tools ? "tool_calls" : "stop", message: { content, tool_calls: tools } }],
-  usage: { prompt_tokens: 100, completion_tokens: 20 },
+  usage: usage ?? { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 80 } },
 });
 const okText = '{"actions":[{"action":"reply","reply":"done"}]}';
 
@@ -37,7 +37,8 @@ test("direct inference exchanges tools and a verdict over the Chat Completions H
     let raw = "";
     for await (const chunk of request) raw += chunk;
     const body = JSON.parse(raw);
-    requests.push({ body, url: request.url, authorization: request.headers.authorization });
+    requests.push({ body, url: request.url, authorization: request.headers.authorization,
+      userAgent: request.headers["user-agent"], threadHeader: request.headers["x-superagent-thread"] });
     const result = requests.length === 1
       ? payload(null, [tool("q1", "superagent_search", { query: "earlier job" }), tool("q2", "read_file", { path: "/repo" })])
       : payload(okText);
@@ -46,12 +47,14 @@ test("direct inference exchanges tools and a verdict over the Chat Completions H
   });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   t.after(() => new Promise(resolve => server.close(resolve)));
-  const result = await runInference(options(t, { search: async (query) => {
+  const result = await runInference({ ...options(t, { search: async (query) => {
     assert.equal(query, "earlier job");
     return "matched tkt_123";
-  } }, { baseUrl: `http://127.0.0.1:${server.address().port}/v1` }));
+  } }, { baseUrl: `http://127.0.0.1:${server.address().port}/v1` }), threadId: "thr_cache" });
   assert.equal(requests[0].url, "/v1/chat/completions");
   assert.equal(requests[0].authorization, "Bearer test-secret");
+  assert.equal(requests[0].userAgent, "paseo-superagent");
+  assert.equal(requests[0].threadHeader, "thr_cache");
   assert.deepEqual(requests[0].body.tools.map(item => item.function.name), ["superagent_list", "superagent_read", "superagent_search"]);
   assert.equal(requests[0].body.model, "test-model");
   assert.ok(!JSON.stringify(requests[0].body).includes("test-secret"));
@@ -62,6 +65,20 @@ test("direct inference exchanges tools and a verdict over the Chat Completions H
   assert.equal(result.verdict.actions[0].reply, "done");
   assert.equal(result.trace.recallCalls, 1);
   assert.equal(result.trace.inputTokens, 200);
+  assert.equal(result.trace.cachedInputTokens, 160);
+});
+
+test("the thread header stays ASCII-bounded and cached tokens stay optional", async t => {
+  const bodies = [];
+  const result = await runInference(options(t), async (_url, init) => {
+    bodies.push({ headers: init.headers });
+    return Response.json(payload(okText, null, { prompt_tokens: 10 }));
+  });
+  assert.equal(bodies[0].headers["x-superagent-thread"], undefined);
+  assert.equal(result.trace.cachedInputTokens, undefined);
+  const tagged = await runInference({ ...options(t), threadId: "thr_a\u4e2db\n" + "x".repeat(120) }, async (_url, init) =>
+    Response.json(payload(okText)));
+  assert.equal(tagged.trace.cachedInputTokens, 80);
 });
 
 test("recall is bounded and format repair comes after a tool-free verdict request", async t => {

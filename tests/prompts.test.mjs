@@ -392,13 +392,31 @@ test("IM-origin threads get channel reply-style guidance; manual threads do not"
   };
   const worker = { workingDir: "/repo", isolation: "worktree", issue: null };
   const imPrompt = composeEvalPrompt({ thread, batch: [imTrigger], state, worker, includeInstructions: false });
-  assert.match(imPrompt, /## Reply style for this channel\nThe human reads your replies inside a chat client \(feishu\)/);
-  assert.match(imPrompt, /under ~100 words/);
+  assert.doesNotMatch(imPrompt, /Reply style for this channel/);
+  assert.match(
+    composeRouterInstructions(worker, undefined, { channel: "feishu" }),
+    /## Reply style for this channel\nThe human reads your replies inside a chat client \(feishu\)/,
+  );
+  assert.match(composeRouterInstructions(worker, undefined, { channel: "feishu" }), /under ~100 words/);
+  assert.doesNotMatch(composeRouterInstructions(worker), /Reply style for this channel/);
   const manualState = emptyState();
   const manualPrompt = composeEvalPrompt({
     thread: { ...thread, id: "t2", key: "k2" }, batch: [manualTrigger], state: manualState, worker, includeInstructions: false,
   });
   assert.doesNotMatch(manualPrompt, /Reply style for this channel/);
+});
+
+test("the channel style guide keeps the instruction prefix stable across turns", () => {
+  const worker = { workingDir: "/repo", isolation: "worktree", issue: null };
+  const first = composeRouterInstructions(worker, undefined, { channel: "feishu" });
+  const second = composeRouterInstructions({ ...worker, workingDir: "/other" }, "Answer in English", { channel: "feishu", speculative: true });
+  const guide = "\n\n## Reply style for this channel";
+  // 风格指南在提示词末尾且仅按渠道分叉:同渠道跨轮、跨配置字节相同。
+  assert.equal(first.slice(first.indexOf(guide)), second.slice(second.indexOf(guide)));
+  assert.ok(first.indexOf(guide) > first.indexOf("## Worker environment"));
+  assert.doesNotMatch(composeRouterInstructions(worker, undefined, { channel: "dingtalk" }).slice(
+    composeRouterInstructions(worker, undefined, { channel: "dingtalk" }).indexOf(guide),
+  ), /\(feishu\)/);
 });
 
 

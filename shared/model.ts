@@ -130,6 +130,8 @@ const InferenceTraceSchema = z.object({
   requests: z.number().int().nonnegative(),
   recallCalls: z.number().int().nonnegative(),
   inputTokens: z.number().int().nonnegative().optional(),
+  /** 其中命中服务商前缀缓存的输入 token 数(服务不支持时缺省)。 */
+  cachedInputTokens: z.number().int().nonnegative().optional(),
   outputTokens: z.number().int().nonnegative().optional(),
 });
 export type InferenceTrace = z.infer<typeof InferenceTraceSchema>;

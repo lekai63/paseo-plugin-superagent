@@ -53,6 +53,7 @@ import {
   composeVerdictRepairPrompt,
   newDecision,
   parseVerdict,
+  type RouterInstructionOptions,
   type RouterWorkerEnvironment,
 } from "./router";
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
@@ -1235,7 +1236,10 @@ export class SuperagentEngine {
       },
       profiles: this.settingsValues.workerProfiles,
     };
-    const ruleOptions = { speculative: this.settingsValues.speculativeEnabled };
+    const ruleOptions: RouterInstructionOptions = { speculative: this.settingsValues.speculativeEnabled };
+    // 本批 IM 渠道(去重后唯一时)进入 system 提示的答复风格指南。
+    const originChannels = [...new Set(batch.filter((trigger) => trigger.origin).map((trigger) => trigger.origin!.channel))];
+    if (originChannels.length === 1) ruleOptions.channel = originChannels[0];
     const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions, ruleOptions);
     const contextTriggers = state.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered")
       .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt)).slice(-8);
@@ -1244,7 +1248,7 @@ export class SuperagentEngine {
       contextTriggers, chatter: this.chatterFor(state, threadId, batch), options: ruleOptions,
     });
     const parsed = await runInference({
-      config, instructions, context, recall: this.inferenceRecall(threadId),
+      config, instructions, context, threadId, recall: this.inferenceRecall(threadId),
       parse: parseVerdict, repair: (error) => composeVerdictRepairPrompt(threadId, error), deadline: run,
     }, this.inferenceRequest);
     run.check();

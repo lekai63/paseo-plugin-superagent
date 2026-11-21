@@ -28,6 +28,8 @@ const completion = z.object({
   usage: z.object({
     prompt_tokens: z.number().int().nonnegative().optional(),
     completion_tokens: z.number().int().nonnegative().optional(),
+    // OpenAI 兼容端的前缀缓存命中数;不通用,仅存在时采集逃 trace。
+    prompt_tokens_details: z.object({ cached_tokens: z.number().int().nonnegative().nullish() }).nullish(),
   }).nullish(),
   choices: z.array(z.object({
     finish_reason: z.string().nullish(),
@@ -65,6 +67,8 @@ interface InferenceInput<V> {
   config: InferenceConfig;
   instructions: string;
   context: string;
+  /** 评估所属线程,随请求头发给推理服务做遥测/缓存分桶(仅 ASCII id,无用户内容)。 */
+  threadId?: string;
   recall: Recall;
   parse(text: string): { verdict: V } | { error: string };
   repair(error: string): string;
@@ -117,7 +121,7 @@ async function query(call: ToolCall, recall: Recall, consume: (key: string) => s
 }
 
 export async function runInference<V>(
-  { config, instructions, context, recall, parse, repair, deadline }: InferenceInput<V>,
+  { config, instructions, context, threadId, recall, parse, repair, deadline }: InferenceInput<V>,
   request: typeof fetch = fetch,
 ): Promise<InferenceResult<V>> {
   const url = completionsUrl(config.baseUrl);
@@ -131,7 +135,10 @@ export async function runInference<V>(
   let repaired = false;
   let jsonMode = true;
   let recallChars = 0;
-  const headers: Record<string, string> = { "content-type": "application/json" };
+  const headers: Record<string, string> = { "content-type": "application/json", "user-agent": "paseo-superagent" };
+  // 线程 id 只进自定义请求头:自定义头跨域安全(非 simple header),且不动请求体——严格校验未知字段的 OpenAI 兼容端不会 400。
+  const wireThread = threadId?.replace(/[^\x20-\x7e]/g, "").slice(0, 100);
+  if (wireThread) headers["x-superagent-thread"] = wireThread;
   if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
 
   // Every tool round either spends a recall or closes the tools. One final format repair can follow.
@@ -165,6 +172,7 @@ export async function runInference<V>(
     if (!decoded.success) throw new Error("Superagent inference API returned an invalid completion");
     const payload = decoded.data;
     if (payload.usage?.prompt_tokens !== undefined) trace.inputTokens = (trace.inputTokens ?? 0) + payload.usage.prompt_tokens;
+    if (payload.usage?.prompt_tokens_details?.cached_tokens) trace.cachedInputTokens = (trace.cachedInputTokens ?? 0) + payload.usage.prompt_tokens_details.cached_tokens;
     if (payload.usage?.completion_tokens !== undefined) trace.outputTokens = (trace.outputTokens ?? 0) + payload.usage.completion_tokens;
     const { message, finish_reason: finishReason } = payload.choices[0];
     const reasoning = message.reasoning_content == null ? {} : { reasoning_content: message.reasoning_content };
