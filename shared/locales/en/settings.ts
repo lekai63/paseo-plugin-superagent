@@ -134,7 +134,7 @@ export const settings = {
   },
   proactive: {
     title: "Proactive & patrol",
-    info: "Speculative execution: following the proactive policy written in \"Router rules\" (for example, \"when someone reports a problem in the group, quietly reproduce it and try a simple fix\"), the Router first tries things nobody explicitly asked for by dispatching Workers in the background; the result is delivered only if it is valuable, otherwise it is silently discarded. LLM watchdog: a separate patrol session checks at intervals whether each Worker is making real progress and staying on task, and when needed reminds, interrupts, cancels, or retries it, or hands it to the Router to tell you; you can also open its session directly to ask questions. Both consume extra model calls and are off by default.",
+    info: "Speculative execution: following the proactive policy written in \"Router rules\" (for example, \"when someone reports a problem in the group, quietly reproduce it and try a simple fix\"), the Router first tries things nobody explicitly asked for by dispatching Workers in the background; the result is delivered only if it is valuable, otherwise it is silently discarded. LLM watchdog: at intervals it calls the inference API to check whether each Worker is making real progress and staying on task, and when needed reminds, interrupts, cancels, or retries it, or hands it to the Router to tell you. Both consume extra model calls and are off by default.",
     speculative: {
       label: "Speculative execution",
       hint: "Only triggers when a proactive policy is written in \"Router rules\"; at most {{max}} speculative tasks at a time",
