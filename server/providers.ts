@@ -7,8 +7,6 @@
  * 转义变成 `\\`;未知 model 传给 ACP agent 只会得到一句 "Internal error"。
  */
 
-import { isDecisionProviderExcluded } from "../shared/decision-provider";
-
 export interface ProviderSnapshotEntryLike {
   provider: string;
   enabled?: boolean;
@@ -118,19 +116,17 @@ export function resolveProviderSelection(
 }
 
 /**
- * 自动挑选 Router provider:跳过排除项,其余按
- * 首选顺序或快照顺序。全部不可用时返回 undefined。
+ * 先按首选顺序选择 provider，再回退到快照中的第一个候选。
  */
-export function pickDecisionProvider<T extends ProviderSnapshotEntryLike>(
+export function pickPreferredProvider<T extends ProviderSnapshotEntryLike>(
   entries: ReadonlyArray<T>,
   preferred: readonly string[],
 ): T | undefined {
-  const usable = entries.filter((entry) => !isDecisionProviderExcluded(entry.provider));
   for (const provider of preferred) {
-    const entry = usable.find((candidate) => candidate.provider === provider);
+    const entry = entries.find((candidate) => candidate.provider === provider);
     if (entry) return entry;
   }
-  return usable[0];
+  return entries[0];
 }
 
 export interface WorkerProfileLike {

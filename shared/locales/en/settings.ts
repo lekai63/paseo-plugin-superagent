@@ -51,7 +51,7 @@ export const settings = {
   model: {
     title: "Model",
     info: "Pick from the daemon's provider snapshot (the same source used for startup validation). The model id is carried over from the option as-is, so there are no backslash-escaping mistakes or typos. If the list can't be loaded, you can enter provider or provider/model by hand. Leave the fields empty to select models automatically.",
-    routerHint: "Prefers Claude, then OpenCode when set to Automatic. Codex is unavailable for the Router. Pi requires the bundled extension for tool restrictions.",
+    routerHint: "Automatic selection prefers Claude, Codex, then OpenCode. Codex uses a read-only sandbox. Pi requires the bundled extension for tool restrictions.",
     auto: "Automatic",
     routerThinking: "Router thinking level (optional)",
     routerThinkingFallback: "Applies to new or rebuilt Router sessions; running sessions are unaffected",
@@ -148,7 +148,7 @@ export const settings = {
     },
     watchdogModel: {
       label: "Watchdog model",
-      hint: "Leave empty to use the Router's model. Codex is unavailable for the watchdog. Pi requires the bundled extension for tool restrictions.",
+      hint: "Leave empty to use the Router's model. Codex uses a read-only sandbox. Pi requires the bundled extension for tool restrictions.",
       empty: "Same as Router",
     },
     interval: {

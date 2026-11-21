@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isDecisionProviderExcluded } from "../shared/decision-provider.ts";
-import { pickDecisionProvider } from "../server/providers.ts";
+import { pickPreferredProvider } from "../server/providers.ts";
 
 const ENTRIES = [
   { provider: "claude", enabled: true, status: "ready", models: [{ id: "sonnet", isDefault: true }] },
@@ -9,18 +8,10 @@ const ENTRIES = [
   { provider: "opencode", enabled: true, status: "ready", models: [{ id: "zen", isDefault: true }] },
 ];
 
-test("the exclusion checks the provider segment of a selection", () => {
-  assert.equal(isDecisionProviderExcluded("codex"), true);
-  assert.equal(isDecisionProviderExcluded(" codex /gpt-5 "), true);
-  assert.equal(isDecisionProviderExcluded("claude/codex"), false);
-  assert.equal(isDecisionProviderExcluded("pi"), false);
-  assert.equal(isDecisionProviderExcluded(""), false);
-});
-
-test("an automatic pick skips codex and prefers the configured order", () => {
+test("an automatic Router pick honors provider priority and falls back to Pi", () => {
   const preferred = ["claude", "codex", "opencode"];
-  assert.equal(pickDecisionProvider(ENTRIES.toReversed(), preferred)?.provider, "claude");
-  assert.equal(pickDecisionProvider(ENTRIES.slice(1), preferred)?.provider, "opencode");
-  // 只有受限 provider 时无解,交由调用方报错。
-  assert.equal(pickDecisionProvider([ENTRIES[1]], preferred), undefined);
+  assert.equal(pickPreferredProvider(ENTRIES.toReversed(), preferred)?.provider, "claude");
+  assert.equal(pickPreferredProvider(ENTRIES.slice(1).toReversed(), preferred)?.provider, "codex");
+  assert.equal(pickPreferredProvider([{ provider: "pi" }], preferred)?.provider, "pi");
+  assert.equal(pickPreferredProvider([], preferred), undefined);
 });

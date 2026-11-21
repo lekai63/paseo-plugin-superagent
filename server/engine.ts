@@ -53,6 +53,7 @@ import {
   composeRouterInstructions,
   composeBudgetExhaustedPrompt,
   composeVerdictRepairPrompt,
+  decisionAgentOptions,
   ensureRouter,
   newDecision,
   parseVerdict,
@@ -63,8 +64,7 @@ import {
 } from "./router";
 import { harvestReport, launchWorker, retireWorker, type WorkerLaunchEnv } from "./workers";
 import type { ToolOutcome } from "./mcp-server";
-import { isDecisionProviderExcluded } from "../shared/decision-provider";
-import { matchWorkerProfile, pickDecisionProvider, resolveProviderSelection, validateProviderMode, validateProviderThinkingOption } from "./providers";
+import { matchWorkerProfile, pickPreferredProvider, resolveProviderSelection, validateProviderMode, validateProviderThinkingOption } from "./providers";
 import { readPiPermissionModes } from "./pi-modes";
 import { BACKGROUND_WORKSPACE_TITLE, ensureSharedWorkspace, detachRoleChildren, workspaceTitles } from "./workspace";
 import { t } from "./i18n";
@@ -1253,8 +1253,10 @@ export class SuperagentEngine {
     };
     const ruleOptions = { speculative: this.settingsValues.speculativeEnabled };
     const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions, ruleOptions);
+    const options = decisionAgentOptions(routerProvider).options;
     const configHash = createHash("sha256").update(JSON.stringify([
       instructions, routerProvider, this.settingsValues.routerThinkingOptionId.trim(),
+      ...(options ? [options] : []),
     ])).digest("hex");
     // 旧版只有全局 Router,不能把它的混合历史认作当前线程的记忆。
     const legacyId = state.kv.routerAgentId && !state.threads.some((t) => t.router?.agentId === state.kv.routerAgentId)
@@ -3603,7 +3605,7 @@ export class SuperagentEngine {
       const profile = this.settingsValues.workerProfiles.find((candidate) => candidate.name === name);
       if (profile) {
         const label = `worker profile "${name}"`;
-        const provider = await this.validateConfiguredProvider("worker", profile.provider, label);
+        const provider = await this.validateConfiguredProvider(label, profile.provider);
         const modeId = await this.validateWorkerMode(label, provider, profile.modeId);
         const thinkingOptionId = await this.validateWorkerThinkingOption(label, provider, profile.thinkingOptionId);
         return { provider, profile: name, modeId, thinkingOptionId };
@@ -3669,7 +3671,7 @@ export class SuperagentEngine {
   }
 
   /**
-   * provider 解析:显式设置优先,其次沿用允许的已记忆值,最后从 daemon 快照选择。
+   * provider 解析:显式设置优先,其次沿用已记忆值,最后从 daemon 快照选择。
    */
   private async resolveProvider(
     role: "router" | "worker",
@@ -3677,15 +3679,14 @@ export class SuperagentEngine {
   ): Promise<string> {
     const configured = role === "router" ? this.settingsValues.routerProvider : this.settingsValues.workerProvider;
     if (configured.trim()) return this.validateConfiguredProvider(role, configured.trim());
-    // 记住的值也要过一遍:升级前存下的 provider 可能已经不能担任只裁决角色。
-    if (remembered && (role === "worker" || !isDecisionProviderExcluded(remembered))) return remembered;
+    if (remembered) return remembered;
     const paseo = this.requirePaseo();
     try {
       await paseo.providers.waitForReady({ timeoutMs: 20_000 }).catch(() => undefined);
       const snapshot = await paseo.providers.snapshot();
       const ready = snapshot.entries.filter((entry) => entry.enabled !== false && entry.status === "ready");
       const pick = role === "router"
-        ? pickDecisionProvider(ready, PREFERRED_PROVIDERS)
+        ? pickPreferredProvider(ready, PREFERRED_PROVIDERS)
         : ready.find((entry) => PREFERRED_PROVIDERS.includes(entry.provider)) ?? ready[0];
       if (!pick) return "";
       const model = pick.models?.find((m) => m.isDefault) ?? pick.models?.[0];
@@ -3697,20 +3698,9 @@ export class SuperagentEngine {
   }
 
   /**
-   * 先校验角色的 provider 限制，再用快照校验模型和纠正转义。
-   * 快照不可用时，将已通过角色校验的配置交给 Paseo。
+   * 用快照校验模型和纠正转义。快照不可用时，将配置交给 Paseo 校验。
    */
-  private async validateConfiguredProvider(
-    role: "router" | "watchdog" | "worker",
-    configured: string,
-    label: string = role,
-  ): Promise<string> {
-    if (role !== "worker" && isDecisionProviderExcluded(configured)) {
-      throw new Error(
-        `${label} provider "${configured}" cannot run as a decision-only session: `
-        + "Codex permits workspace reads without a permission request. Choose another provider or clear the setting.",
-      );
-    }
+  private async validateConfiguredProvider(label: string, configured: string): Promise<string> {
     const paseo = this.requirePaseo();
     let entries;
     try {

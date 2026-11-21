@@ -26,7 +26,6 @@ import {
   type WorkerProfile,
 } from "../shared/settings";
 import type { MessageKey, Translate } from "../shared/i18n";
-import { isDecisionProviderExcluded } from "../shared/decision-provider";
 import { isPiProviderSelection, type PiPermissionModes } from "../shared/pi-modes";
 import { useT } from "./i18n";
 import { STATE_QUERY_KEY, usePiPermissionModes, useProviderSnapshot, type ProviderSnapshotEntry } from "./query";
@@ -378,7 +377,6 @@ function SettingsForm({ settings, hostId, theme, tab }: { settings: Ready; hostI
             label="Router"
             hint={t("settings.model.routerHint")}
             emptyLabel={t("settings.model.auto")}
-            decisionOnly
           />
           <ThinkingPicker
             label={t("settings.model.routerThinking")}
@@ -523,7 +521,7 @@ function SettingsForm({ settings, hostId, theme, tab }: { settings: Ready; hostI
           <SwitchField {...field} name="watchdogEnabled" label={t("settings.proactive.watchdog.label")} hint={t("settings.proactive.watchdog.hint")} />
           {form.watchdogEnabled ? (
             <>
-              <ModelField {...field} name="watchdogProvider" label={t("settings.proactive.watchdogModel.label")} hint={t("settings.proactive.watchdogModel.hint")} emptyLabel={t("settings.proactive.watchdogModel.empty")} decisionOnly />
+              <ModelField {...field} name="watchdogProvider" label={t("settings.proactive.watchdogModel.label")} hint={t("settings.proactive.watchdogModel.hint")} emptyLabel={t("settings.proactive.watchdogModel.empty")} />
               <TextField {...field} name="watchdogIntervalMin" label={t("settings.proactive.interval.label")} hint={t("settings.proactive.interval.hint")} />
             </>
           ) : null}
@@ -910,7 +908,6 @@ function ModelPicker({
   onChange,
   snapshot,
   emptyLabel,
-  decisionOnly,
 }: {
   label: string;
   hint?: string;
@@ -922,8 +919,6 @@ function ModelPicker({
   snapshot: SnapshotState;
   /** 留空选项的文案;不提供时字段必填。 */
   emptyLabel?: string;
-  /** Router 与看门狗的 provider 选择受限。 */
-  decisionOnly?: boolean;
 }) {
   const t = useT();
   if (!snapshot.entries) {
@@ -947,8 +942,7 @@ function ModelPicker({
   const { provider, model } = splitProviderModel(value);
   const entry = snapshot.entries.find((candidate) => candidate.provider === provider);
   // 已禁用的 provider 不进候选;仅当已保存的值正好是它时保留为选项,避免被静默清掉。
-  const enabled = snapshot.entries.filter((candidate) => candidate.enabled !== false
-    && !(decisionOnly && isDecisionProviderExcluded(candidate.provider)));
+  const enabled = snapshot.entries.filter((candidate) => candidate.enabled !== false);
   const providerOptions = [
     ...(emptyLabel ? [{ label: emptyLabel, value: "" }] : []),
     ...enabled.map((candidate) => ({ label: providerOptionLabel(candidate, t), value: candidate.provider })),
@@ -1031,8 +1025,7 @@ function ModelField({
   label,
   hint,
   emptyLabel,
-  decisionOnly,
-}: FieldContext & { name: StringKey; label: string; hint?: string; emptyLabel?: string; decisionOnly?: boolean }) {
+}: FieldContext & { name: StringKey; label: string; hint?: string; emptyLabel?: string }) {
   return (
     <ModelPicker
       label={label}
@@ -1043,7 +1036,6 @@ function ModelField({
       error={errors[name] ?? null}
       snapshot={snapshot}
       emptyLabel={emptyLabel}
-      decisionOnly={decisionOnly}
     />
   );
 }

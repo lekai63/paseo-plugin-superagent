@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2734,7 +2735,7 @@ test("the LLM watchdog patrols unfinished work, judges progress across patrols, 
   const created = f.calls.watchdogCreates[0];
   assert.equal(created.labels["superagent.role"], "watchdog");
   assert.match(created.config.systemPrompt, /Superagent Watchdog instructions/);
-  assert.equal(created.config.options, undefined, "decision-only sessions add no provider options");
+  assert.equal(created.config.options, undefined, "the Claude watchdog uses its provider defaults");
   assert.match(f.calls.patrols[0], /### ticket "test" — status=running/);
   assert.match(f.calls.patrols[0], /activity: first patrol for this ticket/);
   assert.match(f.calls.patrols[0], /latest worker message \(excerpt\):\n```text\nwork completed/);
@@ -2903,25 +2904,25 @@ test("messages that arrive before the engine starts are kept and delivered once 
   assert.equal(f.engine.orchestrationRole("someone-else"), null);
 });
 
-test("codex cannot serve as the Router: the sandbox cannot withhold tools, so it is refused", async (t) => {
+test("a configured Codex Router requests a read-only sandbox", async (t) => {
   const f = fixture(t, "waiting");
   f.state.kv.routerAgentId = null;
   f.values.routerProvider = "codex/test";
-  await assert.rejects(evaluateRouter(f, "first event"), /cannot run as a decision-only session/);
-  assert.equal(f.calls.routerCreates.length, 0);
+  await evaluateRouter(f, "first event");
+  assert.equal(f.calls.routerCreates[0].config.provider, "codex/test");
+  assert.deepEqual(f.calls.routerCreates[0].config.options, { sandbox_mode: "read-only" });
 });
 
-test("the Router rejects configured Codex before reading the provider snapshot", async (t) => {
+test("the Router can use configured Codex while the provider snapshot is unavailable", async (t) => {
   const f = fixture(t, "waiting");
   f.values.routerProvider = "codex/test";
-  const snapshot = t.mock.fn(async () => { throw new Error("provider snapshot unavailable"); });
-  f.controls.providerSnapshot = snapshot;
-  await assert.rejects(evaluateRouter(f, "first event"), /router provider "codex\/test" cannot run/);
-  assert.equal(snapshot.mock.callCount(), 0);
-  assert.equal(f.calls.routerCreates.length, 0);
+  f.controls.providerSnapshot = async () => { throw new Error("provider snapshot unavailable"); };
+  await evaluateRouter(f, "first event");
+  assert.equal(f.calls.routerCreates[0].config.provider, "codex/test");
+  assert.deepEqual(f.calls.routerCreates[0].config.options, { sandbox_mode: "read-only" });
 });
 
-test("an automatic Router pick skips Codex and honors the provider priority", async (t) => {
+test("an automatic Router pick chooses Codex when Claude is unavailable", async (t) => {
   const f = fixture(t, "waiting");
   f.state.kv.routerAgentId = null;
   f.state.kv.routerProvider = null;
@@ -2929,30 +2930,35 @@ test("an automatic Router pick skips Codex and honors the provider priority", as
   f.controls.providerSnapshot = async () => ({
     entries: [
       { provider: "opencode", status: "ready", models: [{ id: "test" }] },
-      ...PROVIDER_ENTRIES.toReversed(),
+      ...PROVIDER_ENTRIES.filter((entry) => entry.provider !== "claude").toReversed(),
     ],
   });
   await evaluateRouter(f, "first event");
-  assert.equal(f.calls.routerCreates[0].config.provider, "claude/sonnet");
+  assert.equal(f.calls.routerCreates[0].config.provider, "codex/test");
 });
 
-test("a remembered codex Router is not reused: the next evaluation picks another provider", async (t) => {
+test("a remembered Codex selection rebuilds a Router from an older configuration", async (t) => {
   const f = fixture(t, "waiting");
   f.state.kv.routerProvider = "codex/test";
   f.values.routerProvider = "";
   await evaluateRouter(f, "first event");
-  assert.equal(f.calls.routerCreates[0].config.provider, "claude/sonnet");
+  const { provider, systemPrompt } = f.calls.routerCreates[0].config;
+  assert.equal(provider, "codex/test");
+  f.state.threads[0].router.configHash = createHash("sha256")
+    .update(JSON.stringify([systemPrompt, provider, ""])).digest("hex");
+
+  await evaluateRouter(f, "second event");
+  assert.equal(f.calls.routerCreates.length, 2);
+  assert.deepEqual(f.calls.routerCreates[1].config.options, { sandbox_mode: "read-only" });
 });
 
-test("the watchdog rejects configured Codex before reading the provider snapshot", async (t) => {
+test("a configured Codex watchdog requests a read-only sandbox", async (t) => {
   const f = fixture(t, "running");
   f.values.watchdogEnabled = true;
   f.values.watchdogProvider = "codex/test";
-  const snapshot = t.mock.fn(async () => { throw new Error("provider snapshot unavailable"); });
-  f.controls.providerSnapshot = snapshot;
-  await assert.rejects(f.engine.maybePatrol(true), /watchdog provider "codex\/test" cannot run/);
-  assert.equal(snapshot.mock.callCount(), 0);
-  assert.equal(f.calls.watchdogCreates.length, 0);
+  await f.engine.maybePatrol(true);
+  assert.equal(f.calls.watchdogCreates[0].config.provider, "codex/test");
+  assert.deepEqual(f.calls.watchdogCreates[0].config.options, { sandbox_mode: "read-only" });
 });
 
 

@@ -1,7 +1,7 @@
 import type { PaseoApi, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
 import { z } from "zod";
 import { truncate, WATCHDOG_AGENT_LABEL_VALUE, type SuperagentState } from "../shared/model";
-import { jsonCandidates, parseJsonCandidate, ROUTER_LABEL, routerUsesSystemPrompt } from "./router";
+import { decisionAgentOptions, jsonCandidates, parseJsonCandidate, ROUTER_LABEL, routerUsesSystemPrompt } from "./router";
 import { detachRoleChildren } from "./workspace";
 import { DECISION_REPEAT_LIMIT, DECISION_TOOL_LIMIT } from "./decision-budget";
 
@@ -243,6 +243,7 @@ export async function ensureWatchdog(
     handle = await workspace.agents.create({
       config: {
         provider,
+        ...decisionAgentOptions(provider),
         ...(routerUsesSystemPrompt(provider) ? { systemPrompt: instructions } : {}),
       },
       title: WATCHDOG_TITLE,

@@ -10,7 +10,7 @@ Superagent 在 [Paseo](https://paseo.sh) 之上实现事件驱动的「超级 ag
 
 ## 功能概览
 
-- **Router 只裁决**:每个 Thread 一个 Router 会话,以 JSON 动作给出裁决(派发、转向、处理请求、取消、重试、订阅、答复、忽略、结束)。插件提供只读回读与检索工具（Chain of Recall），并拒绝 provider 通过 Paseo 发出的其他工具请求。Router 和 LLM 看门狗排除 Codex。Pi 的工具限制依赖随附扩展。
+- **Router 只裁决**:每个 Thread 一个 Router 会话,以 JSON 动作给出裁决(派发、转向、处理请求、取消、重试、订阅、答复、忽略、结束)。插件提供只读回读与检索工具（Chain of Recall），并拒绝 provider 通过 Paseo 发出的其他工具请求。Codex 担任 Router 和 LLM 看门狗时使用只读沙箱，仍可读取工作区。Pi 的工具限制依赖随附扩展。
 - **Worker 按 Ticket 执行**:每个 Ticket 一个独立 worktree,或在共享目录里工作;可配置多个具名 Worker 档位(不同 provider、模型、工作目录),Router 按用途为每个任务选择。Worker 挂在 Router 名下,在 app 的 Subagents 里可见,随时可人工接管。
 - **订阅直通**:线程里已有在干活的 Worker 时,后续消息绕过 Router 直接送达(不调用模型);一个 Worker 可以跟随多个线程。
 - **权限请求由你批准**。在 Superagent 的卡片上可以允许一次、拒绝或回答 Worker 的提问。打开 Worker 的 Paseo 原生会话可以查看 provider 提供的全部选项。IM 通知继续提供 `/approve <批准码>` 和 `/deny <批准码>` 命令。Router 可以依据上下文回答 Worker 的提问。请求落盘，重启后会重新同步。

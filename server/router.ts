@@ -1,4 +1,4 @@
-import type { PaseoApi, PaseoAgent, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
+import type { PaseoApi, PaseoAgent, PaseoAgentConfig, PaseoAgentHandle, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { SuperagentState, Thread, Ticket, Trigger, Decision } from "../shared/model";
 import { followsOf } from "../shared/execution";
 import { agentUsesBackgroundWorkspace, detachRoleChildren } from "./workspace";
@@ -171,6 +171,11 @@ const ROUTER_RULES = [
  */
 export function routerUsesSystemPrompt(provider: string): boolean {
   return ["claude", "codex", "opencode", "omp", "pi"].includes(provider.split("/")[0]);
+}
+
+/** Codex 的只读沙箱限制写入，仍允许沙箱内的文件读取。 */
+export function decisionAgentOptions(provider: string): Pick<PaseoAgentConfig, "options"> {
+  return provider.split("/", 1)[0] === "codex" ? { options: { sandbox_mode: "read-only" } } : {};
 }
 
 export interface RouterWorkerProfile {
@@ -741,6 +746,7 @@ export async function ensureRouter(
     handle = await workspace.agents.create({
       config: {
         provider,
+        ...decisionAgentOptions(provider),
         ...(routerUsesSystemPrompt(provider) ? { systemPrompt: instructions } : {}),
         ...(thinkingOptionId ? { thinkingOptionId } : {}),
       },

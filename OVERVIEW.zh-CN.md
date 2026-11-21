@@ -14,7 +14,7 @@ Superagent 让 Paseo 成为事件驱动的编排器。每个活跃对话有一�
 
 - daemon 与各端客户端需要 Paseo 0.16.0 或更新版本;daemon 主机需要 Node.js 20 或更新版本及 npm。
 - 打开 **Settings → Plugins → Superagent**,填写工作目录(daemon 主机上的绝对路径)。`worktree` 隔离要求它位于 git 仓库内,`shared` 隔离不需要。
-- 为 Router 和默认 Worker 选择 provider 与模型，也可留空自动选择。Router 按 Claude、OpenCode、其他可用 provider 的顺序选择。Worker 可以使用 Codex。
+- 为 Router 和默认 Worker 选择 provider 与模型，也可留空自动选择。Router 按 Claude、Codex、OpenCode、其他可用 provider 的顺序选择。
 - 各 IM 通道默认关闭。开启时需要对应平台的机器人凭据,以及发送者或会话白名单;白名单为空的通道不会启动。微信通过扫描设置页里的二维码登录。
 - 使用 Pi 担任 Router、LLM 看门狗或 Worker 前，先安装随插件提供的 Pi 扩展。扩展限制 Router 和看门狗可用的工具，并提供 Superagent 的工具。配置步骤见 README。
 
@@ -27,7 +27,7 @@ Superagent 让 Paseo 成为事件驱动的编排器。每个活跃对话有一�
 - 开启的 IM 通道会连接飞书开放平台、钉钉 Stream、企业微信机器人服务或 `ilinkai.weixin.qq.com`,或你指定的 NapCat WebSocket。附件下载到 daemon 主机上的收件目录(单个文件上限 100 MB)。压缩包只列清单、不解压;列出 `.7z`/`.rar` 时调用本机已安装的 `7z`。
 - 插件在 `127.0.0.1` 的随机端口与随机路径上运行本地 MCP server,为自身的会话提供工具。
 - 对话页可经 daemon 只读、限量地预览答复里链接的任意绝对路径。
-- Provider 通过 Paseo 发出权限请求时，Superagent 拒绝 Router 和 LLM 看门狗使用外部工具、批准计划或切换模式。Codex 的只读沙箱允许无需请求权限的工作区读取，因此这两个角色排除 Codex。
+- Provider 通过 Paseo 发出权限请求时，Superagent 拒绝 Router 和 LLM 看门狗使用外部工具、批准计划或切换模式。Codex 担任这两个角色时使用只读沙箱，仍可在无需权限请求的情况下读取工作区。
 - Worker 按其 provider 与模式的权限行事。
 - Worker 的工具、计划与模式请求只能由你批准。Superagent 把每个请求按 provider 原文、附一个短批准码,发到发起任务的对话(对话页,或来源的 IM 聊天、agent 会话)。在你发送 `/approve <批准码>` 或 `/deny <批准码> [原因]`,或在 Paseo 里打开该 Worker 会话处理之前,Worker 保持暂停。一次批准只放行这一个请求、这一次。
 - 批准命令只在以下来源有效:对话页、`/superagent` 斜杠命令,以及白名单 IM 发送者在请求所在聊天里发出的消息。agent 发来的消息(包括 `superagent_dispatch` 工具)和群里没有 @ 机器人的消息都不能批准任何请求。

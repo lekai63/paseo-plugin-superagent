@@ -52,7 +52,7 @@ export const settings: Translation<typeof en> = {
   model: {
     title: "模型",
     info: "从 daemon 的 provider 快照中选取(与启动时校验同源),model id 由选项原样带入,不会出现反斜杠转义或笔误;清单读取失败时可退回手工填写 provider 或 provider/model。留空可自动选择模型。",
-    routerHint: "自动选择时优先使用 Claude，其次是 OpenCode。Router 不支持 Codex。使用 Pi 需安装随附扩展以限制工具。",
+    routerHint: "自动选择时按 Claude、Codex、OpenCode 的顺序优先选择。Codex 使用只读沙箱。使用 Pi 需安装随附扩展以限制工具。",
     auto: "自动选择",
     routerThinking: "Router thinking 档位(可选)",
     routerThinkingFallback: "用于新建或重建的 Router 会话,不影响运行中的会话",
@@ -148,7 +148,7 @@ export const settings: Translation<typeof en> = {
     },
     watchdogModel: {
       label: "看门狗模型",
-      hint: "留空沿用 Router 的模型。看门狗不支持 Codex。使用 Pi 需安装随附扩展以限制工具。",
+      hint: "留空沿用 Router 的模型。Codex 使用只读沙箱。使用 Pi 需安装随附扩展以限制工具。",
       empty: "同 Router",
     },
     interval: {
