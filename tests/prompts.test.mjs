@@ -362,10 +362,10 @@ test("router rules allow only the recall tools and define handback re-routing", 
   const trigger = { id: "g", threadId: "t", threadKey: "k", kind: "manual", sender: "u", text: "x", status: "pending", context: false, receivedAt: "" };
   const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null } });
   assert.match(prompt, /Apart from the orchestrator's own\nread-only recall tools \(superagent_list, superagent_read, superagent_search\), do NOT call any\ntools/);
-  assert.match(prompt, /Find other threads, including\s+previous IM days and other IM channels/);
+  assert.match(prompt, /Recall is limited to this conversation.*earlier\s+days of the same chat with the same bot/);
   assert.match(prompt, /When a trigger starts with "\[handback\]"/);
   assert.match(prompt, /Do not steer the same message back to the worker that handed it back/);
-  assert.match(prompt, /before steering, canceling, retrying or subscribing/);
+  assert.match(prompt, /Use only available tickets as action targets/);
 });
 
 test("router rules carry the memory discipline and reconciliation guardrail", () => {
@@ -375,7 +375,7 @@ test("router rules carry the memory discipline and reconciliation guardrail", ()
   const prompt = composeEvalPrompt({ thread, batch: [trigger], state, worker: { workingDir: "/repo", isolation: "worktree", issue: null } });
   assert.match(prompt, /only the supplied thread memory and records carry facts across evaluations/);
   assert.match(prompt, /Keep open commitments in a ticket mandate,\s+a reply, or sourced thread memory/);
-  assert.match(prompt, /Before stop, or any steer\/cancel\/retry against another thread when\s+the target is not certain from the stubs, reconcile the full picture with superagent_list/);
+  assert.match(prompt, /Before stop or any steer\/cancel\/retry when\s+the target is not certain from the stubs, reconcile the full picture with superagent_list/);
   assert.match(prompt, /superagent_search when you remember only fragments of the target/);
 });
 

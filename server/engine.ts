@@ -64,6 +64,7 @@ import { ensureSharedWorkspace, detachRoleChildren, workspaceTitles } from "./wo
 import { t } from "./i18n";
 import { findInstructionFiles, inspectWorkingDir, nodeWorkingDirProbe, type WorkingDirProbe } from "./workdir";
 import { deliveryPreview, splitImReply } from "./im-replies";
+import { conversationFollows, conversationView, matchesConversation, ticketInConversation, type ConversationRecords } from "./conversation";
 import {
   composePatrolPrompt,
   composeWatchdogInstructions,
@@ -114,6 +115,7 @@ const STATE_EVENT_COALESCE_MS = 150;
 const HUMAN_TRIGGER_KINDS: readonly Trigger["kind"][] = ["manual", "feishu", "qq", "dingtalk", "wecom", "weixin"];
 /** 列出待批请求时的条数上限。 */
 const APPROVAL_LIST_LIMIT = 5;
+type RecallScope = { threadId: string } | "watchdog";
 
 /** 只有人直接发出、且指名机器人(非旁听)的消息才能成为批准/拒绝命令。 */
 function humanApprovalCommand(trigger: Pick<Trigger, "kind" | "context" | "text">): ApprovalCommand | null {
@@ -392,9 +394,11 @@ export class SuperagentEngine {
     if (input.origin && !input.context && !input.imCardSubmission && input.replyTo?.length
       && !parseApprovalCommand(input.task) && !parseImAnswerCommand(input.task)) {
       await this.store.ready;
+      const state = this.store.get();
       const chat = imConversationKey(input.origin);
-      const quoted = input.replyTo.map((id) => this.store.get().imDeliveries.find((item) => item.workerRequest
-        && imConversationKey(item.origin) === chat && item.sentMessageIds?.includes(id))).find(Boolean);
+      const quoted = input.replyTo.map((id) => state.imDeliveries.find((item) => item.workerRequest
+        && imConversationKey(item.origin) === chat && item.sentMessageIds?.includes(id)
+        && this.imDeliveryInConversation(state, item))).find(Boolean);
       const ref = quoted?.workerRequest;
       if (quoted && ref && this.pendingImRequest(ref)?.request.kind === "question") {
         input = { ...input, imCardSubmission: { deliveryId: quoted.id, behavior: "answer",
@@ -448,9 +452,9 @@ export class SuperagentEngine {
       // 日界线和渠道隔离优先于引用与外部指定的 threadId;旧消息仍作为引用上下文。
       const quoted = linked?.threadId ? state.threads.find((t) => t.id === linked.threadId) : undefined;
       const specified = input.threadId ? state.threads.find((t) => t.id === input.threadId) : undefined;
-      thread = quoted && quoted.imDay === day ? quoted
+      thread = quoted && quoted.imDay === day && matchesConversation(quoted, input.origin) ? quoted
         : specified && specified.imDay === day && specified.imConversationKey === conversation ? specified
-          : state.threads.find((t) => t.key === key);
+          : state.threads.find((t) => t.key === key && t.imConversationKey === conversation);
     } else if (input.threadId) {
       thread = state.threads.find((t) => t.id === input.threadId);
       if (!thread) throw new Error(`thread ${input.threadId} not found`);
@@ -571,7 +575,7 @@ export class SuperagentEngine {
     const now = new Date().toISOString();
     const state = this.store.get();
     const thread = state.threads.find((t) => t.id === threadId);
-    if (!thread) return;
+    if (!thread || !ticketInConversation(state, ticket, threadId)) return;
     const originTrigger = state.triggers
       .filter((t) => t.threadId === threadId && ["evaluated", "delivered"].includes(t.status))
       .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt))
@@ -609,19 +613,23 @@ export class SuperagentEngine {
 
   /** 订阅本线程的活跃票据:本线程 subscribed 的,加上 follows 里含本线程的(多对多)。 */
   private subscribedTickets(state: SuperagentState, threadId: string): Ticket[] {
-    return state.tickets.filter((t) => subscribesTo(t, threadId) && SUBSCRIBED_STATUSES.includes(t.status));
+    return state.tickets.filter((t) => subscribesTo(t, threadId) && SUBSCRIBED_STATUSES.includes(t.status)
+      && ticketInConversation(state, t, threadId));
   }
 
   private threadHasWorkerRequests(threadId: string): boolean {
-    return this.store.get().tickets.some((ticket) => !TERMINAL_TICKET_STATUSES.includes(ticket.status)
-      && (ticket.threadId === threadId || followsOf(ticket).includes(threadId)) && ticket.pendingRequests?.length);
+    const state = this.store.get();
+    return state.tickets.some((ticket) => !TERMINAL_TICKET_STATUSES.includes(ticket.status)
+      && (ticket.threadId === threadId || followsOf(ticket).includes(threadId)) && ticket.pendingRequests?.length
+      && ticketInConversation(state, ticket, threadId));
   }
 
   /** 不依赖权限 hook 是否先到达:用户回复前读回请求,避免普通 send 清掉尚未回答的问题。 */
   private async refreshThreadRequests(threadId: string): Promise<void> {
-    for (const ticket of this.store.get().tickets) {
+    const state = this.store.get();
+    for (const ticket of state.tickets) {
       if (ticket.workerAgentId && !TERMINAL_TICKET_STATUSES.includes(ticket.status)
-        && (ticket.threadId === threadId || followsOf(ticket).includes(threadId))) {
+        && (ticket.threadId === threadId || followsOf(ticket).includes(threadId)) && ticketInConversation(state, ticket, threadId)) {
         await this.syncWorkerPermissions(ticket.workerAgentId);
       }
     }
@@ -680,6 +688,7 @@ export class SuperagentEngine {
           trigger.note = "Worker request already resolved";
         }
       }
+      if (target.preConversationIsolation) return;
       for (const request of added) {
         const approval = needsHumanApproval(request);
         const recipients = approval ? [target.threadId] : this.reportThreads(target);
@@ -775,9 +784,11 @@ export class SuperagentEngine {
   /** 授权类请求只在工单原线程投递的聊天内有效，包括历史版本留下的卡片。 */
   private *deliveredImRequests(origin: TriggerOrigin) {
     const conversation = imConversationKey(origin);
-    for (const delivery of this.store.get().imDeliveries) {
+    const state = this.store.get();
+    for (const delivery of state.imDeliveries) {
       const ref = delivery.workerRequest;
-      if (delivery.status !== "sent" || !ref || imConversationKey(delivery.origin) !== conversation) continue;
+      if (delivery.status !== "sent" || !ref || imConversationKey(delivery.origin) !== conversation
+        || !this.imDeliveryInConversation(state, delivery)) continue;
       const current = this.pendingImRequest(ref);
       if (!current) continue;
       const allowed = needsHumanApproval(current.request) ? current.ticket.threadId === delivery.threadId
@@ -899,6 +910,7 @@ export class SuperagentEngine {
       title: ticket.title, name: request.name,
     }), {
       outcome: "reply", ticketId,
+      hostOnly: ticket.preConversationIsolation,
       rationale: `engine: human ${behavior} for request ${requestId} of ${ticketId} from the request card`,
     });
   }
@@ -964,7 +976,7 @@ export class SuperagentEngine {
    * 相邻消息内联(§3.3):本批之前、Router 上次看过的事件之后,同一线程里被准入层过滤的
    * 未 @ 群聊(最近几条)。Router 由此看到"@ 之前大家在聊什么",无需工具往返。
    */
-  private chatterFor(state: SuperagentState, threadId: string, batch: Trigger[]): Trigger[] {
+  private chatterFor(state: ConversationRecords, threadId: string, batch: Trigger[]): Trigger[] {
     const imBatch = batch.filter((trigger) => trigger.origin);
     if (imBatch.length === 0) return [];
     const batchIds = new Set(batch.map((trigger) => trigger.id));
@@ -989,14 +1001,16 @@ export class SuperagentEngine {
     origin: TriggerOrigin,
     ids: string[],
   ): { threadId: string | null; quote: NonNullable<Trigger["quote"]> } {
-    const sameChat = (other: TriggerOrigin | null | undefined) =>
-      other?.channel === origin.channel && other.chatId === origin.chatId && other.accountId === origin.accountId;
+    const sameChat = (other: TriggerOrigin | null | undefined, threadId: string | null | undefined) =>
+      other && imConversationKey(other) === imConversationKey(origin)
+      && matchesConversation(state.threads.find((thread) => thread.id === threadId), origin);
     let threadId: string | null = null;
     let quote: NonNullable<Trigger["quote"]> = { messageId: ids[0], triggerId: null, sender: null, text: null };
     ids.forEach((id, index) => {
-      const trigger = state.triggers.find((t) => sameChat(t.origin) && t.origin?.messageId === id);
+      const trigger = state.triggers.find((t) => t.kind === origin.channel && sameChat(t.origin, t.threadId) && t.origin?.messageId === id);
       const delivery = trigger ? undefined
-        : state.imDeliveries.find((d) => sameChat(d.origin) && (d.sentMessageIds ?? []).includes(id));
+        : state.imDeliveries.find((d) => sameChat(d.origin, d.threadId) && this.imDeliveryInConversation(state, d)
+          && (d.sentMessageIds ?? []).includes(id));
       const matchThread = trigger?.threadId ?? delivery?.threadId ?? null;
       if (!threadId && matchThread) threadId = matchThread;
       if (index !== 0) return;
@@ -1012,18 +1026,21 @@ export class SuperagentEngine {
    * 全部失败才退回评估路径,失败原因逐个留备注。
    */
   private async deliverDirect(trigger: Trigger, tickets: Ticket[]): Promise<boolean> {
-    await this.refreshThreadRequests(trigger.threadId!);
-    if (this.threadHasWorkerRequests(trigger.threadId!)) return false;
+    const state = this.store.get();
+    const thread = state.threads.find((t) => t.id === trigger.threadId);
+    if (!thread || (trigger.origin && !matchesConversation(thread, trigger.origin))) return false;
+    await this.refreshThreadRequests(thread.id);
+    if (this.threadHasWorkerRequests(thread.id)) return false;
     const prefix = trigger.context ? "[context] " : "";
-    const quoted = trigger.quote?.text
+    const quoted = !trigger.preConversationIsolation && trigger.quote?.text
       ? `> quoting ${trigger.quote.sender ?? "an earlier message"}: ${truncate(trigger.quote.text.replace(/\s+/g, " "), 300)}\n`
       : "";
-    const thread = this.store.get().threads.find((t) => t.id === trigger.threadId);
     const delivered: string[] = [];
     const failures: string[] = [];
     for (const ticket of tickets) {
+      if (!ticketInConversation(this.store.get(), ticket, thread.id)) continue;
       // 跟随来的线程标出来源,Worker 才知道这条消息属于哪段对话(可按线程退订)。
-      const origin = ticket.threadId !== trigger.threadId && thread
+      const origin = ticket.threadId !== thread.id
         ? `[thread ${thread.id} "${truncate(thread.title, 60)}"] `
         : "";
       const outcome = await this.sendToWorker(ticket.id, `${origin}${prefix}${quoted}${trigger.text}`, "steer");
@@ -1224,11 +1241,23 @@ export class SuperagentEngine {
     let state = this.store.get();
     const thread = state.threads.find((t) => t.id === threadId);
     if (!thread || thread.state === "closed") return;
-    const batch = state.triggers.filter((t) => t.threadId === threadId && t.status === "pending");
+    const scoped = conversationView(state, threadId);
+    const visibleThread = scoped.threads.find((item) => item.id === threadId)!;
+    const batch = scoped.triggers.filter((t) => t.threadId === threadId && t.status === "pending");
+    const visibleIds = new Set(batch.map((trigger) => trigger.id));
+    const hiddenIds = new Set(state.triggers.filter((trigger) => trigger.threadId === threadId
+      && trigger.status === "pending" && !visibleIds.has(trigger.id)).map((trigger) => trigger.id));
+    if (hiddenIds.size) {
+      await this.store.update((next) => {
+        for (const trigger of next.triggers) {
+          if (hiddenIds.has(trigger.id) && trigger.status === "pending") trigger.status = "filtered";
+        }
+      });
+    }
     if (batch.length === 0) return;
 
     const config = this.inferenceConfig("router");
-    const evaluatedWorkers = new Map(state.tickets.map((ticket) => [ticket.id, ticket.workerAgentId]));
+    const evaluatedWorkers = new Map(scoped.tickets.map((ticket) => [ticket.id, ticket.workerAgentId]));
     const worker: RouterWorkerEnvironment = {
       workingDir: this.settingsValues.workingDir,
       isolation: this.settingsValues.workerIsolation,
@@ -1247,14 +1276,14 @@ export class SuperagentEngine {
     const originChannels = [...new Set(batch.filter((trigger) => trigger.origin).map((trigger) => trigger.origin!.channel))];
     if (originChannels.length === 1) ruleOptions.channel = originChannels[0];
     const instructions = composeRouterInstructions(worker, this.settingsValues.routerInstructions, ruleOptions);
-    const contextTriggers = state.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered")
+    const contextTriggers = scoped.triggers.filter((trigger) => trigger.threadId === threadId && trigger.status === "delivered")
       .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt)).slice(-8);
     const context = composeEvalPrompt({
-      thread, batch, state, worker, includeInstructions: false, includeHistory: true,
-      contextTriggers, chatter: this.chatterFor(state, threadId, batch), options: ruleOptions,
+      thread: visibleThread, batch, state: scoped, worker, includeInstructions: false, includeHistory: true,
+      contextTriggers, chatter: this.chatterFor(scoped, threadId, batch), options: ruleOptions,
     });
     const parsed = await runInference({
-      config, instructions, context, threadId, recall: this.inferenceRecall(threadId),
+      config, instructions, context, threadId, recall: this.inferenceRecall({ threadId }),
       parse: parseVerdict, repair: (error) => composeVerdictRepairPrompt(threadId, error), deadline: run,
     }, this.inferenceRequest);
     run.check();
@@ -1303,9 +1332,10 @@ export class SuperagentEngine {
     for (const action of parsed.verdict.actions) {
       if (action.action !== "respond") continue;
       const target = state.tickets.find((ticket) => ticket.id === action.ticketId);
+      if (!target || !ticketInConversation(state, target, threadId)) continue;
       const observedAgentId = evaluatedWorkers.get(action.ticketId);
-      if ((observedAgentId && observedAgentId !== target?.workerAgentId) ||
-        !target?.pendingRequests?.some((request) => request.id === action.requestId)) {
+      if ((observedAgentId && observedAgentId !== target.workerAgentId) ||
+        !target.pendingRequests?.some((request) => request.id === action.requestId)) {
         await recordUnparsed(`respond must name a current pending request: ticketId=${action.ticketId} requestId=${action.requestId}`);
         return;
       }
@@ -1328,6 +1358,14 @@ export class SuperagentEngine {
     let summary: string | null = null;
     for (const action of actions) {
       const decision = newDecision(threadId, triggerIds, action.action);
+      if ("ticketId" in action && !state.tickets.some((ticket) => ticket.id === action.ticketId
+        && ticketInConversation(state, ticket, threadId))) {
+        decision.outcome = "ignore";
+        decision.rationale = "Ticket unavailable in this conversation";
+        decisions.push(decision);
+        actionRecords.push(null);
+        continue;
+      }
       if (action.action === "dispatch") {
         // 投机执行仅在设置开启时生效;并发上限内才立案,超出的直接丢弃(记入裁决)。
         const speculative = Boolean(action.speculative) && this.settingsValues.speculativeEnabled;
@@ -1425,7 +1463,7 @@ export class SuperagentEngine {
     decisions[0].raw = truncate(replyText, 1200);
     decisions[0].inference = parsed.trace;
 
-    const recalledMemory = thread.routerMemory ?? [];
+    const recalledMemory = visibleThread.routerMemory ?? [];
     const memorySources = new Set([...batch.filter((item) => !item.context).map((item) => item.id),
       ...recalledMemory.map((item) => item.triggerId)]);
     const memory = verdict.memory?.every((item) => memorySources.has(item.triggerId)) ? verdict.memory : undefined;
@@ -1439,7 +1477,7 @@ export class SuperagentEngine {
       next.tickets.push(...createdTickets);
       for (const ticketId of subscribeTickets) {
         const target = next.tickets.find((t) => t.id === ticketId);
-        if (!target) continue;
+        if (!target || !ticketInConversation(next, target, threadId)) continue;
         if (target.threadId === threadId) target.subscribed = true;
         else target.follows = [...new Set([...followsOf(target), threadId])];
         // 已完成待命的票据被重新订阅后回到待命(waiting),后续消息能唤醒它。
@@ -1454,8 +1492,14 @@ export class SuperagentEngine {
       if (target) {
         target.evalRetry = { errors: 0, unparsed: 0, nextAt: null };
         target.updatedAt = decidedAt;
-        if (memory !== undefined) target.routerMemory = memory;
-        if (summary) target.summary = truncate(summary, 200);
+        if (memory !== undefined) {
+          target.routerMemory = memory;
+          delete target.routerMemoryHostOnly;
+        }
+        if (summary) {
+          target.summary = truncate(summary, 200);
+          delete target.summaryHostOnly;
+        }
         if (replyDecision && replies.length > 0) {
           target.latestResult = { id: replyDecision.id, kind: "router_reply", text: replies.join("\n\n"),
             ticketIds: [...new Set(batch.filter((trigger) => trigger.kind === "report" && trigger.sender.startsWith("worker:"))
@@ -1515,8 +1559,16 @@ export class SuperagentEngine {
     if (this.sendingDeliveries.has(id)) return this.deliveryChain;
     this.sendingDeliveries.add(id);
     const send = this.deliveryChain.then(async () => {
-      let delivery = this.store.get().imDeliveries.find((item) => item.id === id);
+      const state = this.store.get();
+      let delivery = state.imDeliveries.find((item) => item.id === id);
       if (!delivery || delivery.status !== "pending") return;
+      if (!this.imDeliveryInConversation(state, delivery)) {
+        await this.store.update((next) => {
+          const target = next.imDeliveries.find((item) => item.id === id);
+          if (target?.status === "pending") target.status = "failed";
+        });
+        return;
+      }
       // 首次落盘失败时记录仍可能留在内存;恢复发送前先确认它可以持久化。
       await this.store.update(() => {});
       const ref = delivery.workerRequest;
@@ -1589,9 +1641,11 @@ export class SuperagentEngine {
 
   async retryImDelivery(id: string): Promise<void> {
     await this.store.ready;
-    const delivery = this.store.get().imDeliveries.find((item) => item.id === id);
+    const state = this.store.get();
+    const delivery = state.imDeliveries.find((item) => item.id === id);
     if (!delivery) throw new Error("IM delivery not found");
     if (delivery.status !== "failed") throw new Error(t("server.engine.resendNotFailed"));
+    if (!this.imDeliveryInConversation(state, delivery)) throw new Error(t("server.engine.resendOutsideConversation"));
     await this.store.update((next) => {
       const target = next.imDeliveries.find((item) => item.id === id)!;
       target.status = "pending";
@@ -1603,6 +1657,13 @@ export class SuperagentEngine {
     if (this.store.get().imDeliveries.find((item) => item.id === id)?.status !== "sent") {
       throw new Error(t("server.engine.resendIncomplete"));
     }
+  }
+
+  private imDeliveryInConversation(state: SuperagentState, delivery: ImDelivery): boolean {
+    if (delivery.preConversationIsolation
+      || !matchesConversation(state.threads.find((thread) => thread.id === delivery.threadId), delivery.origin)) return false;
+    const ref = delivery.workerRequest;
+    return !ref || state.tickets.some((ticket) => ticket.id === ref.ticketId && ticketInConversation(state, ticket, delivery.threadId));
   }
 
   // -------------------------------------------------------- pending actions
@@ -1625,11 +1686,21 @@ export class SuperagentEngine {
 
   private async executePendingAction(recordId: string): Promise<void> {
     await this.store.ready;
-    const pending = this.store.get().pendingActions;
+    const state = this.store.get();
+    const pending = state.pendingActions;
     const record = pending.find((a) => a.id === recordId);
     if (!record) return;
     const head = pending.find((a) => a.threadId === record.threadId);
     if (head?.id !== recordId) return;
+    if (record.preConversationIsolation || (record.ticketId && !state.tickets.some((ticket) =>
+      ticket.id === record.ticketId && ticketInConversation(state, ticket, record.threadId)))) {
+      await this.store.update((next) => {
+        next.pendingActions = next.pendingActions.filter((action) => action.id !== recordId);
+        const decision = next.decisions.find((item) => item.id === record.decisionId);
+        if (decision) decision.rationale = "Action unavailable in this conversation";
+      });
+      return;
+    }
     if (record.attempts >= MAX_ACTION_ATTEMPTS) {
       await this.abandonPendingAction(record, `${record.kind} exceeded ${MAX_ACTION_ATTEMPTS} attempts`);
       return;
@@ -2023,7 +2094,8 @@ export class SuperagentEngine {
       target.updatedAt = now;
       if (done) {
         // 仍订阅任一线程(本线程或跟随的线程)的票据待命,后续消息可唤醒;投机执行不待命。
-        const stillSubscribed = !target.speculative && (target.subscribed || followsOf(target).length > 0);
+        const stillSubscribed = !target.speculative && !target.preConversationIsolation
+          && (target.subscribed || conversationFollows(next, target).length > 0);
         target.status = stillSubscribed ? "waiting" : "completed";
         target.report = report;
       } else {
@@ -2071,7 +2143,7 @@ export class SuperagentEngine {
   /** 汇报的目标线程:本线程,加上仍处于活跃状态的跟随线程。 */
   private reportThreads(ticket: Ticket): string[] {
     const state = this.store.get();
-    const follows = followsOf(ticket).filter((id) => state.threads.find((t) => t.id === id)?.state === "active");
+    const follows = conversationFollows(state, ticket).filter((id) => state.threads.find((t) => t.id === id)?.state === "active");
     return [...new Set([ticket.threadId, ...follows])];
   }
 
@@ -2188,7 +2260,7 @@ export class SuperagentEngine {
     threadId: string,
     text: string,
     options: { outcome?: "error" | "reply"; ticketId?: string | null; rationale?: string; triggerIds?: string[];
-      workerApprovalNotice?: true; origin?: TriggerOrigin; workerRequest?: ImDelivery["workerRequest"] } = {},
+      workerApprovalNotice?: true; origin?: TriggerOrigin; workerRequest?: ImDelivery["workerRequest"]; hostOnly?: boolean } = {},
   ): Promise<void> {
     const state = this.store.get();
     const source = state.triggers.filter((t) => t.threadId === threadId && t.status !== "filtered" && (t.origin || t.replyToAgentId))
@@ -2199,14 +2271,14 @@ export class SuperagentEngine {
         workerApprovalNotice: options.workerApprovalNotice,
       })
       : newDecision(threadId, options.triggerIds ?? [], "error", { rationale: text, ticketId: options.ticketId ?? null });
-    const origin = options.origin ?? source?.origin;
+    const origin = options.hostOnly ? null : options.origin ?? source?.origin;
     const delivery = origin ? this.prepareImDelivery(decision, origin, text, options.workerRequest) : null;
     await this.store.update((next) => {
       next.decisions.push(decision);
       if (delivery) next.imDeliveries.push(delivery);
     });
     if (delivery) void this.sendImDelivery(delivery.id);
-    else if (source?.replyToAgentId) await bounded(() => this.requirePaseo().agents.ref(source.replyToAgentId!).send(text), "engine notice")
+    else if (!options.hostOnly && source?.replyToAgentId) await bounded(() => this.requirePaseo().agents.ref(source.replyToAgentId!).send(text), "engine notice")
       .catch((error) => console.error("[superagent] notice failed", error));
   }
 
@@ -2215,7 +2287,7 @@ export class SuperagentEngine {
     return this.evalRuns.has(threadId) || this.currentEvalThread === threadId || this.evalQueued.has(threadId) || this.batchTimers.has(threadId)
       || state.triggers.some((t) => t.threadId === threadId && t.status === "pending")
       || state.pendingActions.some((a) => a.threadId === threadId)
-      || state.imDeliveries.some((d) => d.threadId === threadId && d.status !== "sent");
+      || state.imDeliveries.some((d) => d.threadId === threadId && d.status !== "sent" && this.imDeliveryInConversation(state, d));
   }
 
   private canExpireThread(threadId: string, cutoff: number, daily: boolean): boolean {
@@ -2224,10 +2296,10 @@ export class SuperagentEngine {
     if (!thread || thread.state !== "active" || this.threadHasPendingWork(threadId)) return false;
     if (!daily && Date.parse(thread.lastActivityAt ?? thread.updatedAt) > cutoff) return false;
     return !state.tickets.some((ticket) => {
-      if (ticket.threadId !== threadId && !followsOf(ticket).includes(threadId)) return false;
+      if (ticket.threadId !== threadId && !conversationFollows(state, ticket).includes(threadId)) return false;
       return ["pending", "launching", "running"].includes(ticket.status) || Boolean(ticket.pendingRequests?.length)
         || ticket.retireRequested || (!daily && ticket.status === "waiting")
-        || (ticket.threadId === threadId && followsOf(ticket).some((id) => state.threads.some((other) => other.id === id && other.state === "active")));
+        || (ticket.threadId === threadId && conversationFollows(state, ticket).some((id) => state.threads.some((other) => other.id === id && other.state === "active")));
     });
   }
 
@@ -2247,7 +2319,7 @@ export class SuperagentEngine {
     const cutoff = this.now().getTime() - this.settingsValues.workerIdleTimeoutMin * 60_000;
     const eligible = () => !this.sendingWorkers.has(ticketId) && (ticket.retireRequested || (ticket.status === "waiting" && !ticket.pendingRequests?.length
       && Date.parse(ticket.updatedAt) <= cutoff
-      && ![ticket.threadId, ...followsOf(ticket)].some((id) => this.threadHasPendingWork(id))));
+      && ![ticket.threadId, ...conversationFollows(this.store.get(), ticket)].some((id) => this.threadHasPendingWork(id))));
     if (!eligible()) return;
     this.retiringTickets.add(ticketId);
     const agentId = ticket.workerAgentId;
@@ -2257,7 +2329,7 @@ export class SuperagentEngine {
         const at = live.agent.updatedAt;
         await this.store.update((next) => {
           ticket.updatedAt = at;
-          this.touchThreads(next, [ticket.threadId, ...followsOf(ticket)], at);
+          this.touchThreads(next, [ticket.threadId, ...conversationFollows(next, ticket)], at);
         });
       }
       if (!eligible() || ticket.workerAgentId !== agentId) return;
@@ -2289,8 +2361,9 @@ export class SuperagentEngine {
   }
 
   private async remindRequestWait(ticketId: string): Promise<void> {
-    const ticket = this.store.get().tickets.find((t) => t.id === ticketId);
-    if (!ticket?.pendingRequests?.length || ticket.requestWaitNotifiedAt) return;
+    const state = this.store.get();
+    const ticket = state.tickets.find((t) => t.id === ticketId);
+    if (!ticket?.pendingRequests?.length || ticket.requestWaitNotifiedAt || ticket.preConversationIsolation) return;
     const since = ticket.requestWaitSince ?? ticket.updatedAt;
     if (this.now().getTime() - Date.parse(since) < 24 * 60 * 60_000) return;
     await this.store.update(() => { ticket.requestWaitNotifiedAt = this.now().toISOString(); });
@@ -2354,7 +2427,7 @@ export class SuperagentEngine {
     const config = this.inferenceConfig("watchdog");
     const parsed = await runInference({
       config, instructions: composeWatchdogInstructions(), context: composePatrolPrompt(digest, null),
-      recall: this.inferenceRecall(), parse: parseWatchdogVerdict,
+      recall: this.inferenceRecall("watchdog"), parse: parseWatchdogVerdict,
       repair: (error) => `The verdict could not be parsed: ${error}
 Return the full patrol JSON with summary and actions.`,
       deadline: run,
@@ -2523,7 +2596,7 @@ Return the full patrol JSON with summary and actions.`,
       const threadId = ("threadId" in action && action.threadId) || ticket?.threadId;
       const thread = state.threads.find((item) => item.id === threadId);
       if (!thread || ("ticketId" in action && action.ticketId && !ticket)
-        || (ticket && ticket.threadId !== thread.id && !followsOf(ticket).includes(thread.id))
+        || (ticket && ticket.threadId !== thread.id && !conversationFollows(state, ticket).includes(thread.id))
         || !current(thread, ticket)) {
         console.warn(`[superagent] watchdog ${action.action} skipped: unknown or changed target`);
         continue;
@@ -2532,14 +2605,16 @@ Return the full patrol JSON with summary and actions.`,
       try {
         if (action.action === "nudge" || action.action === "interrupt") {
           if (!ticket) continue;
-          const outcome = await this.applySteer(ticket.id, `[watchdog] ${action.text}`, action.action === "interrupt" ? "interrupt" : "steer", () => run.check());
+          // The watchdog sees all conversations. Its free-form text is for the host's audit trail.
+          const outcome = await this.applySteer(ticket.id, "[watchdog] Review your mandate and recent progress before continuing.",
+            action.action === "interrupt" ? "interrupt" : "steer", () => run.check());
           if (!outcome.ok) throw new Error(outcome.error);
           note = `${action.action}: ${action.text}`;
         } else if (action.action === "cancel") {
           if (!ticket) continue;
           await this.cancelTicket(ticket.id);
           note = `cancel: ${action.reason}`;
-          await this.enqueueEngineNote(thread.id, `[watchdog] canceled ticket ${ticket.id} "${ticket.title}": ${action.reason}`);
+          await this.enqueueEngineNote(thread.id, "[watchdog] A Worker task was canceled. See the Paseo activity for details.");
         } else if (action.action === "retry") {
           if (!ticket) continue;
           await this.retryTicket(ticket.id, () => run.check());
@@ -2549,7 +2624,7 @@ Return the full patrol JSON with summary and actions.`,
           note = `reeval${action.reason ? `: ${action.reason}` : ""}`;
         } else {
           note = `escalate: ${action.text}`;
-          await this.enqueueEngineNote(thread.id, `[watchdog]${ticket ? ` ticket ${ticket.id} "${ticket.title}":` : ""} ${action.text}`);
+          await this.enqueueEngineNote(thread.id, "[watchdog] A task needs the host user's attention. See the Paseo activity for details.");
         }
       } catch (error) {
         run.check();
@@ -2855,12 +2930,17 @@ Return the full patrol JSON with summary and actions.`,
     };
   }
 
-  private inferenceRecall(threadId?: string): Recall {
+  private inferenceRecall(scope: RecallScope): Recall {
     return {
-      list: () => this.listThreads(),
-      read: (id) => this.readRecord(id),
-      search: (query) => this.searchRecords(query, threadId),
+      list: () => this.listThreads(scope),
+      read: (id) => this.readRecord(id, scope),
+      search: (query) => this.searchRecords(query, scope),
     };
+  }
+
+  private recallState(scope: RecallScope): ConversationRecords {
+    const state = this.store.get();
+    return scope === "watchdog" ? state : conversationView(state, scope.threadId);
   }
 
   /** 关闭线程的落盘部分:线程关闭、活跃票据取消、pending 触发消费。 */
@@ -2917,9 +2997,9 @@ Return the full patrol JSON with summary and actions.`,
    * Router 回读(Chain of Recall):按 ID 找回完整未截断记录。触发/票据/线程/裁决
    * 四类;已清理(超上限裁剪或线程关闭收口)返回 null,由工具层转为可读错误。
    */
-  async readRecord(id: string): Promise<string | null> {
+  async readRecord(id: string, scope: RecallScope): Promise<string | null> {
     await this.store.ready;
-    const state = this.store.get();
+    const state = this.recallState(scope);
     const trimmed = id.trim();
     const threadLabel = (threadId: string | null | undefined) => {
       if (!threadId) return "(no thread)";
@@ -3018,7 +3098,7 @@ ${JSON.stringify(thread.routerMemory)}` : null,
    * 线程回读的下一跳(§3.3 链式召回):跟随本线程的其他线程票据、最近的消息与裁决 ID,
    * 每条都可再用 superagent_read 展开。
    */
-  private threadLinks(state: SuperagentState, threadId: string): string[] {
+  private threadLinks(state: ConversationRecords, threadId: string): string[] {
     const lines: string[] = [];
     const followers = state.tickets.filter((t) => t.threadId !== threadId && followsOf(t).includes(threadId));
     if (followers.length) {
@@ -3064,15 +3144,15 @@ ${JSON.stringify(thread.routerMemory)}` : null,
   }
 
   /**
-   * Router 关键词检索:在全部触发/票据(含 mandate 与 worker 报告)/线程标题与摘要/
+   * Router 关键词检索:在可见触发/票据(含 mandate 与 worker 报告)/线程标题与摘要/
    * 裁决答复与理由里找「空格分词后全部命中」的记录,返回 ID + 短摘录,newest first。
    * 不知道 ID 时的回读入口;命中摘录取自外部输入,不可信框架由工具层附加。
    */
-  async searchRecords(query: string, callerThreadId?: string): Promise<string> {
+  async searchRecords(query: string, scope: RecallScope): Promise<string> {
     await this.store.ready;
-    const state = this.store.get();
+    const state = this.recallState(scope);
     // 调用方 Router 本线程的待评估触发与线程本身已在提示词里,命中只会误导模型继续搜。
-    const own = callerThreadId ? state.threads.find((t) => t.id === callerThreadId) ?? null : null;
+    const own = scope === "watchdog" ? null : state.threads.find((t) => t.id === scope.threadId) ?? null;
     const terms = [...new Set(query.toLowerCase().split(/\s+/).filter((term) => term.length > 0))];
     if (terms.length === 0) {
       return "No usable keywords — pass one or more words that must appear in the record.";
@@ -3131,7 +3211,7 @@ ${JSON.stringify(thread.routerMemory)}` : null,
     }
     hits.sort((a, b) => b.at.localeCompare(a.at));
     if (hits.length === 0) {
-      return `No records match all of: ${terms.join(" ")}. No such record exists, and rephrasing rarely finds one: ` +
+      return `No records match all of: ${terms.join(" ")} in the available records. Rephrasing rarely finds one: ` +
         "retry at most once with a single distinctive keyword, otherwise treat the request as new and decide from the prompt.";
     }
     const shown = hits.slice(0, SuperagentEngine.SEARCH_HITS_LIMIT);
@@ -3144,12 +3224,12 @@ ${JSON.stringify(thread.routerMemory)}` : null,
   }
 
   /**
-   * Router 跨线程总览:活跃线程及其未完结票据存根(全部线程,不止当前评估线程)。
+   * Router 总览:可见活跃线程及其未完结票据存根。
    * 上限(10 线程 × 每线程 8 票)截断时如实标注,剩余的交给关键词检索。
    */
-  async listThreads(): Promise<string> {
+  async listThreads(scope: RecallScope): Promise<string> {
     await this.store.ready;
-    const state = this.store.get();
+    const state = this.recallState(scope);
     const activeSorted = state.threads
       .filter((t) => t.state === "active")
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -3233,6 +3313,9 @@ ${JSON.stringify(thread.routerMemory)}` : null,
     if (!thread || thread.state === "closed") {
       return { ok: false, error: "the thread of this ticket is closed; state the outcome in your final report instead" };
     }
+    if (ticket.preConversationIsolation) {
+      return { ok: false, error: "this ticket predates conversation isolation; leave the outcome in your final report for the host" };
+    }
     if (options.unsubscribe && ticket.subscribed) {
       await this.workerUnsubscribe(ticketId).catch((error) => {
         console.error("[superagent] handback unsubscribe failed", error);
@@ -3308,9 +3391,11 @@ ${JSON.stringify(thread.routerMemory)}` : null,
       })),
       threads,
       recentResults: recentResults(state, options.threadId),
-      // 跟随(多对多订阅)某线程的其他线程票据也随该线程下发,对话页能看到并退订。
+      // 同一聊天跨日订阅的票据也随该线程下发,对话页能看到并退订。
       tickets: state.tickets
-        .filter((t) => threads.some((th) => th.id === t.threadId || followsOf(t).includes(th.id)))
+        .map((ticket) => ({ ...ticket, subscribed: ticket.subscribed && !ticket.preConversationIsolation,
+          follows: conversationFollows(state, ticket) }))
+        .filter((t) => threads.some((th) => th.id === t.threadId || t.follows.includes(th.id)))
         .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
       triggers: options.omitRecords ? [] : state.triggers
         .filter((t) => threads.some((th) => th.id === t.threadId))

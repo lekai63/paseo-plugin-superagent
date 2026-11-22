@@ -9,12 +9,12 @@ Paseo 的 Router/Worker 双层编排插件。按《Super-agent 设计探索》�
 - **Router 按线程评估**。每轮向独立推理 API 发送新触发、任务状态、保存的线程记忆和有界历史。模型返回 JSON 裁决，可用 `superagent_list/read/search` 只读回读已有记录。
 - **Worker agent** 按 Ticket 执行。worktree 隔离时每个 Ticket 有独立工作区，共享隔离按目录和档位复用工作区。Superagent 根据 Ticket 关联和打开 Worker。
 - **Worker 档位**:除默认 Worker 外可配置具名档位(不同模型/用途),每个档位还可指定自己的工作目录,让该档位的 Worker 在别的仓库或目录里工作;
-- **订阅直通(fan-out,多对多)**:线程有活跃订阅 Worker 时,后续事件绕过 Router 程序直通**全部**订阅 Worker(零 LLM);一个可用会话都没有才交 Router 评估。Router 的 `subscribe` 动作可让别的线程里已在干活的 Worker **也跟随**当前线程(一个 Worker 订阅多个线程),跟随来的消息带 `[thread …]` 前缀,汇报回流到它订阅的每个线程;Worker 可用 `superagent_unsubscribe`(可指定 `threadId` 只退一个线程)退订、`superagent_handback` 把误投消息转回 Router;
+- **订阅直通(fan-out,多对多)**:线程有活跃订阅 Worker 时,后续事件绕过 Router 程序直通**全部**订阅 Worker(零 LLM);一个可用会话都没有才交 Router 评估。Router 的 `subscribe` 动作可让同一 IM 聊天先前日线程里已在干活的 Worker **也跟随**当前线程(一个 Worker 订阅多个线程),跟随来的消息带 `[thread …]` 前缀,汇报回流到它订阅的每个线程;Worker 可用 `superagent_unsubscribe`(可指定 `threadId` 只退一个线程)退订、`superagent_handback` 把误投消息转回 Router;
 - **语义慢路径**:观察模式旁听到的未 @ 群消息(context-only)不直通 Worker,一律交 Router 判断(默认忽略,与某个任务相关时 steer,符合主动策略时才行动);
 - **权限与提问回流**:Worker 的权限请求、计划确认和结构化提问立即落盘。权限请求(`question` 以外的所有类型)必须由人决定:引擎直接把请求按 provider 原文、附一个由票据与请求 ID 派生的短批准码回投原聊天或委派会话,不交 Router。只有来自人的 `/approve <批准码>` 或 `/deny <批准码> [原因]`(对话页、`/superagent` 斜杠命令,或白名单 IM 发送者在通知所在聊天里 @ 机器人发出),或在 Worker 会话里直接处理,才能解决它;命令由引擎执行、不调用模型,一次批准只放行这一个请求、这一次。Router 可以拒绝权限请求,但永远不能批准:Router 对此类请求给出的 `allow` 在立案裁决和重放落盘动作时都会被引擎拒绝,改为把请求和批准码发给人。结构化提问交 Router,由它依据已有上下文用 `respond` 回答,或回投原聊天问人。请求未解决期间,线程后续消息先交 Router 判断,不向 Worker 广播,也不通过普通 steer 隐式清除请求。请求按 ID 去重,重载后由程序对账补收;等待输入期间暂停运行超时处理,响应后重新观察完成状态;
 - **引用归线程 + 相邻消息内联**:IM 消息引用(回复)了已知的触发或 Router 答复(按通道回执记下的消息 id)时,归入被引用消息所在的线程,并把被引用内容内联给 Router/Worker;评估时附带本批之前 Router 没看过的最近 5 条未 @ 群聊(准入层 filtered 留痕,滚动保留 30 条);
 - **投机执行**(可选,默认关):Router 依据「Router 规则」里写的主动策略对没人明确提出的事项后台派 `speculative` Worker 静默尝试(不订阅线程、同时最多 2 个),汇报首行 `DISCARD:` 由引擎静默丢弃并回收 Worker,`DELIVER:` 才交 Router 简短转述;
-- **跨线程指挥**:通过 `superagent_search` / `superagent_list` 找线程,用 `superagent_read` 读详情后执行 steer/cancel/retry,不自动把其他线程状态塞入当前会话;
+- **会话隔离**。Router 只回读本会话的触发、工单报告、线程和裁决。只有同一平台、机器人账号与聊天 ID 的 IM 日线程可以共享历史和工单。Paseo 内发起的 Router 仅使用当前线程。
 - **批处理**:同一批窗口内的触发合并进一次 Router LLM 调用;窗口一经武装不再被后续消息重置(有界合并,持续消息流不会无限推迟评估);
 - **看门狗分两层**。程序层每 15 秒补收 Worker 完成、回收超时运行、恢复评估和待执行动作。可选的 LLM 层将活动增量、未完成工单、权限等待和近期干预组成摘要，调用推理 API 判断进展。插件核对当前目标后应用裁决。
 - **推理边界**。Router 和 LLM 看门狗通过插件提供的函数回读编排记录。工作区和 Worker 动作留在 Paseo。传给推理端的数据可以包含用户消息、IM 内容、Worker 汇报和路径。
@@ -40,7 +40,7 @@ Worker 转回(superagent_handback 误投回流)    │
         │ dispatch                                          ▼
         └──────────────► Ticket → worktree 工作区 ──► 汇报抓取 → report Trigger 回流 → 再次 Router 评估
 
-steer/cancel/retry/subscribe 的目标也可以是「其他活跃线程」里列出的票据(跨线程指挥,裁决记录在本线程)
+steer/cancel/retry/subscribe 的目标也可以是同一 IM 聊天先前日线程中可见的工单，裁决记录在当前线程。
 LLM 看门狗（独立推理，定时）── 巡检摘要 ──► nudge/interrupt/cancel/retry/reeval/escalate(上报经 Router 告诉人)
 ```
 
@@ -51,7 +51,7 @@ LLM 看门狗（独立推理，定时）── 巡检摘要 ──► nudge/inte
 | 模块 | 实现 |
 |---|---|
 | 双层架构 | Router 通过独立 API 返回裁决。Worker 是按票据创建的 Paseo agent，通过 `superagent.ticket` 和工单状态关联。跨线程操作可先回读目标。 |
-| 事件驱动 | Trigger 三源(手动/agent 工具/worker 汇报)+ 五个 IM 通道;fast-path 程序过滤(白名单之外,未 @ 群消息记 filtered 留痕,观察模式下作上下文候选,且一律走 Router 语义判断、不直通 Worker);IM Thread 按渠道、机器人账号、聊天会话和北京时间日期划分;同日引用继续当前 Thread,跨日引用只带上下文、不重开旧 Thread;批窗口合并评估(窗口有界,不随后续消息重置,按线程合并);订阅 fan-out 直通,多对多(Router `subscribe` 让 Worker 跟随其他线程,汇报回流到每个订阅线程)。Inline:被引用消息内联、最近 5 条未 @ 相邻群聊内联。投机执行(可选):`speculative` 派发,DELIVER/DISCARD 交付或静默丢弃,并发上限 2。评估携带本轮新触发、任务快照和有界上下文。Chain of Recall:提示词里的触发/票据/线程/裁决均带 ID,历史存根也保留 ID,Router 用 `superagent_read` 按 ID 找回完整未截断记录(线程回读内联最近 10 条消息与 5 条裁决的 ID、跟随它的其他线程票据;票据回读内联跟随的线程与 Worker 会话最近 3 条消息,沿引用逐跳展开)、用 `superagent_list` 总览活跃线程(最近 10 个)、用 `superagent_search` 按关键词检索全部记录;Worker 汇报回流时截断的文本附带票据回读指针,汇报首行被要求写成含关键实体(路径/ID/命令)的自足结论句(存根与检索都取开头)。内置记忆纪律:跨轮承诺必须落 ticket 或 reply,stop/跨线程裁决目标不明时先 `superagent_list` 对账。不重复用户首行标题或 Ticket 汇报正文;历史存根追加式保留(最多 40 条,超限一次裁到 24 条,评估提示词因此获得跨轮稳定前缀,提升前缀缓存命中) |
+| 事件驱动 | Trigger 三源(手动/agent 工具/worker 汇报)+ 五个 IM 通道;fast-path 程序过滤(白名单之外,未 @ 群消息记 filtered 留痕,观察模式下作上下文候选,且一律走 Router 语义判断、不直通 Worker);IM Thread 按渠道、机器人账号、聊天会话和北京时间日期划分;同日引用继续当前 Thread,跨日引用只带上下文、不重开旧 Thread;批窗口合并评估(窗口有界,不随后续消息重置,按线程合并);订阅 fan-out 直通,多对多(Router `subscribe` 让 Worker 跟随同一 IM 聊天的日线程，汇报回流到每个有效订阅线程)。Inline:被引用消息内联、最近 5 条未 @ 相邻群聊内联。投机执行(可选):`speculative` 派发,DELIVER/DISCARD 交付或静默丢弃,并发上限 2。评估携带本轮新触发、任务快照和有界上下文。Chain of Recall:提示词里的触发/票据/线程/裁决均带 ID,历史存根也保留 ID,Router 用 `superagent_read` 按 ID 找回完整未截断记录(线程回读内联最近 10 条消息与 5 条裁决的 ID、跟随它的其他线程票据;票据回读内联跟随的线程与 Worker 会话最近 3 条消息,沿引用逐跳展开)、用 `superagent_list` 总览活跃线程(最近 10 个)、用 `superagent_search` 按关键词检索当前会话的可见记录;Worker 汇报回流时截断的文本附带票据回读指针,汇报首行被要求写成含关键实体(路径/ID/命令)的自足结论句(存根与检索都取开头)。内置记忆纪律:跨轮承诺必须落 ticket 或 reply,stop/跨线程裁决目标不明时先 `superagent_list` 对账。不重复用户首行标题或 Ticket 汇报正文;历史存根追加式保留(最多 40 条,超限一次裁到 24 条,评估提示词因此获得跨轮稳定前缀,提升前缀缓存命中) |
 | 面向人的交互 | Paseo app 即信道:推送、attention、权限流;任意 agent 会话内 `/superagent` 或 `superagent_dispatch` 工具委派,Router 答复回到原委派会话;Worker 会话可随时人工接管。多渠道输出风格:IM 来源线程的评估提示词带渠道风格小节(答复保持简短、长内容派 Worker 后转述摘要与产物位置),超长答复仍按段落自动分段回投 直通误投自愈:Worker 调 `superagent_handback` 把不属于自己的消息转回 Router 重新路由(继承原 IM/agent 回投目标),`superagent_unsubscribe` 退订后续直通 |
 | 存算/环境分离 | 即 Paseo daemon 本身:daemon 在你的机器,客户端(relay E2EE)在任何地方;执行环境留在原地。状态落盘(state.json)+ 重启自恢复是单机形态的「计算与状态分离」;云端无状态计算与端侧 daemon 受宿主形态限制不做(见 [设计取舍与限制](#设计取舍与限制)) |
 | Watchdog | 程序层负责恢复与执行。LLM 层通过有界巡检摘要判断任务进展，并记录最近结果和调用用量。 |

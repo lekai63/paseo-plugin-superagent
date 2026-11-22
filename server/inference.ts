@@ -16,9 +16,9 @@ const recallSchemas = {
 };
 
 const descriptions = {
-  superagent_list: "List active threads and their unfinished tickets. Use before closing a thread or targeting another thread.",
-  superagent_read: "Read a record by trigger, ticket, thread, or decision ID. Use for truncated context or to inspect a cross-thread target.",
-  superagent_search: "Find records by keywords (all words must match). Returns matching record IDs and short excerpts.",
+  superagent_list: "List available active threads and their unfinished tickets.",
+  superagent_read: "Read an available record by trigger, ticket, thread, or decision ID.",
+  superagent_search: "Find available records by keywords (all words must match). Returns matching record IDs and short excerpts.",
 };
 
 const tools = Object.entries(recallSchemas).map(([name, schema]) => {

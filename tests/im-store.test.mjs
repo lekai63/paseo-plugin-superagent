@@ -3,13 +3,42 @@ import test from "node:test";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SuperagentStore } from "../server/store.ts";
+import { SuperagentStore, stateFilePath } from "../server/store.ts";
 import { emptyState, SuperagentStateSchema } from "../shared/model.ts";
 
 test("old state defaults to an empty outbox", () => {
   const legacy = emptyState();
   delete legacy.imDeliveries;
   assert.deepEqual(SuperagentStateSchema.parse(legacy).imDeliveries, []);
+});
+
+test("upgrading a saved store marks only the records from before conversation isolation", async () => {
+  const home = await mkdtemp(join(tmpdir(), "superagent-conversation-store-"));
+  const original = process.env.PASEO_HOME;
+  process.env.PASEO_HOME = home;
+  try {
+    await mkdir(join(home, "plugin-data", "superagent"), { recursive: true });
+    const legacy = emptyState();
+    const decision = { id: "dec_old", threadId: "thr_chat", triggerIds: [], outcome: "reply", reply: "existing reply",
+      createdAt: "2026-11-21T00:00:00Z" };
+    legacy.decisions.push(decision);
+    await writeFile(stateFilePath(), JSON.stringify(legacy));
+
+    const store = new SuperagentStore();
+    await store.ready;
+    assert.equal(store.get().decisions[0].preConversationIsolation, true);
+    await store.update((state) => state.decisions.push({ ...decision, id: "dec_new", reply: "scoped reply" }));
+
+    const restored = new SuperagentStore();
+    await restored.ready;
+    assert.equal(restored.get().decisions[0].reply, "existing reply");
+    assert.equal(restored.get().decisions[0].preConversationIsolation, true);
+    assert.equal(restored.get().decisions[1].preConversationIsolation, undefined);
+  } finally {
+    if (original === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = original;
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 test("failed delivery progress survives a real store reload and closed-thread history trimming", async () => {

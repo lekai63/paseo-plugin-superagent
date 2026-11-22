@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import test from "node:test";
 import { SuperagentEngine } from "../server/engine.ts";
+import { migrateConversationIsolation } from "../server/conversation.ts";
 import { FeishuSource } from "../server/feishu.ts";
 import { emptyState, SuperagentStateSchema } from "../shared/model.ts";
 import { splitImReply } from "../server/im-replies.ts";
@@ -246,6 +247,17 @@ function fixture(t, status = "running", subscribed = true) {
   return { engine, state, calls, controls, finishes, ref, values, paseo, inferenceRequest, ticket: state.tickets[0], daemonWorkspaces };
 }
 
+function markImThread(thread, origin = { channel: "feishu", accountId: "bot", chatId: "shared-chat" }, day = imDay(new Date())) {
+  const key = imConversationKey(origin);
+  Object.assign(thread, { imDay: day, imConversationKey: key, key: dailyImThreadKey(key, day) });
+  return thread;
+}
+
+function markSameChatDays(first, second) {
+  markImThread(first, undefined, "2026-11-12");
+  markImThread(second, undefined, "2026-11-13");
+}
+
 function pendingTrigger(state) {
   state.triggers.push({
     id: "trigger", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
@@ -273,6 +285,7 @@ const toolCode = approvalCode("ticket", toolRequest.id);
 test("IM Worker permissions and questions each produce one durable notification", async t => {
   const f = fixture(t);
   const origin = { channel: "qq", chatId: "chat", senderId: "user" };
+  markImThread(f.state.threads[0], origin);
   f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user", text: "original task", origin, status: "delivered", receivedAt: oldTime });
   const sent = [];
   f.engine.setReplySink({ send: async (target, text) => { sent.push({ target, text }); } });
@@ -296,6 +309,7 @@ test("IM answer codes and quoted replies target the exact waiting Worker in the 
   for (const quoted of [false, true]) {
     const f = fixture(t);
     const origin = { channel: "qq", accountId: "bot", chatId: "chat", senderId: "user" };
+    markImThread(f.state.threads[0], origin);
     f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "qq", sender: "user",
       text: "task", origin, status: "delivered", receivedAt: oldTime });
     f.engine.setReplySink({ send: async () => "question-message" });
@@ -316,6 +330,7 @@ test("IM answer codes and quoted replies target the exact waiting Worker in the 
 test("IM card callbacks are checked against the persisted delivery and cannot authorize a different chat", async t => {
   const f = fixture(t);
   const origin = { channel: "wecom", accountId: "bot", chatId: "chat", senderId: "user" };
+  markImThread(f.state.threads[0], origin);
   f.state.triggers.push({ id: "original", threadId: "thread", threadKey: "manual:test", kind: "wecom", sender: "user",
     text: "task", origin, status: "delivered", receivedAt: oldTime });
   const messages = [], cards = [];
@@ -532,6 +547,7 @@ test("IM permission commands and cards require a delivered request from the tick
   f.state.threads.push({ ...f.state.threads[0], id: "follower", key: "manual:follower" });
   f.ticket.follows = ["follower"];
   for (const [threadId, recipient] of [["thread", origin], ["follower", follower]]) {
+    markImThread(f.state.threads.find(thread => thread.id === threadId), recipient);
     f.state.triggers.push({ id: `message-${threadId}`, threadId, threadKey: "manual:test", kind: "feishu", sender: recipient.senderId,
       text: "message", origin: recipient, status: "delivered", receivedAt: oldTime });
   }
@@ -620,9 +636,10 @@ test("a pending question prevents reply fan-out to other Workers even when its h
   assert.equal(f.state.triggers.find(trigger => trigger.id === result.triggerId).status, "pending");
 });
 
-test("permission notifications reach followed conversations with their own reply destinations", async t => {
+test("questions reach followed daily threads of the same chat with their own reply destinations", async t => {
   const f = fixture(t);
   f.state.threads.push({ ...f.state.threads[0], router: null, id: "followed", key: "manual:followed" });
+  markSameChatDays(...f.state.threads);
   f.ticket.follows = ["followed"];
   f.state.triggers.push({ id: "original", threadId: "followed", kind: "agent", replyToAgentId: "caller", status: "delivered", receivedAt: oldTime });
   f.controls.pendingPermissions.set("worker", [questionRequest]);
@@ -877,6 +894,7 @@ test("IM sends the complete long reply sequentially and persists each acknowledg
   pendingTrigger(f.state);
   const origin = { channel: "dingtalk", chatId: "chat", senderId: "user", replyRef: "private-webhook" };
   f.state.triggers[0].origin = origin;
+  markImThread(f.state.threads[0], origin);
   const text = "完整结果👩🏽‍💻\n\n".repeat(250);
   f.controls.verdict = { actions: [{ action: "reply", reply: text }, { action: "stop" }] };
   const sent = [];
@@ -905,6 +923,7 @@ test("a failed IM part pauses delivery and manual retry resumes without repeatin
   f.values.imReplyMaxChars = 100;
   pendingTrigger(f.state);
   f.state.triggers[0].origin = { channel: "qq", chatId: "g:1", senderId: "user" };
+  markImThread(f.state.threads[0], f.state.triggers[0].origin);
   const text = "long reply ".repeat(60);
   f.controls.verdict = { actions: [{ action: "reply", reply: text }] };
   const expected = splitImReply(text, 100);
@@ -932,6 +951,7 @@ test("a restored pending IM delivery resumes at its durable offset and concurren
   const f = fixture(t, "waiting");
   const delivery = { id: "saved-delivery", threadId: "thread", origin: { channel: "qq", chatId: "g:1", senderId: "user" },
     parts: ["[1/3] one", "[2/3] two", "[3/3] three"], nextPart: 1, status: "pending", createdAt: oldTime, updatedAt: oldTime };
+  markImThread(f.state.threads[0], delivery.origin);
   const restored = SuperagentStateSchema.parse({ ...f.state, imDeliveries: [delivery] });
   f.state.imDeliveries = restored.imDeliveries;
   const entered = deferred();
@@ -954,6 +974,7 @@ test("an unavailable IM sink retains the answer for later retry", async (t) => {
   const f = fixture(t, "waiting");
   pendingTrigger(f.state);
   f.state.triggers[0].origin = { channel: "qq", chatId: "g:1", senderId: "user" };
+  markImThread(f.state.threads[0], f.state.triggers[0].origin);
   await f.engine.runEval("thread");
   assert.equal(f.state.imDeliveries[0].status, "failed");
   assert.equal(f.state.imDeliveries[0].nextPart, 0);
@@ -963,6 +984,7 @@ test("IM recovery sends nothing while the durable outbox cannot be written", asy
   const f = fixture(t, "waiting");
   f.state.imDeliveries.push({ id: "unsaved", threadId: "thread", origin: { channel: "qq", chatId: "g:1", senderId: "user" },
     parts: ["answer"], nextPart: 0, status: "pending", createdAt: oldTime, updatedAt: oldTime });
+  markImThread(f.state.threads[0], f.state.imDeliveries[0].origin);
   let sends = 0;
   f.engine.setReplySink({ send: async () => { sends++; } });
   f.engine.store.update = async () => { throw new Error("disk unavailable"); };
@@ -1985,14 +2007,15 @@ test("cross-thread targets are found through search instead of copied into evalu
   });
   const prompt = await evaluateRouter(f, "plan A 在 IM 里,但 B 线程的工单要先改");
   assert.doesNotMatch(prompt, /## Other active threads|plan B|Other work/);
-  const found = await f.engine.searchRecords("plan B");
+  const found = await f.engine.searchRecords("plan B", "watchdog");
   assert.match(found, /thread-b thread active/);
 
 });
 
-test("a Router steer action can command a ticket on another thread", async (t) => {
+test("a Router can steer a ticket from another day of the same IM chat", async (t) => {
   const f = fixture(t, "waiting");
   f.state.threads.push({ ...f.state.threads[0], router: null, id: "thread-b", key: "manual:b", title: "plan B" });
+  markSameChatDays(...f.state.threads);
   f.state.tickets.push({
     ...f.state.tickets[0], id: "tkt-b", threadId: "thread-b", title: "Other work",
     status: "running", workerAgentId: "worker-b", workspaceId: "workspace-b",
@@ -2011,9 +2034,10 @@ test("a Router steer action can command a ticket on another thread", async (t) =
   assert.equal(f.state.triggers[0].status, "evaluated");
 });
 
-test("a persisted cross-thread steer survives a restart and still reaches the other ticket", async (t) => {
+test("a persisted steer within the same IM chat survives a restart", async (t) => {
   const f = fixture(t, "waiting");
   f.state.threads.push({ ...f.state.threads[0], router: null, id: "thread-b", key: "manual:b", title: "plan B" });
+  markSameChatDays(...f.state.threads);
   f.state.tickets.push({
     ...f.state.tickets[0], id: "tkt-b", threadId: "thread-b", title: "Other work",
     status: "running", workerAgentId: "worker-b", startedAt: new Date().toISOString(),
@@ -2063,6 +2087,7 @@ test("worker handback re-queues a misdelivered message with reply routing intact
     text: "原消息", status: "evaluated", context: false, receivedAt: "2021-01-01T00:00:00.000Z",
     origin: { channel: "feishu", chatId: "oc_1", senderId: "u_1" }, note: null, replyToAgentId: null,
   });
+  markImThread(f.state.threads[0], f.state.triggers[0].origin);
   const outcome = await f.engine.workerHandback("ticket", "这条消息与我的工单无关:帮忙订机票", { unsubscribe: true });
   assert.equal(outcome.ok, true);
   const handback = f.state.triggers.find((trigger) => trigger.kind === "engine");
@@ -2096,21 +2121,21 @@ test("readRecord recalls full untruncated records by id prefix", async (t) => {
     reply: "答复全文", rationale: null, ticketId: null, raw: null, createdAt: now,
   });
   f.state.threads.push({ ...f.state.threads[0], router: null, id: "thr_full", title: "带前缀的线程" });
-  const trigger = await f.engine.readRecord("trg_full");
+  const trigger = await f.engine.readRecord("trg_full", "watchdog");
   assert.ok(trigger.includes("x".repeat(5000)), "trigger text comes back untruncated");
-  const ticket = await f.engine.readRecord("tkt_full");
+  const ticket = await f.engine.readRecord("tkt_full", "watchdog");
   assert.match(ticket, /## mandate\n完整任务书/);
   assert.ok(ticket.includes("R".repeat(19_999)), "reports come back at the recall cap");
   assert.ok(!ticket.includes("R".repeat(20_000)), "oversized reports are still bounded");
-  const thread = await f.engine.readRecord("thr_full");
+  const thread = await f.engine.readRecord("thr_full", "watchdog");
   assert.match(thread, /# thread thr_full/);
   assert.match(thread, /title: 带前缀的线程/);
   assert.match(thread, /- \[tkt_full\] "test" status=running/);
-  assert.equal(await f.engine.readRecord("thread"), null, "ids without a known prefix are not recalled");
-  const decision = await f.engine.readRecord("dec_full");
+  assert.equal(await f.engine.readRecord("thread", "watchdog"), null, "ids without a known prefix are not recalled");
+  const decision = await f.engine.readRecord("dec_full", "watchdog");
   assert.match(decision, /outcome: reply/);
   assert.match(decision, /reply: 答复全文/);
-  assert.equal(await f.engine.readRecord("trg_nope"), null);
+  assert.equal(await f.engine.readRecord("trg_nope", "watchdog"), null);
 });
 
 test("listThreads shows every active thread with its unfinished tickets", async (t) => {
@@ -2123,7 +2148,7 @@ test("listThreads shows every active thread with its unfinished tickets", async 
     id: "trg_wait", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
     text: "pending 事件", status: "pending", context: false, receivedAt: new Date().toISOString(),
   });
-  const listing = await f.engine.listThreads();
+  const listing = await f.engine.listThreads("watchdog");
   assert.match(listing, /- thread thread "test" pendingTriggers=1/);
   assert.match(listing, /- thread thread-b "plan B"/);
   assert.match(listing, /  - \[ticket\] "test" status=running subscribed=true/);
@@ -2146,7 +2171,7 @@ test("listThreads annotates truncation beyond its 10-thread and 8-ticket caps", 
   for (let index = 1; index <= 9; index++) {
     f.state.tickets.push({ ...f.state.tickets[0], id: `tkt_x${index}`, title: `extra ${index}` });
   }
-  const listing = await f.engine.listThreads();
+  const listing = await f.engine.listThreads("watchdog");
   assert.match(listing, /\(\+2 more unfinished tickets not shown\)/);
   assert.match(listing, /\(2 more active threads not shown — find them by a topic keyword with superagent_search\)/);
   assert.doesNotMatch(listing, /thread-10\b/, "the oldest overflow thread is not listed");
@@ -2170,13 +2195,13 @@ test("searchRecords matches keywords across record types, newest first, with bou
     reply: "查完了:没有装 caddy。", rationale: null, ticketId: null, raw: null, createdAt: oldTime,
   });
   // AND 语义:两个词都出现才命中;分词命中跨字段(标题 + 报告)同样算。
-  const both = await f.engine.searchRecords("caddy 210");
+  const both = await f.engine.searchRecords("caddy 210", "watchdog");
   assert.match(both, /# Search results for \[caddy 210\] — 2 match/);
   assert.match(both, /- \[trg_hit trigger manual evaluated\] thread=thread user: /);
   assert.match(both, /- \[tkt_reported ticket running\] thread=thread "caddy 核查": /);
   assert.match(both, /Read any record in full with superagent_read <id>/);
   // 单词命中线程标题与更早的裁决,按时间新→旧排序。
-  const single = await f.engine.searchRecords("caddy");
+  const single = await f.engine.searchRecords("caddy", "watchdog");
   const order = [
     single.indexOf("[trg_hit"),
     single.indexOf("[tkt_reported"),
@@ -2184,16 +2209,16 @@ test("searchRecords matches keywords across record types, newest first, with bou
   ];
   assert.ok(order[0] > 0 && order[1] > order[0] && order[2] > order[1], "newest matches come first");
   // 无命中、空白查询给出可读答复;大小写不敏感。
-  assert.match(await f.engine.searchRecords("不存在的关键词"), /No records match all of: 不存在的关键词\. No such record exists.*retry at most once/);
-  assert.match(await f.engine.searchRecords("   "), /No usable keywords/);
-  assert.match(await f.engine.searchRecords("CADDY"), /# Search results for \[caddy\]/);
+  assert.match(await f.engine.searchRecords("不存在的关键词", "watchdog"), /No records match all of: 不存在的关键词 in the available records.*retry at most once/);
+  assert.match(await f.engine.searchRecords("   ", "watchdog"), /No usable keywords/);
+  assert.match(await f.engine.searchRecords("CADDY", "watchdog"), /# Search results for \[caddy\]/);
   // 摘录有界:长文本命中时摘录不超 160 字符窗口。
   f.state.triggers.push({
     id: "trg_long", threadId: "thread", threadKey: "manual:test", kind: "manual", sender: "user",
     text: `${"前".repeat(500)}caddy${"后".repeat(500)}`, status: "evaluated", context: false,
     receivedAt: new Date(Date.now() + 1000).toISOString(), note: null,
   });
-  const longHit = await f.engine.searchRecords("caddy");
+  const longHit = await f.engine.searchRecords("caddy", "watchdog");
   const excerpt = longHit.split("\n").find((line) => line.includes("trg_long"));
   assert.ok(excerpt.length < 260, `excerpt stays bounded, got ${excerpt.length} chars`);
   assert.ok(excerpt.startsWith("…") || excerpt.includes("…"), "mid-text hits carry an ellipsis");
@@ -2208,12 +2233,130 @@ test("searchRecords hides the calling Router's own pending triggers and thread, 
     text: `caddy ${id}`, status, context: false, receivedAt: now, note: null });
   f.state.triggers.push(trigger("trg_own_pending", "thread", "pending"), trigger("trg_own_done", "thread", "evaluated"),
     trigger("trg_other_pending", "other", "pending"));
-  const scoped = await f.engine.searchRecords("caddy", "thread");
+  const scoped = await f.engine.searchRecords("caddy", { threadId: "thread" });
   assert.doesNotMatch(scoped, /trg_own_pending|\[thread thread active\]/);
-  for (const id of ["trg_own_done", "trg_other_pending", "[other thread active]"]) assert.ok(scoped.includes(id), id);
-  const unscoped = await f.engine.searchRecords("caddy");
+  assert.match(scoped, /trg_own_done/);
+  assert.doesNotMatch(scoped, /trg_other_pending|\[other thread active\]/);
+  const unscoped = await f.engine.searchRecords("caddy", "watchdog");
   for (const id of ["trg_own_pending", "[thread thread active]"]) assert.ok(unscoped.includes(id), id);
-  assert.ok((await f.engine.searchRecords("caddy", "unknown-agent")).includes("trg_own_pending"));
+  assert.match(await f.engine.searchRecords("caddy", { threadId: "unknown" }), /^No records match/);
+});
+
+test("Router inference scopes all recall tools to the IM chat, including reports from earlier days", async (t) => {
+  const f = fixture(t, "completed");
+  const origin = { channel: "weixin", accountId: "bot-a", chatId: "room-a", senderId: "someone" };
+  const current = markImThread(f.state.threads[0], origin, "2026-11-13");
+  const earlier = markImThread(otherThread("thr_earlier", "earlier same chat"), origin, "2026-11-12");
+  const foreign = [
+    markImThread(otherThread("thr_room", "private other room"), { ...origin, chatId: "room-b" }),
+    markImThread(otherThread("thr_bot", "private other bot"), { ...origin, accountId: "bot-b" }),
+    markImThread(otherThread("thr_platform", "private other platform"), { ...origin, channel: "feishu" }),
+    otherThread("thr_local", "private Paseo thread"),
+  ];
+  f.state.threads.push(earlier, ...foreign);
+  f.state.tickets.push({ ...f.ticket, id: "tkt_earlier", threadId: earlier.id, report: "statusword same chat report",
+    follows: [foreign[0].id], workerAgentId: null });
+  for (const thread of foreign) {
+    const suffix = thread.id.slice(4);
+    f.state.tickets.push({ ...f.ticket, id: `tkt_${suffix}`, threadId: thread.id, title: thread.title,
+      report: "statusword private report", follows: [current.id], status: "running", pendingRequests: [questionRequest] });
+    f.state.triggers.push({ id: `trg_${suffix}`, threadId: thread.id, kind: "manual", sender: "user",
+      text: "statusword private message", status: "evaluated", receivedAt: oldTime });
+    f.state.decisions.push({ id: `dec_${suffix}`, threadId: thread.id, reply: "statusword private decision",
+      outcome: "reply", triggerIds: [], createdAt: oldTime });
+  }
+  const calls = [
+    ["superagent_list", {}],
+    ["superagent_search", { query: "statusword" }],
+    ["superagent_read", { id: "tkt_earlier" }],
+    ["superagent_read", { id: "thr_room" }],
+    ["superagent_read", { id: "tkt_room" }],
+    ["superagent_read", { id: "trg_room" }],
+    ["superagent_read", { id: "dec_room" }],
+    ["superagent_read", { id: "tkt_missing" }],
+  ];
+  f.controls.runRouter = async (_prompt, { body }) => body.messages.some((message) => message.role === "tool")
+    ? { lastMessage: JSON.stringify({ actions: [{ action: "reply", reply: "Scoped reply" }] }) }
+    : Response.json({ choices: [{ message: { tool_calls: calls.map(([name, args], i) => ({
+      id: `scope-${i}`, type: "function", function: { name, arguments: JSON.stringify(args) },
+    })) }, finish_reason: "tool_calls" }] });
+  f.state.triggers.push({ id: "trg_current", threadId: current.id, threadKey: current.key, origin,
+    kind: "weixin", sender: "user", text: "Recap today's status", status: "pending", receivedAt: oldTime });
+  const sent = [];
+  f.engine.setReplySink({ send: async (recipient, reply) => { sent.push({ recipient, reply }); } });
+  await f.engine.runEval(current.id);
+
+  const messages = f.calls.requests.at(-1).body.messages;
+  const results = messages.filter((message) => message.role === "tool").map((message) => message.content.split("\n[Recall:")[0]);
+  assert.match(results[0], /thr_earlier/);
+  assert.match(results[1], /1 match\(es\).*\n.*statusword same chat report/);
+  assert.match(results[2], /## report.*\nstatusword same chat report/);
+  assert.match(results[7], /No retained record with that ID/);
+  assert.deepEqual(results.slice(3, 7), Array(4).fill(results[7]));
+  assert.doesNotMatch(JSON.stringify(messages), /private other|private Paseo|private report|private message|private decision/);
+  assert.deepEqual(sent, [{ recipient: origin, reply: "Scoped reply" }]);
+});
+
+test("foreign ticket actions and pre-existing subscriptions cannot relay messages or reports", async (t) => {
+  const f = fixture(t, "running");
+  const first = markImThread(f.state.threads[0]);
+  const second = markImThread(otherThread("thread-b"), { channel: "feishu", accountId: "bot", chatId: "another-chat" });
+  f.state.threads.push(second);
+  f.ticket.follows = [second.id];
+  const event = await f.engine.dispatch({ task: "Update the ticket", threadId: second.id });
+  assert.equal(event.directDelivered, false);
+
+  f.controls.verdict = { actions: [
+    { action: "subscribe", ticketId: f.ticket.id },
+    { action: "steer", ticketId: f.ticket.id, text: "foreign follow-up" },
+    { action: "respond", ticketId: f.ticket.id, requestId: "question", response: { behavior: "deny" } },
+    { action: "cancel", ticketId: f.ticket.id },
+    { action: "retry", ticketId: f.ticket.id },
+  ] };
+  await f.engine.runEval(second.id);
+  assert.equal(f.state.decisions.length, 5);
+  assert.ok(f.state.decisions.every((decision) => decision.outcome === "ignore"));
+  f.state.pendingActions.push({ id: "act_old_link", threadId: second.id, decisionId: "dec_old_link", kind: "steer",
+    ticketId: f.ticket.id, text: "queued foreign follow-up", attempts: 0, createdAt: oldTime });
+  await f.engine.runPendingAction("act_old_link");
+  assert.deepEqual(f.state.pendingActions, []);
+  assert.deepEqual(f.calls.sends, []);
+  assert.equal(f.ticket.status, "running");
+
+  await f.engine.settleTicketRun(f.ticket.id, null);
+  assert.deepEqual(f.state.triggers.filter((trigger) => trigger.kind === "report").map((trigger) => trigger.threadId), [first.id]);
+});
+
+test("an upgrade retains incoming history while generated records and queued replies stay in Paseo", async (t) => {
+  const f = fixture(t, "completed");
+  const origin = { channel: "feishu", accountId: "bot", chatId: "private-chat", senderId: "user" };
+  const thread = markImThread(f.state.threads[0], origin);
+  thread.summary = "old generated summary";
+  thread.routerMemory = [{ text: "old generated memory", triggerId: "trg_incoming" }];
+  thread.latestResult = { id: "trg_old_report", kind: "worker_report", text: "old generated result", ticketIds: [f.ticket.id], createdAt: oldTime };
+  f.state.triggers.push({ id: "trg_incoming", threadId: thread.id, threadKey: thread.key, origin,
+    kind: "feishu", sender: "user", text: "old incoming message", receivedAt: oldTime, status: "evaluated",
+    quote: { text: "old generated quote" } });
+  f.state.triggers.push({ id: "trg_old_report", threadId: thread.id, threadKey: thread.key, origin,
+    kind: "report", sender: `worker:${f.ticket.id}`, text: "old generated report", receivedAt: oldTime, status: "pending" });
+  f.state.imDeliveries.push({ id: "old-outbox", threadId: thread.id, origin, parts: ["old queued reply"],
+    nextPart: 0, status: "pending", createdAt: oldTime, updatedAt: oldTime });
+  migrateConversationIsolation(f.state);
+  const sent = [];
+  f.engine.setReplySink({ send: async (_origin, text) => { sent.push(text); } });
+  await f.engine.sendImDelivery("old-outbox");
+  await assert.rejects(f.engine.retryImDelivery("old-outbox"), /conversation isolation/);
+  assert.deepEqual(sent, []);
+
+  const scope = { threadId: thread.id };
+  const incoming = await f.engine.readRecord("trg_incoming", scope);
+  assert.match(incoming, /old incoming message/);
+  assert.doesNotMatch(incoming, /old generated/);
+  assert.equal(await f.engine.readRecord("trg_old_report", scope), null);
+  await evaluateRouter(f, "fresh request");
+  assert.doesNotMatch(f.calls.prompts.at(-1), /old generated/);
+  assert.equal(f.state.triggers.find((trigger) => trigger.id === "trg_old_report").status, "filtered");
+  assert.equal(f.state.triggers.find((trigger) => trigger.id === "trg_old_report").text, "old generated report");
 });
 
 test("worker reports truncated in the trigger text keep a recall pointer to the ticket", async (t) => {
@@ -2350,7 +2493,7 @@ test("an IM reply quoting a known message joins that message's thread and the Ro
     id: "trg_m1", threadId: "thread", threadKey: "manual:test", kind: "feishu", sender: "feishu:ou_a",
     text: "登录页报 500", status: "evaluated", context: false, receivedAt: oldTime, origin: chat("m1", "ou_a"),
   });
-  f.state.threads[0].imDay = imDay(new Date());
+  markImThread(f.state.threads[0], chat("m1", "ou_a"));
   const result = await f.engine.dispatch({
     task: "还是不行", sender: "feishu:ou_b", origin: chat("m2", "ou_b"),
     threadKey: "feishu:chat:oc_g:root:m1", replyTo: ["m1"],
@@ -2366,6 +2509,7 @@ test("quoting a Router reply finds its thread through the sent message id the ch
   const f = fixture(t, "completed");
   pendingTrigger(f.state);
   f.state.triggers[0].origin = { channel: "qq", chatId: "g:1", messageId: "5", senderId: "u" };
+  markImThread(f.state.threads[0], f.state.triggers[0].origin);
   f.controls.verdict = { actions: [{ action: "reply", reply: "已修复,请重试" }] };
   f.engine.setReplySink({ send: async () => "901" });
   await f.engine.runEval("thread");
@@ -2402,9 +2546,10 @@ test("filtered chatter rolls over and the latest unaddressed messages are inline
   assert.equal(prompt.split("闲聊 31").length - 1, 1, "inlined chatter is not repeated in the history stubs");
 });
 
-test("a Router subscribe makes another thread's worker follow this one: follow-ups fan out and reports return to both", async (t) => {
+test("subscribe connects daily threads of the same chat for follow-ups and reports", async (t) => {
   const f = fixture(t, "running");
   f.state.threads.push(otherThread("thread-b"));
+  markSameChatDays(...f.state.threads);
   f.state.triggers.push({
     id: "trg_b", threadId: "thread-b", threadKey: "manual:thread-b", kind: "manual", sender: "user",
     text: "这和 A 那边的修复是一回事", status: "pending", context: false, receivedAt: new Date().toISOString(),
@@ -2433,6 +2578,7 @@ test("a Router subscribe makes another thread's worker follow this one: follow-u
 test("a subscribe for a finished or unknown ticket is recorded without changing anything", async (t) => {
   const f = fixture(t, "failed");
   f.state.threads.push(otherThread("thread-b"));
+  markSameChatDays(...f.state.threads);
   f.state.triggers.push({
     id: "trg_b", threadId: "thread-b", threadKey: "manual:thread-b", kind: "manual", sender: "user",
     text: "接上", status: "pending", context: false, receivedAt: new Date().toISOString(),
@@ -2519,12 +2665,12 @@ test("chain of recall: threads list their messages, decisions and followers; tic
     id: "dec_1", threadId: "thr_main", triggerIds: ["trg_1"], outcome: "dispatch", reply: null,
     rationale: null, ticketId: "tkt_main", raw: null, createdAt: oldTime,
   });
-  const thread = await f.engine.readRecord("thr_main");
+  const thread = await f.engine.readRecord("thr_main", "watchdog");
   assert.match(thread, /## recent messages \(1 of 1, oldest first\)\n- \[trg_1 manual evaluated\] user: 请修复登录/);
   assert.match(thread, /## recent router decisions \(1 of 1\)\n- \[dec_1 dispatch\] tkt_main/);
-  const followed = await f.engine.readRecord("thr_b");
+  const followed = await f.engine.readRecord("thr_b", "watchdog");
   assert.match(followed, /## tickets of other threads following this one \(1\)\n- \[tkt_main\] "test" status=running home-thread=thr_main/);
-  const ticket = await f.engine.readRecord("tkt_main");
+  const ticket = await f.engine.readRecord("tkt_main", "watchdog");
   assert.match(ticket, /also follows: thread thr_b "B 讨论" \(active\)/);
   assert.match(ticket, /## recent worker messages \(session tail, oldest first\)\n- work completed/);
 });
@@ -2545,10 +2691,12 @@ test("the LLM watchdog patrols unfinished work, judges progress across patrols, 
   assert.match(f.calls.patrols[0], /### ticket "test" — status=running/);
   assert.match(f.calls.patrols[0], /activity: first patrol for this ticket/);
   assert.match(f.calls.patrols[0], /latest worker message \(excerpt\):\n```text\nwork completed/);
-  assert.ok(f.calls.sends.some((send) => send.id === "worker" && send.text === "[watchdog] 先跑单测再改代码"));
+  assert.ok(f.calls.sends.some((send) => send.id === "worker" && send.text === "[watchdog] Review your mandate and recent progress before continuing."));
   const escalation = f.state.triggers.find((item) => item.sender === "watchdog");
   assert.equal(escalation.status, "pending");
-  assert.match(escalation.text, /需要人决定是否回滚/);
+  assert.match(escalation.text, /A task needs the host user.s attention/);
+  assert.doesNotMatch(escalation.text, /需要人决定是否回滚/);
+  assert.match(f.state.decisions.at(-1).rationale, /需要人决定是否回滚/);
   assert.ok(f.calls.evals.includes("thread"), "the Router tells the human");
   assert.equal(f.state.decisions.filter((decision) => decision.outcome === "watchdog").length, 2);
   assert.equal(f.state.kv.watchdog.lastSummary, "ticket loops on the same failure");
@@ -2772,9 +2920,9 @@ test("thread search includes the date and IM channel of retained closed conversa
   const f = fixture(t);
   f.state.threads.push({ ...f.state.threads[0], id: "thr_previous", router: null, title: "network incident", state: "closed",
     imDay: "2026-11-12", imConversationKey: '["feishu","bot","chat"]' });
-  const found = await f.engine.searchRecords("2026-11-12 feishu");
+  const found = await f.engine.searchRecords("2026-11-12 feishu", "watchdog");
   assert.match(found, /thr_previous thread closed.*day=2026-11-12/);
-  assert.match(await f.engine.readRecord("thr_previous"), /IM day: 2026-11-12/);
+  assert.match(await f.engine.readRecord("thr_previous", "watchdog"), /IM day: 2026-11-12/);
 });
 
 // Router deadlines and idle leases.
@@ -2851,6 +2999,7 @@ test("waiting Worker retirement protects cross-thread messages, live runs and re
     f.controls.sessionStatuses.set("worker", "idle");
     if (reason === "follows") {
       f.state.threads.push(otherThread("thread-b"));
+      markSameChatDays(...f.state.threads);
       f.ticket.follows = ["thread-b"];
       f.state.triggers.push({ id: "other", threadId: "thread-b", status: "pending", receivedAt: oldTime });
     } else if (reason === "running") f.controls.sessionStatuses.set("worker", "running");
@@ -2922,9 +3071,14 @@ test("thread expiry rechecks activity after refresh and respects following worke
     };
     if (reason === "follower") {
       f.state.threads.push(otherThread("thread-b"));
+      markSameChatDays(...f.state.threads);
       f.state.tickets.push({ ...f.ticket, id: "other-ticket", threadId: "thread-b", status: "running", workerAgentId: null, follows: ["thread"] });
     }
-    if (reason === "delivery") f.state.imDeliveries.push({ id: "unsent", threadId: "thread", status: "failed" });
+    if (reason === "delivery") {
+      const origin = { channel: "feishu", accountId: "bot", chatId: "shared-chat", senderId: "user" };
+      markImThread(f.state.threads[0], origin);
+      f.state.imDeliveries.push({ id: "unsent", threadId: "thread", origin, status: "failed", createdAt: oldTime });
+    }
     if (reason === "request") f.ticket.pendingRequests = [toolRequest];
     if (reason === "action") f.state.pendingActions.push({ id: "action", threadId: "thread", kind: "steer", attempts: 0 });
     await f.engine.reconcile();

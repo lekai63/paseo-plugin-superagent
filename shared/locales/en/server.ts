@@ -174,6 +174,7 @@ export const server = {
     approvalInFlight: "A response to this request is already being submitted.",
     approvalFailed: "Could not confirm your decision with the Worker: {{error}}. Check the Worker's session in Paseo for the current status.",
     resendNotFailed: "Only replies that failed to send can be resent",
+    resendOutsideConversation: "This reply cannot be sent under conversation isolation",
     resendFailed: "Resend failed; progress is kept. Check the IM connection or whether the reply window has expired",
     resendIncomplete: "The reply has not been fully sent yet; progress is kept. Check the run status later",
   },

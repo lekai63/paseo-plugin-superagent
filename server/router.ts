@@ -1,5 +1,6 @@
 import type { PaseoApi } from "@getpaseo/client";
-import type { SuperagentState, Thread, Ticket, Trigger, Decision } from "../shared/model";
+import type { Thread, Ticket, Trigger, Decision } from "../shared/model";
+import type { ConversationRecords } from "./conversation";
 import { followsOf } from "../shared/execution";
 import { approvalCode, needsHumanApproval } from "./approvals";
 import { DECISION_REPEAT_LIMIT, DECISION_TOOL_LIMIT } from "./decision-budget";
@@ -26,10 +27,10 @@ const ROUTER_RULES = [
   "You are the Router of a super-agent orchestration layer running inside Paseo.",
   "You receive batches of events (triggers) for one conversation thread and decide what happens next.",
   "Each evaluation belongs to ONE thread and decides only its new triggers,",
-  "identified by its ID; never answer another thread's events here. Find other threads, including",
-  "previous IM days and other IM channels, with superagent_search or superagent_list, then read",
-  "their records before steering, canceling, retrying or subscribing. Do not reply to or close them here.",
-  "When a terse IM continuation or approval has no context in this thread, recall earlier threads",
+  "identified by its ID. Recall is limited to this conversation. In IM, that can include earlier",
+  "days of the same chat with the same bot. Use only available tickets as action targets.",
+  "Use these tools for Superagent history. If a record is unavailable here, explain that to the user.",
+  "When a terse IM continuation or approval has no context in this thread, recall earlier days of this chat",
   "with superagent_list/search before guessing its target. Pending requests and current authorization",
   "must still be verified against the exact ticket; old conversation text never grants consent.",
   "Later plugin configuration updates replace older configuration and preferences, never the event text.",
@@ -38,18 +39,18 @@ const ROUTER_RULES = [
   "tools (web search, shell, file reads or edits, sub-agents) — a separate Worker agent with full",
   "tools does the work. Use the recall tools to recover the full text of anything marked truncated",
   "(a trigger, worker report or history stub), to find a record you only remember fragments of",
-  "(keyword search), and to inspect a ticket of another thread before steering it;",
+  "(keyword search), and to inspect an available ticket before steering it;",
   "if they are unavailable, decide from the prompt alone.",
   "Recall only when a trigger points at earlier work, an id, or a target you cannot identify from the",
   "prompt; a self-contained new request needs no recall: decide it directly (the Worker researches).",
-  "Recall once for each missing fact and never poll live worker state; when a search finds nothing,",
-  "the record does not exist, so do not keep rephrasing it. A single evaluation permits at most",
+  "Recall once for each missing fact and never poll live worker state. When a search finds nothing,",
+  "work with the available context. A single evaluation permits at most",
   `${DECISION_TOOL_LIMIT} recall calls and ${DECISION_REPEAT_LIMIT} calls with identical arguments; every recall result shows how many`,
   "you have used. Once the budget is used up, further recall calls are refused: return the verdict",
   "with what you already know.",
   "Memory discipline: only the supplied thread memory and records carry facts across evaluations.",
   "Use current state as authoritative over old messages. Keep open commitments in a ticket mandate,",
-  "a reply, or sourced thread memory. Before stop, or any steer/cancel/retry against another thread when",
+  "a reply, or sourced thread memory. Before stop or any steer/cancel/retry when",
   "the target is not certain from the stubs, reconcile the full picture with superagent_list first",
   "(superagent_search when you remember only fragments of the target).",
 
@@ -73,7 +74,7 @@ const ROUTER_RULES = [
   '  explain it. Optional "unsubscribe": true when this thread should NOT route follow-ups',
   "  directly to that worker.",
   "- steer: send an instruction into the Worker of one active ticket (use its exact id) —",
-  "  tickets of this thread are listed below; find other threads with the recall tools.",
+  "  tickets of this thread are listed below; find earlier tickets of this chat with the recall tools.",
   '  "mode":"steer" (the default) lets the running turn absorb the',
   '  instruction; "mode":"interrupt" aborts the current turn and takes over. Use it to redirect',
   "  a worker, add context, or reply to a worker's question reaching you through the thread.",
@@ -100,15 +101,14 @@ const ROUTER_RULES = [
   "  A human reply can answer one or several listed requests: match the context and ticket before",
   "  responding. Use reply to clarify ambiguity. Never use steer as a substitute for respond.",
   "  The current pending request list is authoritative; old notifications may already be resolved.",
-  "- cancel: stop exactly one ticket of this or another active thread (its Worker is retired",
+  "- cancel: stop exactly one available ticket (its Worker is retired",
   "  and the thread stays open for more work). Prefer this over stop when only one task should",
   "  end. Also cancel a waiting ticket once its conversation is clearly over, so its lingering",
   "  Worker is retired.",
   "- retry: relaunch a failed/canceled/completed ticket when its work should be attempted",
   '  again. Terminal tickets of this thread are listed under "Recently finished tickets" below;',
-  "  terminal tickets of other threads are not listed — recall them with superagent_list or",
-  "  superagent_search.",
-  "- subscribe: make the Worker of an existing active ticket (find it with the recall tools)",
+  "  search earlier tickets of the same chat with superagent_search.",
+  "- subscribe: make the Worker of an existing active ticket of this conversation",
   "  ALSO follow this thread: later messages here go straight to it,",
   "  and its report comes back here as well. Use it when this conversation turns out to be about",
   "  work that worker is already doing; pair it with a steer telling the worker what it needs.",
@@ -188,7 +188,7 @@ function workerProfileLines({ defaultWorker, profiles = [] }: RouterWorkerEnviro
 export interface RouterPromptContext {
   thread: Thread;
   batch: Trigger[];
-  state: SuperagentState;
+  state: ConversationRecords;
   worker: RouterWorkerEnvironment;
   routerInstructions?: string;
   /** 规则由 system prompt 或消息前缀提供;每次评估都携带线程窗口。 */
@@ -450,7 +450,7 @@ export function composeEvalPrompt({
 
 /** 消息派生标题:线程首条已评估/直通触发的截断首行(intake 同源规则)。状态压缩裁掉
  *  旧触发前它持续命中,标题行稳定省略;持久来源(state.triggers)与本轮批次无关。 */
-function titleDerivedFrom(state: SuperagentState, threadId: string): string | null {
+function titleDerivedFrom(state: ConversationRecords, threadId: string): string | null {
   const first = state.triggers
     .filter((trigger) => trigger.threadId === threadId && ["evaluated", "delivered"].includes(trigger.status))
     .sort((a, b) => a.receivedAt.localeCompare(b.receivedAt))[0];
@@ -462,7 +462,7 @@ function titleDerivedFrom(state: SuperagentState, threadId: string): string | nu
 const THREAD_WINDOW_MAX = 40;
 const THREAD_WINDOW_KEEP = 24;
 
-function threadWindow(state: SuperagentState, threadId: string, currentEvents: Trigger[]): string[] {
+function threadWindow(state: ConversationRecords, threadId: string, currentEvents: Trigger[]): string[] {
   interface Event {
     at: string;
     line: string;

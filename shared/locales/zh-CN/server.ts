@@ -165,6 +165,7 @@ export const server: Translation<typeof en> = {
     approvalInFlight: "正在提交此请求的决定。",
     approvalFailed: "未能确认 Worker 已收到你的决定：{{error}}。请在 Paseo 中打开 Worker 会话查看当前状态。",
     resendNotFailed: "只有发送失败的答复可以补发",
+    resendOutsideConversation: "这条答复无法通过会话隔离检查，不能补发",
     resendFailed: "补发失败,进度已保留。请检查 IM 连接或回复窗口是否过期",
     resendIncomplete: "答复尚未全部发送,进度已保留,请稍后查看运行状态",
   },

@@ -4,7 +4,7 @@ Superagent turns Paseo into an event-driven orchestrator. The Router evaluates m
 
 ## How it works
 
-- **Router.** Each evaluation provides new messages, thread memory, and ticket state. The model returns a structured verdict and may recall existing records.
+- **Router.** Each evaluation provides new messages, thread memory, and ticket state. The model returns a structured verdict and may recall records from the current conversation, including earlier days of the same IM chat.
 - **Workers.** Each ticket starts a Paseo Worker. Named profiles can specify models, permissions, or working directories. Open Workers from the Superagent Tasks sidebar.
 - **Direct delivery.** While a Worker is subscribed to a conversation, follow-up messages go straight to it without a model call.
 - **Watchdog.** A built-in check runs every 15 seconds to recover missed completions, stuck launches, timeouts and pending actions, including after a daemon restart. An optional LLM watchdog reviews task progress on an interval.
@@ -27,7 +27,7 @@ The interface is in English, or in Simplified Chinese when Paseo is set to Simpl
 - Enabled IM channels open connections to the Feishu Open Platform, DingTalk Stream, WeCom bot service or `ilinkai.weixin.qq.com`, or to the NapCat WebSocket you specify. Attachments are downloaded to the inbox directory on the daemon host (100 MB per file). Archives are listed but not extracted; listing `.7z`/`.rar` uses the `7z` command if it is installed.
 - The plugin runs a local MCP server on `127.0.0.1` with a random port and secret path to give its own sessions their tools.
 - The chat page can preview any absolute path linked from a reply, read-only and size-limited, through the daemon.
-- The Router and LLM watchdog send explicit context and read-only orchestration recall results to the inference API. The plugin validates and applies the verdicts.
+- The Router sends conversation-scoped context and recall results to the inference API. The optional watchdog sends operational context across conversations. Its detailed findings are shown in Paseo. The plugin validates and applies the verdicts.
 - Workers act with the permissions of their provider and mode.
 - Only you approve a Worker's tool, plan or mode request. Superagent posts each request, quoted from the provider, to the conversation that started the task (the chat page, or the IM chat or agent session it came from) with a short code. The Worker stays paused until you send `/approve <code>` or `/deny <code> [reason]`, or answer it in the Worker's session in Paseo. An approval allows that one request once.
 - You can approve from the chat page, the `/superagent` slash command, or the Worker’s Paseo session. In IM, approval is available once Superagent delivers the specific request to the original chat, subject to the channel allowlist. In Feishu groups, text approval commands must mention the bot.

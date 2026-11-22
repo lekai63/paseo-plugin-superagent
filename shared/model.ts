@@ -57,6 +57,7 @@ export const TRIGGER_STATUSES = ["pending", "filtered", "evaluated", "delivered"
 export type TriggerStatus = (typeof TRIGGER_STATUSES)[number];
 
 export const TriggerSchema = z.object({
+  preConversationIsolation: z.literal(true).optional(),
   id: z.string().min(1),
   kind: TriggerKindSchema,
   /** 产生者标识:用户名、`agent:<agentId>`、`worker:<ticketId>`。 */
@@ -96,6 +97,7 @@ export type ThreadState = (typeof THREAD_STATES)[number];
 
 /** 最近一次对人的答复/汇报,随线程保留,不依赖 Worker 会话或活动窗口。 */
 export const ThreadResultSchema = z.object({
+  preConversationIsolation: z.literal(true).optional(),
   id: z.string(),
   kind: z.enum(["router_reply", "worker_report"]),
   text: z.string(),
@@ -144,6 +146,7 @@ export const ThreadSchema = z.object({
   state: z.enum(THREAD_STATES),
   /** Router 维护的一句话摘要,供下次评估的上下文存根。 */
   summary: z.string().nullish(),
+  summaryHostOnly: z.literal(true).optional(),
   latestResult: ThreadResultSchema.nullish(),
   lastActivityAt: z.string().optional(),
   evalRetry: z.object({
@@ -153,6 +156,7 @@ export const ThreadSchema = z.object({
   }).optional(),
   router: ThreadRouterSchema.nullish(),
   routerMemory: RouterMemorySchema.optional(),
+  routerMemoryHostOnly: z.literal(true).optional(),
   /** 仅 IM 入站按该日期和渠道会话分流;旧任务的汇报仍回原线程。 */
   imDay: z.string().optional(),
   imConversationKey: z.string().optional(),
@@ -215,6 +219,7 @@ export function canRespondToWorkerPermission(request: WorkerRequest, behavior: "
 }
 
 export const TicketSchema = z.object({
+  preConversationIsolation: z.literal(true).optional(),
   id: z.string().min(1),
   threadId: z.string().min(1),
   title: z.string().min(1),
@@ -277,6 +282,7 @@ export const DECISION_OUTCOMES = [
 export type DecisionOutcome = (typeof DECISION_OUTCOMES)[number];
 
 export const DecisionSchema = z.object({
+  preConversationIsolation: z.literal(true).optional(),
   id: z.string().min(1),
   threadId: z.string().min(1),
   /** 本批裁决覆盖的 Trigger(批处理:一次 LLM 调用吃掉整批)。 */
@@ -415,6 +421,7 @@ export function dispatchMandateIssue(mandate: string): string | null {
  * dispatch 的补执行由 pending 票据 + 看门狗承担,不在此列。
  */
 export const PendingActionSchema = z.object({
+  preConversationIsolation: z.literal(true).optional(),
   id: z.string().min(1),
   threadId: z.string().min(1),
   /** 关联的 Decision(审计与失败备注定位)。 */
@@ -436,6 +443,7 @@ export type PendingAction = z.infer<typeof PendingActionSchema>;
 
 /** IM 答复先落盘;逐段确认后推进 nextPart,失败后从该位置补发。 */
 export const ImDeliverySchema = z.object({
+  preConversationIsolation: z.literal(true).optional(),
   id: z.string(),
   threadId: z.string(),
   origin: TriggerOriginSchema,
@@ -493,6 +501,7 @@ export const SuperagentStateSchema = z.object({
     /** 对话页打开着的标签;从未保存过时为空,快照按界面发起的对话给出初始标签。 */
     chatTabs: ChatTabsSchema.nullish(),
     watchdog: WatchdogStateSchema.nullish(),
+    conversationIsolation: z.literal(true).optional(),
     /** 最近一次客户端上报的界面语言;daemon 生成的文字用它,从未上报时为英文。 */
     language: z.enum(["en", "zh-CN"]).nullish(),
   }),

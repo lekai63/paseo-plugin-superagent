@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { migrateConversationIsolation } from "./conversation";
 import { emptyState, SuperagentStateSchema, type SuperagentState } from "../shared/model";
 
 /** 关闭态历史保留上限;活跃队列(pending/running)永不裁剪。 */
@@ -43,7 +44,10 @@ export class SuperagentStore {
   readonly ready: Promise<void>;
 
   constructor() {
-    this.ready = this.load().then(() => this.changed());
+    this.ready = this.load().then(() => {
+      migrateConversationIsolation(this.state);
+      this.changed();
+    });
   }
 
   /** 内存状态每次替换后同步回调(落盘之前);返回取消函数。 */
